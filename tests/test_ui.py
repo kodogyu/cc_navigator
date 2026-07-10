@@ -507,3 +507,36 @@ class SettingsUiTest(unittest.TestCase):
             self.assertFalse(wiring.launcher_installed(apps))
         finally:
             window.destroy()
+
+    def test_settings_dialog_survives_a_corrupt_autostart_file(self):
+        # A non-UTF-8 autostart .desktop makes autostart_enabled's reader raise
+        # if unguarded; make_toggle must swallow it so the ENTIRE dialog still
+        # builds (else the gear opens nothing and every setting is unreachable).
+        import tempfile, pathlib
+        from ccnav import config, wiring
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, settings=config.Settings())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        autostart = pathlib.Path(tmp.name)
+        (autostart / (wiring.APP_ID + ".desktop")).write_bytes(b"\xff\xfe corrupt \x80")
+        window._wiring_autostart_dir = autostart
+        try:
+            dialog = window._build_settings_dialog()  # must not raise
+            self.assertIsNotNone(dialog)
+            dialog.destroy()
+        finally:
+            window.destroy()
+
+    def test_cc_exec_path_points_at_an_existing_launcher(self):
+        # The launcher/autostart .desktop Exec must resolve to a real file, not
+        # the ~/.local/bin symlink that only ./install creates.
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, settings=config.Settings())
+        try:
+            exec_path = window._cc_exec_path()
+            self.assertTrue(exec_path.endswith("/bin/cc-navigator"))
+            self.assertTrue(os.path.exists(exec_path), exec_path)
+        finally:
+            window.destroy()

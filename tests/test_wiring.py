@@ -55,6 +55,12 @@ class AutostartTest(unittest.TestCase):
     def test_absent_is_not_enabled(self):
         self.assertFalse(wiring.autostart_enabled(self.dir))
 
+    def test_non_utf8_autostart_file_is_not_enabled_not_raise(self):
+        # A corrupt (non-UTF-8) autostart .desktop must read as "not enabled",
+        # never raise -- the settings dialog reads this on every open.
+        (self.dir / (wiring.APP_ID + ".desktop")).write_bytes(b"\xff\xfe bad \x80")
+        self.assertFalse(wiring.autostart_enabled(self.dir))  # must not raise
+
 
 import json
 
@@ -164,3 +170,28 @@ class HooksMergeTest(unittest.TestCase):
         self.assertTrue(wiring.remove_hooks(self.cmd, self.path))
         data = json.loads(self.path.read_text())
         self.assertEqual(data["hooks"]["Stop"], [{"matcher": "foo", "hooks": []}])
+
+    def test_remove_keeps_an_untouched_empty_foreign_event(self):
+        # A foreign event mapped to [] that we never touch must survive a remove
+        # triggered by another event -- the event-level prune must fire only for
+        # an event WE emptied, mirroring the group-level guard.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"hooks": {
+            "PostToolUse": [],
+            "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": self.cmd}]}]}}))
+        self.assertTrue(wiring.remove_hooks(self.cmd, self.path))
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["hooks"].get("PostToolUse"), [])  # untouched foreign event kept
+        self.assertNotIn("Stop", data["hooks"])                 # our-only event pruned
+
+    def test_reinstalling_an_installed_hook_set_writes_no_new_backup(self):
+        # An idempotent install must not rewrite settings.json or drop another
+        # settings.json.bak-* -- else re-opening the dialog spams ~/.claude.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("{}")
+        wiring.install_hooks(self.cmd, self.path)        # first: writes + 1 backup
+        first = json.loads(self.path.read_text())
+        self.assertEqual(len(list(self.path.parent.glob("settings.json.bak-*"))), 1)
+        wiring.install_hooks(self.cmd, self.path)        # already installed: no-op
+        self.assertEqual(len(list(self.path.parent.glob("settings.json.bak-*"))), 1)
+        self.assertEqual(json.loads(self.path.read_text()), first)

@@ -89,7 +89,10 @@ def autostart_enabled(autostart_dir: Optional[pathlib.Path] = None) -> bool:
     path = autostart_path(autostart_dir)
     try:
         text = path.read_text()
-    except OSError:
+    except (OSError, ValueError):
+        # OSError: missing/unreadable. ValueError: read_text() raises
+        # UnicodeDecodeError (a ValueError) on a non-UTF-8 .desktop -- a corrupt
+        # file must read as "not enabled", not raise into the settings dialog.
         return False
     # Present counts as enabled unless the GNOME key explicitly disables it.
     return "X-GNOME-Autostart-enabled=false" not in text
@@ -185,6 +188,7 @@ def install_hooks(hook_command: str, settings_path: pathlib.Path) -> None:
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
+    changed = False
     for event, matcher in RECOMMENDED_HOOKS.items():
         groups = hooks.get(event)
         if not isinstance(groups, list):
@@ -192,9 +196,14 @@ def install_hooks(hook_command: str, settings_path: pathlib.Path) -> None:
         ours = any(_group_has(hook_command, g) for g in groups)
         if not ours:
             groups.append(_our_entry(hook_command, matcher))
+            changed = True
         hooks[event] = groups
     data["hooks"] = hooks
-    _write_settings(settings_path, data)
+    # Skip the write (and its backup) when every event already holds our entry:
+    # a settings dialog that re-installs an already-installed hook set must not
+    # rewrite settings.json or leave a fresh settings.json.bak-* behind.
+    if changed:
+        _write_settings(settings_path, data)
 
 
 def remove_hooks(hook_command: str, settings_path: pathlib.Path) -> bool:
@@ -208,6 +217,7 @@ def remove_hooks(hook_command: str, settings_path: pathlib.Path) -> bool:
         if not isinstance(groups, list):
             continue
         new_groups = []
+        removed_from_event = False
         for g in groups:
             if not isinstance(g, dict) or not isinstance(g.get("hooks"), list):
                 new_groups.append(g)
@@ -217,6 +227,7 @@ def remove_hooks(hook_command: str, settings_path: pathlib.Path) -> bool:
             removed_here = len(kept) != len(g["hooks"])
             if removed_here:
                 changed = True
+                removed_from_event = True
             # Drop a group only when removing OUR command is what emptied it.
             # A group that was ALREADY empty (foreign structure we touched
             # nothing in) must survive, or a plain remove silently deletes it.
@@ -226,7 +237,10 @@ def remove_hooks(hook_command: str, settings_path: pathlib.Path) -> bool:
                 new_groups.append(new)
         if new_groups:
             hooks[event] = new_groups
-        else:
+        elif removed_from_event:
+            # Same rule at the event level: prune an event only when WE emptied
+            # it. A foreign event that was already [] (or that we never touched)
+            # must be left exactly as it was.
             del hooks[event]
     if not hooks:
         data.pop("hooks", None)

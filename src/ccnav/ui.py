@@ -15,7 +15,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, model, paths, wiring  # noqa: E402
+from . import config, model, wiring  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -198,7 +198,11 @@ class NavigatorWindow(Gtk.Window):
         else:
             self.unstick()
 
-        self.resize(settings.width, settings.height)
+        # Honour a live collapse: applying a settings change while collapsed
+        # must not re-grow the frame over the still-hidden body (which would
+        # leave a tall, empty titlebar while the toggle still reads "collapsed").
+        height = 1 if self._collapse_button.get_active() else settings.height
+        self.resize(settings.width, height)
         self._apply_geometry(settings)
         Gtk.Widget.set_opacity(self, settings.opacity)
         self._apply_css(settings)
@@ -273,7 +277,14 @@ class NavigatorWindow(Gtk.Window):
         dialog.destroy()
 
     def _cc_exec_path(self) -> str:
-        return os.path.join(os.path.expanduser("~"), ".local", "bin", "cc-navigator")
+        # The repo's own launcher, resolved absolutely -- the same basis as
+        # _hook_command. The .desktop Exec must point here, NOT at the
+        # ~/.local/bin/cc-navigator symlink that only the optional ./install
+        # creates: otherwise ticking the launcher/autostart toggles after the
+        # documented `./bin/cc-navigator` run writes a desktop entry whose Exec
+        # does not exist, yet reports installed -- a silent-success dead link.
+        import pathlib
+        return str(pathlib.Path(__file__).resolve().parents[2] / "bin" / "cc-navigator")
 
     def _settings_json_path(self):
         import pathlib
@@ -439,19 +450,29 @@ class NavigatorWindow(Gtk.Window):
         row += 1
 
         from . import __version__
-        footer = Gtk.Label(label="cc-navigator v%s" % __version__, xalign=1.0)
+        # Same format as `cc-navigator --version` (app.main), so the CLI and the
+        # dialog never disagree on how the version line reads.
+        footer = Gtk.Label(label="cc-navigator %s" % __version__, xalign=1.0)
         footer.get_style_context().add_class("dim-label")
         content.add(footer)
 
         # Integration: reflect the current on-disk wiring state and let each
-        # toggle install/remove it. A failing setter must never crash the panel,
-        # so make_toggle catches everything and reports it in a shared label.
+        # toggle install/remove it. BOTH the initial state read (is_on) and the
+        # setter run under try/except: a corrupt on-disk file (e.g. a non-UTF-8
+        # autostart .desktop) must not abort the whole dialog build -- if that
+        # read escaped, opening the gear would raise and the entire settings
+        # surface (font, opacity, colour, geometry, hooks) would be unreachable.
         integ_status = Gtk.Label(xalign=0.0)
         integ_status.set_line_wrap(True)
 
         def make_toggle(label_text, is_on, setter):
             btn = Gtk.CheckButton(label=label_text)
-            btn.set_active(is_on())
+            try:
+                active = is_on()
+            except Exception as exc:  # noqa: BLE001 -- a bad on-disk file must not sink the dialog
+                active = False
+                integ_status.set_text("상태 확인 실패: %s" % exc)
+            btn.set_active(active)
             def on_toggle(w):
                 try:
                     setter(w.get_active())
