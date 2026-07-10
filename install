@@ -1,0 +1,15 @@
+#!/bin/sh
+# Put cc-navigator on PATH: symlink the launcher into ~/.local/bin. Idempotent.
+# The app-list launcher, login autostart, and Claude Code hook wiring are NOT
+# done here -- they are toggles inside the app's settings (see wiring.py).
+set -e
+here=$(cd "$(dirname "$0")" && pwd)
+target="$here/bin/cc-navigator"
+bindir="${HOME}/.local/bin"
+mkdir -p "$bindir"
+ln -sf "$target" "$bindir/cc-navigator"
+echo "installed: $bindir/cc-navigator -> $target"
+case ":$PATH:" in
+  *":$bindir:"*) ;;
+  *) echo "note: $bindir is not on your PATH; add it to run 'cc-navigator' directly." ;;
+esac
