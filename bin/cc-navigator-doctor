@@ -1,0 +1,14 @@
+#!/bin/sh
+# /usr/bin/python3 is mandatory: `which python3` is Anaconda and has no PyGObject.
+# Resolve $0 through any symlinks first -- the same fix bin/cc-navigator needs:
+# `dirname "$0"` alone yields the symlink's own directory, so a link on $PATH
+# would point PYTHONPATH at a nonexistent src/ and the import would fail.
+#
+# The doctor is run by the user directly: it execs and does not swallow stderr,
+# and its exit code passes straight up so a failed REQUIRED check is visible to
+# whatever ran it.
+set -e
+target=$(readlink -f "$0" 2>/dev/null) || target=$0
+[ -n "$target" ] || target=$0
+here=$(cd "$(dirname "$target")" && pwd)
+PYTHONPATH="$here/../src${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m ccnav.doctor
