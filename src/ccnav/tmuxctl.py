@@ -41,3 +41,35 @@ def sessions_by_pane(socket: str, run: Runner = run_command) -> Dict[str, str]:
 
 def titles_by_pane(socket: str, run: Runner = run_command) -> Dict[str, str]:
     return _query(socket, "#{pane_id}=#{pane_title}", run)
+
+
+def select_argvs(socket: str, pane: str) -> List[List[str]]:
+    """switch-client is best effort: it fails when no client is attached."""
+    return [
+        ["tmux", "-S", socket, "switch-client", "-t", pane],
+        ["tmux", "-S", socket, "select-window", "-t", pane],
+        ["tmux", "-S", socket, "select-pane", "-t", pane],
+    ]
+
+
+def send_text_argvs(socket: str, pane: str, text: str) -> List[List[str]]:
+    """`-l` and `--` are mandatory.
+
+    Without -l, tmux reads words like 'Enter' and 'C-c' as key names.
+    Without --, text beginning with '-' is parsed as an option.
+    The text travels as one argv element and never touches a shell.
+    """
+    return [
+        ["tmux", "-S", socket, "send-keys", "-t", pane, "-l", "--", text],
+        ["tmux", "-S", socket, "send-keys", "-t", pane, "Enter"],
+    ]
+
+
+def select_pane(socket: str, pane: str, run: Runner = run_command) -> None:
+    for argv in select_argvs(socket, pane):
+        run(argv)
+
+
+def send_text(socket: str, pane: str, text: str, run: Runner = run_command) -> None:
+    for argv in send_text_argvs(socket, pane, text):
+        run(argv)
