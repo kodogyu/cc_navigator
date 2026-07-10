@@ -56,6 +56,29 @@ class ParseMatchCountTest(unittest.TestCase):
         self.assertEqual(gnome.parse_match_count("(false, 'boom')\n"), 0)
 
 
+class EvalJsTest(unittest.TestCase):
+    def test_nonzero_exit_is_failure_even_when_stdout_looks_successful(self):
+        # The stdout of a process that failed is not evidence. Without the
+        # exit-code guard, a gdbus that died after printing would be believed.
+        ok, _ = gnome.eval_js("1+1", run=lambda argv: (1, "(true, '\"matched=1\"')\n"))
+        self.assertFalse(ok)
+
+    def test_zero_exit_with_a_false_result_is_failure(self):
+        ok, _ = gnome.eval_js("1+1", run=lambda argv: (0, "(false, 'boom')\n"))
+        self.assertFalse(ok)
+
+    def test_the_js_travels_as_the_last_argv_element(self):
+        seen = []
+
+        def fake_run(argv):
+            seen.append(list(argv))
+            return 0, "(true, '2')\n"
+
+        gnome.eval_js("1+1", run=fake_run)
+        self.assertEqual(seen[0][0], "gdbus")
+        self.assertEqual(seen[0][-1], "1+1")
+
+
 class EvalAvailableTest(unittest.TestCase):
     def test_detects_a_working_eval(self):
         self.assertTrue(gnome.eval_available(run=lambda argv: (0, "(true, '2')\n")))
