@@ -52,3 +52,60 @@ class AutostartTest(unittest.TestCase):
 
     def test_absent_is_not_enabled(self):
         self.assertFalse(wiring.autostart_enabled(self.dir))
+
+
+import json
+
+
+class HooksMergeTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = pathlib.Path(self._tmp.name) / ".claude" / "settings.json"
+        self.cmd = "/repo/bin/cc-navigator-hook"
+
+    def test_install_creates_every_recommended_event(self):
+        wiring.install_hooks(self.cmd, self.path)
+        self.assertTrue(wiring.hooks_installed(self.cmd, self.path))
+        data = json.loads(self.path.read_text())
+        self.assertEqual(set(data["hooks"]), set(wiring.RECOMMENDED_HOOKS))
+
+    def test_install_preserves_foreign_hooks_and_keys(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({
+            "model": "sonnet",
+            "hooks": {"Stop": [{"matcher": "", "hooks": [
+                {"type": "command", "command": "/other/tool"}]}]},
+        }))
+        wiring.install_hooks(self.cmd, self.path)
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["model"], "sonnet")  # untouched
+        stop_cmds = [h["command"] for g in data["hooks"]["Stop"] for h in g["hooks"]]
+        self.assertIn("/other/tool", stop_cmds)   # foreign kept
+        self.assertIn(self.cmd, stop_cmds)        # ours added
+
+    def test_install_is_idempotent(self):
+        wiring.install_hooks(self.cmd, self.path)
+        wiring.install_hooks(self.cmd, self.path)
+        data = json.loads(self.path.read_text())
+        stop_cmds = [h["command"] for g in data["hooks"]["Stop"] for h in g["hooks"]]
+        self.assertEqual(stop_cmds.count(self.cmd), 1)  # no duplicate
+
+    def test_remove_strips_only_ours_and_prunes(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({
+            "hooks": {"Stop": [{"matcher": "", "hooks": [
+                {"type": "command", "command": "/other/tool"}]}]}}))
+        wiring.install_hooks(self.cmd, self.path)
+        self.assertTrue(wiring.remove_hooks(self.cmd, self.path))
+        data = json.loads(self.path.read_text())
+        stop_cmds = [h["command"] for g in data["hooks"]["Stop"] for h in g["hooks"]]
+        self.assertEqual(stop_cmds, ["/other/tool"])  # only ours removed
+        self.assertNotIn("SessionEnd", data["hooks"])  # our-only event pruned away
+
+    def test_backup_is_written(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text("{}")
+        wiring.install_hooks(self.cmd, self.path)
+        backups = list(self.path.parent.glob("settings.json.bak-*"))
+        self.assertEqual(len(backups), 1)

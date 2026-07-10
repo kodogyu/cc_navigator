@@ -9,9 +9,11 @@ node-jsonc-parser style) -- see the spec's section 5.6.
 """
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import tempfile
+import time
 from typing import Optional
 
 APP_ID = "io.github.kodogyu.CcNavigator"
@@ -95,3 +97,109 @@ def set_autostart(
     flag = "true" if enabled else "false"
     text = _DESKTOP % {"exec": exec_path} + "X-GNOME-Autostart-enabled=%s\n" % flag
     _atomic_write(autostart_path(autostart_dir), text)
+
+
+# The canonical hook set: event -> matcher. "" is an empty (match-all) matcher.
+# One source of truth so doctor's check and this installer cannot drift.
+RECOMMENDED_HOOKS = {
+    "SessionStart": "",
+    "UserPromptSubmit": "",
+    "Notification": "",
+    "Stop": "",
+    "SessionEnd": "",
+    "PreToolUse": "AskUserQuestion|ExitPlanMode",
+}
+
+
+def _load_settings(settings_path: pathlib.Path) -> dict:
+    try:
+        data = json.loads(settings_path.read_text())
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _our_entry(hook_command: str, matcher: str) -> dict:
+    return {"matcher": matcher, "hooks": [{"type": "command", "command": hook_command}]}
+
+
+def _group_has(hook_command: str, group) -> bool:
+    """True iff `group` is a well-formed matcher group containing our command."""
+    if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+        return False
+    return any(
+        isinstance(h, dict) and h.get("command") == hook_command
+        for h in group["hooks"]
+    )
+
+
+def hooks_installed(hook_command: str, settings_path: pathlib.Path) -> bool:
+    hooks = _load_settings(settings_path).get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for event in RECOMMENDED_HOOKS:
+        groups = hooks.get(event)
+        if not isinstance(groups, list) or not any(
+            _group_has(hook_command, g) for g in groups
+        ):
+            return False
+    return True
+
+
+def _write_settings(settings_path: pathlib.Path, data: dict) -> None:
+    if settings_path.exists():
+        backup = settings_path.with_name(
+            settings_path.name + ".bak-%d" % int(time.time()))
+        _atomic_write(backup, settings_path.read_text())
+    _atomic_write(settings_path, json.dumps(data, indent=2))
+
+
+def install_hooks(hook_command: str, settings_path: pathlib.Path) -> None:
+    data = _load_settings(settings_path)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+    for event, matcher in RECOMMENDED_HOOKS.items():
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            groups = []
+        ours = any(_group_has(hook_command, g) for g in groups)
+        if not ours:
+            groups.append(_our_entry(hook_command, matcher))
+        hooks[event] = groups
+    data["hooks"] = hooks
+    _write_settings(settings_path, data)
+
+
+def remove_hooks(hook_command: str, settings_path: pathlib.Path) -> bool:
+    data = _load_settings(settings_path)
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    changed = False
+    for event in list(hooks):
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        new_groups = []
+        for g in groups:
+            if not isinstance(g, dict) or not isinstance(g.get("hooks"), list):
+                new_groups.append(g)
+                continue
+            kept = [h for h in g["hooks"]
+                    if not (isinstance(h, dict) and h.get("command") == hook_command)]
+            if len(kept) != len(g["hooks"]):
+                changed = True
+            if kept:
+                new = dict(g)
+                new["hooks"] = kept
+                new_groups.append(new)
+        if new_groups:
+            hooks[event] = new_groups
+        else:
+            del hooks[event]
+    if not hooks:
+        data.pop("hooks", None)
+    if changed:
+        _write_settings(settings_path, data)
+    return changed
