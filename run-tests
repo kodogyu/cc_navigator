@@ -1,5 +1,13 @@
 #!/bin/sh
 # cc_navigator test runner. /usr/bin/python3 is mandatory: `which python3` is
 # Anaconda and has no PyGObject.
+#
+# PYTHONDONTWRITEBYTECODE is not tidiness. CPython invalidates a .pyc on
+# (mtime, size), so a mutation that preserves both -- swapping two equal-length
+# strings, restoring a file within the same second -- runs against stale
+# bytecode and the suite reports OK for code that is not on disk. Mutation
+# testing is how this project verifies its own tests; it must not be able to
+# lie. Reproduced, then closed here.
 set -e
-exec env PYTHONPATH=src /usr/bin/python3 -m unittest discover -s tests -v "$@"
+exec env PYTHONPATH=src PYTHONDONTWRITEBYTECODE=1 \
+    /usr/bin/python3 -m unittest discover -s tests -v "$@"
