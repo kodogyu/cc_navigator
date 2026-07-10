@@ -1,0 +1,5 @@
+#!/bin/sh
+# cc_navigator test runner. /usr/bin/python3 is mandatory: `which python3` is
+# Anaconda and has no PyGObject.
+set -e
+exec env PYTHONPATH=src /usr/bin/python3 -m unittest discover -s tests -v "$@"
