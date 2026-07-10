@@ -15,7 +15,7 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, model  # noqa: E402
+from . import config, model, paths, wiring  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -96,6 +96,11 @@ class NavigatorWindow(Gtk.Window):
         # None so the very first set_rows always renders; thereafter it holds the
         # signature of the rows on screen so an unchanged tick is a no-op.
         self._signature = None
+        # Wiring seams: None -> the wiring module's real defaults (HOME-relative).
+        # Tests redirect these at temp dirs so the toggles never touch real state.
+        self._wiring_apps_dir = None      # None -> wiring's default (~/.local/share)
+        self._wiring_autostart_dir = None
+        self._wiring_settings_path = None  # None -> ~/.claude/settings.json
 
         # A HeaderBar so a settings gear can sit next to the window close button,
         # as asked. This makes the titlebar client-side (GTK-drawn) rather than
@@ -267,6 +272,33 @@ class NavigatorWindow(Gtk.Window):
         dialog.run()
         dialog.destroy()
 
+    def _cc_exec_path(self) -> str:
+        return os.path.join(os.path.expanduser("~"), ".local", "bin", "cc-navigator")
+
+    def _settings_json_path(self):
+        import pathlib
+        return self._wiring_settings_path or (
+            pathlib.Path(os.path.expanduser("~")) / ".claude" / "settings.json")
+
+    def _hook_command(self) -> str:
+        import pathlib
+        return str(pathlib.Path(__file__).resolve().parents[2] / "bin" / "cc-navigator-hook")
+
+    def _set_launcher(self, on: bool) -> None:
+        if on:
+            wiring.install_launcher(self._cc_exec_path(), self._wiring_apps_dir)
+        else:
+            wiring.remove_launcher(self._wiring_apps_dir)
+
+    def _set_autostart(self, on: bool) -> None:
+        wiring.set_autostart(on, self._cc_exec_path(), self._wiring_autostart_dir)
+
+    def _set_hooks(self, on: bool) -> None:
+        if on:
+            wiring.install_hooks(self._hook_command(), self._settings_json_path())
+        else:
+            wiring.remove_hooks(self._hook_command(), self._settings_json_path())
+
     def _build_settings_dialog(self) -> Gtk.Dialog:
         """A live-apply settings dialog: every control writes straight through
         _commit_settings, so the panel updates as the user drags, and there is
@@ -410,6 +442,43 @@ class NavigatorWindow(Gtk.Window):
         footer = Gtk.Label(label="cc-navigator v%s" % __version__, xalign=1.0)
         footer.get_style_context().add_class("dim-label")
         content.add(footer)
+
+        # Integration: reflect the current on-disk wiring state and let each
+        # toggle install/remove it. A failing setter must never crash the panel,
+        # so make_toggle catches everything and reports it in a shared label.
+        integ_status = Gtk.Label(xalign=0.0)
+        integ_status.set_line_wrap(True)
+
+        def make_toggle(label_text, is_on, setter):
+            btn = Gtk.CheckButton(label=label_text)
+            btn.set_active(is_on())
+            def on_toggle(w):
+                try:
+                    setter(w.get_active())
+                except Exception as exc:  # noqa: BLE001 -- a toggle must never crash the panel
+                    integ_status.set_text("설정 변경 실패: %s" % exc)
+            btn.connect("toggled", on_toggle)
+            return btn
+
+        integ = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        integ.add(make_toggle(
+            "앱 목록에 등록",
+            lambda: wiring.launcher_installed(self._wiring_apps_dir),
+            self._set_launcher))
+        integ.add(make_toggle(
+            "로그인 시 자동 실행",
+            lambda: wiring.autostart_enabled(self._wiring_autostart_dir),
+            self._set_autostart))
+        integ.add(make_toggle(
+            "Claude Code 훅 설정",
+            lambda: wiring.hooks_installed(self._hook_command(), self._settings_json_path()),
+            self._set_hooks))
+        integ.add(integ_status)
+
+        frame = Gtk.Frame(label="통합")
+        frame.add(integ)
+        content.add(frame)
+        content.reorder_child(footer, -1)  # keep the version line at the very bottom
 
         dialog.show_all()
         return dialog

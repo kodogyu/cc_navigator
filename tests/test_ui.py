@@ -488,3 +488,22 @@ class SettingsUiTest(unittest.TestCase):
         finally:
             config.config_path = orig
             window.destroy()
+
+    def test_wiring_frame_reflects_and_toggles_launcher(self):
+        import tempfile, pathlib
+        from ccnav import config, wiring
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, settings=config.Settings())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        apps = pathlib.Path(tmp.name)
+        # Point the window's wiring helpers at a temp dir via its hook seam.
+        window._wiring_apps_dir = apps
+        try:
+            self.assertFalse(wiring.launcher_installed(apps))
+            window._set_launcher(True)
+            self.assertTrue(wiring.launcher_installed(apps))
+            window._set_launcher(False)
+            self.assertFalse(wiring.launcher_installed(apps))
+        finally:
+            window.destroy()
