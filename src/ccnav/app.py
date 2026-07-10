@@ -21,8 +21,11 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
-from . import gnome, model, paths, proc, statestore, tmuxctl, ui  # noqa: E402
+from . import config, gnome, model, paths, proc, statestore, tmuxctl, ui  # noqa: E402
 
+# Fallback only: the live interval comes from self._settings.poll_seconds. Kept
+# so a bare Application built in a test (which does not load config) still polls
+# at a sane rate before a settings object is attached.
 POLL_SECONDS = 1
 
 # Eval("1+1") is a local D-Bus round trip and answers in milliseconds. The probe
@@ -138,7 +141,13 @@ class Application:
         # tested with a collector that raises, without GTK or a real tmux.
         self._collect = collect
         self.state_dir = paths.ensure_state_dir()
-        self.window = ui.NavigatorWindow(on_jump=self.jump, on_send=self.send)
+        self._settings = config.load()
+        self.window = ui.NavigatorWindow(
+            on_jump=self.jump,
+            on_send=self.send,
+            settings=self._settings,
+            on_settings_changed=self._on_settings_changed,
+        )
         self.window.set_eval_available(probe_eval())
 
         self._jumping = set()  # type: Set[str]  # session ids with a jump in flight
@@ -181,7 +190,14 @@ class Application:
                 # on an unchanged string is idempotent and cheap, so a counter
                 # or backoff would be complexity with no payoff.
                 GLib.idle_add(self._apply_poll_error, str(exc))
-            self._wake.wait(POLL_SECONDS)
+            # Read the interval fresh every tick: a settings change replaces
+            # self._settings atomically (frozen dataclass, single reference
+            # swap on the GTK thread) and wakes us, so the next wait already
+            # uses the new period. getattr guards a bare test Application that
+            # never attached a settings object.
+            settings = getattr(self, "_settings", None)
+            interval = settings.poll_seconds if settings is not None else POLL_SECONDS
+            self._wake.wait(interval)
             self._wake.clear()
 
     def _apply_rows(self, collected: Collected) -> bool:
@@ -194,6 +210,14 @@ class Application:
     def _apply_poll_error(self, message: str) -> bool:
         self.window.set_status("세션 목록을 새로 고치지 못했습니다: " + message)
         return False  # one-shot idle source; True would re-run it forever
+
+    def _on_settings_changed(self, settings: config.Settings) -> None:
+        """Called on the GTK thread when the dialog commits a change. The window
+        already applied the visual part; here we only adopt the new interval and
+        wake the poll thread so it does not wait out the old period first. The
+        window itself persisted the file, so there is nothing to save here."""
+        self._settings = settings
+        self._wake.set()
 
     def stop(self) -> None:
         """Signal the poll thread to stop and wait for it to actually stop.

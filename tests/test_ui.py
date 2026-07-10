@@ -3,6 +3,9 @@ import unittest
 
 from ccnav import hookstate, model, ui
 
+# ui pins the Gtk version on import above, so this bare import is safe here.
+from gi.repository import Gtk  # noqa: E402
+
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중"):
@@ -263,3 +266,75 @@ class NavigatorWindowTest(unittest.TestCase):
             os.close(saved_fd)
             if tmp_path is not None:
                 tmp_path.close()
+
+
+@unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
+class SettingsUiTest(unittest.TestCase):
+    """The gear/dialog feature. Font CSS and the commit path are asserted; the
+    X11-hint parts (keep-above, sticky, geometry) can only be requested, not
+    reliably read back on an unmapped window, so apply_settings is exercised for
+    'does not raise' and the parts we CAN observe (font, stored settings)."""
+
+    def test_font_size_writes_scoped_css_and_zero_clears_it(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.Settings(font_size=15),
+        )
+        try:
+            # A positive size produces a .ccnav-scoped rule at that size.
+            css = window._css.to_string()
+            self.assertIn("15pt", css)
+            self.assertIn(".ccnav", css)
+
+            # font_size 0 means "system default": the provider is cleared.
+            window._apply_font(0)
+            self.assertNotIn("pt", window._css.to_string())
+        finally:
+            window.destroy()
+
+    def test_the_gear_dialog_builds_with_every_control(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.Settings(),
+        )
+        try:
+            dialog = window._build_settings_dialog()
+            try:
+                self.assertIsInstance(dialog, Gtk.Dialog)
+            finally:
+                dialog.destroy()
+        finally:
+            window.destroy()
+
+    def test_commit_settings_applies_saves_and_notifies(self):
+        import tempfile
+        import pathlib
+        from ccnav import config
+
+        seen = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.Settings(),
+            on_settings_changed=lambda s: seen.append(s),
+        )
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = pathlib.Path(tmp.name) / "config.json"
+        orig_path = config.config_path
+        config.config_path = lambda: path
+        try:
+            new = config.with_updates(config.Settings(), font_size=20, corner="bottom-left")
+            window._commit_settings(new)
+
+            # Applied to the live window...
+            self.assertEqual(window._settings, new)
+            self.assertIn("20pt", window._css.to_string())
+            # ...persisted to disk...
+            self.assertEqual(config.load(path), new)
+            # ...and the owner was told.
+            self.assertEqual(seen, [new])
+        finally:
+            config.config_path = orig_path
+            window.destroy()

@@ -15,7 +15,14 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
 
-from . import model  # noqa: E402
+from . import config, model  # noqa: E402
+
+_CORNER_LABELS = {
+    "top-right": "오른쪽 위",
+    "top-left": "왼쪽 위",
+    "bottom-right": "오른쪽 아래",
+    "bottom-left": "왼쪽 아래",
+}
 
 SECONDARY_LIMIT = 80
 WINDOW_WIDTH = 340
@@ -74,10 +81,14 @@ class NavigatorWindow(Gtk.Window):
         self,
         on_jump: Callable[[model.Row], None],
         on_send: Callable[[model.Row, str], None],
+        settings: "config.Settings" = None,
+        on_settings_changed: Callable[["config.Settings"], None] = None,
     ) -> None:
         super().__init__(title="cc_navigator")
         self._on_jump = on_jump
         self._on_send = on_send
+        self._on_settings_changed = on_settings_changed
+        self._settings = settings or config.Settings()
         self._eval_available = True
         self._sticky = ""
         self._hint = ""
@@ -86,17 +97,33 @@ class NavigatorWindow(Gtk.Window):
         # signature of the rows on screen so an unchanged tick is a no-op.
         self._signature = None
 
-        self.set_keep_above(True)
-        # stick(): appear on EVERY workspace, not just the one it was created on.
-        # keep_above alone floats it above other windows but only within its own
-        # workspace, so switching workspaces would lose the panel. The panel's
-        # whole job is to be reachable from any workspace, so it must be sticky.
-        self.stick()
+        # A HeaderBar so a settings gear can sit next to the window close button,
+        # as asked. This makes the titlebar client-side (GTK-drawn) rather than
+        # the WM default, which is the price of putting our own button up there.
+        header = Gtk.HeaderBar()
+        header.set_show_close_button(True)
+        header.set_title("cc_navigator")
+        gear = Gtk.Button()
+        gear.set_relief(Gtk.ReliefStyle.NONE)
+        gear.add(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
+        gear.set_tooltip_text("설정")
+        gear.connect("clicked", self._on_settings_clicked)
+        header.pack_end(gear)
+        self.set_titlebar(header)
+
+        # Font override lives in a CSS provider scoped to this window by a class,
+        # so changing the panel's font size never touches any other application.
+        self.get_style_context().add_class("ccnav")
+        self._css = Gtk.CssProvider()
+        screen = Gdk.Screen.get_default()
+        if screen is not None:
+            Gtk.StyleContext.add_provider_for_screen(
+                screen, self._css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+            )
+
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
         self.set_type_hint(Gdk.WindowTypeHint.UTILITY)
-        self.set_default_size(WINDOW_WIDTH, WINDOW_HEIGHT)
-        self._move_to_top_right()
 
         self._listbox = Gtk.ListBox()
         self._listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
@@ -115,14 +142,38 @@ class NavigatorWindow(Gtk.Window):
         self.add(box)
         # No destroy -> Gtk.main_quit here: app.main() owns the main loop.
 
-    def _move_to_top_right(self) -> None:
-        """Position in the top-right of the primary monitor.
+        # Apply the saved settings once everything exists: this sets size,
+        # position, keep-above/sticky and font from one place, so the very
+        # first paint already reflects the user's config rather than defaults.
+        self.apply_settings(self._settings)
 
-        Gdk.Screen.get_width() is deprecated and prints a DeprecationWarning on
-        every run; monitor geometry is the supported path. Every lookup can
-        return None on an odd display setup, so guard each step and simply skip
-        the move if anything is unavailable -- a window in the wrong place is a
-        nuisance, a NoneType traceback at startup is a dead program.
+    def apply_settings(self, settings: "config.Settings") -> None:
+        """Make the live window match `settings`. Idempotent, so it serves both
+        the first paint and every later change from the settings dialog."""
+        self._settings = settings
+
+        self.set_keep_above(settings.keep_above)
+        # stick(): appear on EVERY workspace, not just the one it was created on.
+        # keep_above alone floats it above other windows but only within its own
+        # workspace, so switching workspaces would lose the panel. unstick()
+        # reverses it when the user turns the option off.
+        if settings.all_workspaces:
+            self.stick()
+        else:
+            self.unstick()
+
+        self.resize(settings.width, settings.height)
+        self._apply_geometry(settings)
+        self._apply_font(settings.font_size)
+
+    def _apply_geometry(self, settings: "config.Settings") -> None:
+        """Pin the window to the chosen corner of the primary monitor.
+
+        Every lookup can return None on an odd display setup, so guard each step
+        and simply skip the move if anything is unavailable -- a window in the
+        wrong place is a nuisance, a NoneType traceback at startup is a dead
+        program. Gdk.Screen.get_width() is deprecated (prints a warning every
+        run); monitor geometry is the supported path.
         """
         display = Gdk.Display.get_default()
         if display is None:
@@ -131,7 +182,151 @@ class NavigatorWindow(Gtk.Window):
         if monitor is None:
             return
         geo = monitor.get_geometry()
-        self.move(geo.x + geo.width - WINDOW_WIDTH - 20, geo.y + 40)
+        margin = 20
+        top = geo.y + margin + 20  # a little extra below the top bar
+        bottom = geo.y + geo.height - settings.height - margin
+        left = geo.x + margin
+        right = geo.x + geo.width - settings.width - margin
+        positions = {
+            "top-right": (right, top),
+            "top-left": (left, top),
+            "bottom-right": (right, bottom),
+            "bottom-left": (left, bottom),
+        }
+        x, y = positions.get(settings.corner, positions["top-right"])
+        self.move(x, y)
+
+    def _apply_font(self, font_size: int) -> None:
+        """Scale the panel's font via its scoped CSS provider. font_size 0 means
+        'do not override', so we clear the provider and the system font returns."""
+        if font_size <= 0:
+            self._css.load_from_data(b"")
+            return
+        css = ".ccnav, .ccnav * { font-size: %dpt; }" % font_size
+        self._css.load_from_data(css.encode("utf-8"))
+
+    def _on_settings_clicked(self, _button) -> None:
+        dialog = self._build_settings_dialog()
+        dialog.run()
+        dialog.destroy()
+
+    def _build_settings_dialog(self) -> Gtk.Dialog:
+        """A live-apply settings dialog: every control writes straight through
+        _commit_settings, so the panel updates as the user drags, and there is
+        no Apply/Cancel to get out of sync with what is on screen. Closing it
+        just dismisses it -- the settings are already saved."""
+        s = self._settings
+        dialog = Gtk.Dialog(title="cc_navigator 설정", transient_for=self, modal=True)
+        dialog.add_button("닫기", Gtk.ResponseType.CLOSE)
+        content = dialog.get_content_area()
+        content.set_spacing(8)
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+
+        grid = Gtk.Grid(column_spacing=12, row_spacing=8)
+        content.add(grid)
+        row = 0
+
+        def add_label(text: str) -> None:
+            label = Gtk.Label(label=text, xalign=0.0)
+            grid.attach(label, 0, row, 1, 1)
+
+        # Polling interval (seconds).
+        add_label("폴링 주기 (초)")
+        poll = Gtk.SpinButton.new_with_range(config.POLL_MIN, config.POLL_MAX, 0.25)
+        poll.set_digits(2)
+        poll.set_value(s.poll_seconds)
+        poll.connect("value-changed", lambda w: self._commit_settings(
+            config.with_updates(self._settings, poll_seconds=w.get_value())))
+        grid.attach(poll, 1, row, 1, 1)
+        row += 1
+
+        # Corner.
+        add_label("창 위치")
+        corner = Gtk.ComboBoxText()
+        for key in config.CORNERS:
+            corner.append(key, _CORNER_LABELS[key])
+        corner.set_active_id(s.corner)
+        corner.connect("changed", lambda w: self._commit_settings(
+            config.with_updates(self._settings, corner=w.get_active_id() or self._settings.corner)))
+        grid.attach(corner, 1, row, 1, 1)
+        row += 1
+
+        # Width / height.
+        add_label("창 너비 (px)")
+        width = Gtk.SpinButton.new_with_range(config.WIDTH_MIN, config.WIDTH_MAX, 10)
+        width.set_value(s.width)
+        width.connect("value-changed", lambda w: self._commit_settings(
+            config.with_updates(self._settings, width=int(w.get_value()))))
+        grid.attach(width, 1, row, 1, 1)
+        row += 1
+
+        add_label("창 높이 (px)")
+        height = Gtk.SpinButton.new_with_range(config.HEIGHT_MIN, config.HEIGHT_MAX, 10)
+        height.set_value(s.height)
+        height.connect("value-changed", lambda w: self._commit_settings(
+            config.with_updates(self._settings, height=int(w.get_value()))))
+        grid.attach(height, 1, row, 1, 1)
+        row += 1
+
+        # Font size, with a 0-means-default checkbox that gates the spinner.
+        add_label("글꼴 크기 (pt)")
+        font_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        font_default = Gtk.CheckButton(label="시스템 기본")
+        font_spin = Gtk.SpinButton.new_with_range(config.FONT_MIN, config.FONT_MAX, 1)
+        font_default.set_active(s.font_size == 0)
+        font_spin.set_sensitive(s.font_size != 0)
+        font_spin.set_value(s.font_size or config.FONT_MIN)
+
+        def commit_font() -> None:
+            size = 0 if font_default.get_active() else int(font_spin.get_value())
+            self._commit_settings(config.with_updates(self._settings, font_size=size))
+
+        def on_font_default(check) -> None:
+            font_spin.set_sensitive(not check.get_active())
+            commit_font()
+
+        font_default.connect("toggled", on_font_default)
+        font_spin.connect("value-changed", lambda w: commit_font())
+        font_box.pack_start(font_default, False, False, 0)
+        font_box.pack_start(font_spin, False, False, 0)
+        grid.attach(font_box, 1, row, 1, 1)
+        row += 1
+
+        # Keep-above and all-workspaces toggles.
+        keep_above = Gtk.CheckButton(label="항상 위에 표시")
+        keep_above.set_active(s.keep_above)
+        keep_above.connect("toggled", lambda w: self._commit_settings(
+            config.with_updates(self._settings, keep_above=w.get_active())))
+        grid.attach(keep_above, 1, row, 1, 1)
+        row += 1
+
+        all_ws = Gtk.CheckButton(label="모든 워크스페이스에 표시")
+        all_ws.set_active(s.all_workspaces)
+        all_ws.connect("toggled", lambda w: self._commit_settings(
+            config.with_updates(self._settings, all_workspaces=w.get_active())))
+        grid.attach(all_ws, 1, row, 1, 1)
+        row += 1
+
+        dialog.show_all()
+        return dialog
+
+    def _commit_settings(self, new: "config.Settings") -> None:
+        """Apply a settings change everywhere: to the live window, to disk, and
+        to whoever owns the poll loop (via the callback). Persisting on every
+        change is cheap (atomic write of a tiny file) and means a crash never
+        loses a setting the user just made."""
+        self.apply_settings(new)
+        try:
+            config.save(new)
+        except OSError:
+            # A settings file we cannot write is a nuisance, not a reason to
+            # kill the panel; the change still took effect for this session.
+            pass
+        if self._on_settings_changed is not None:
+            self._on_settings_changed(new)
 
     def _render_status(self) -> None:
         self._status.set_text(compose_status(self._sticky, self._hint, self._transient))
