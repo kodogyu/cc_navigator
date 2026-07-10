@@ -25,8 +25,6 @@ _CORNER_LABELS = {
 }
 
 SECONDARY_LIMIT = 80
-WINDOW_WIDTH = 340
-WINDOW_HEIGHT = 420
 EMPTY_HINT = (
     "세션이 없습니다. tmux 안에서 실행 중이고 훅이 설치되었는지 "
     "확인하세요 (bin/cc-navigator-doctor)."
