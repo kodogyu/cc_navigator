@@ -65,3 +65,38 @@ class SendTextArgvsTest(unittest.TestCase):
 
         tmuxctl.send_text("/tmp/s", "%12", "hello", run=fake_run)
         self.assertEqual(seen, tmuxctl.send_text_argvs("/tmp/s", "%12", "hello"))
+
+
+class SendTextResultTest(unittest.TestCase):
+    """F2: send_text discarded exit codes, so a reply that never reached a dead
+    server was reported as success. It must now say what actually happened."""
+
+    def test_both_ok_is_delivered_and_submitted(self):
+        result = tmuxctl.send_text("/tmp/s", "%12", "hi", run=lambda a: (0, ""))
+        self.assertTrue(result.delivered)
+        self.assertTrue(result.submitted)
+        self.assertTrue(result.ok)
+
+    def test_literal_failure_is_not_delivered_and_does_not_press_enter(self):
+        seen = []
+
+        def fake_run(argv):
+            seen.append(list(argv))
+            return (1, "")  # the literal send fails: the server just died
+
+        result = tmuxctl.send_text("/tmp/s", "%12", "hi", run=fake_run)
+        self.assertFalse(result.delivered)
+        self.assertFalse(result.ok)
+        # Enter must NOT be sent: submitting a bare newline into whatever is
+        # there is worse than doing nothing.
+        self.assertEqual(len(seen), 1)
+        self.assertNotIn("Enter", seen[0])
+
+    def test_literal_ok_but_enter_fails_is_delivered_not_submitted(self):
+        def fake_run(argv):
+            return (0, "") if "-l" in argv else (1, "")
+
+        result = tmuxctl.send_text("/tmp/s", "%12", "hi", run=fake_run)
+        self.assertTrue(result.delivered)
+        self.assertFalse(result.submitted)
+        self.assertFalse(result.ok)

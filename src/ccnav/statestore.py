@@ -76,12 +76,26 @@ def _try_unlink(path: pathlib.Path) -> bool:
 def prune(
     state_dir: pathlib.Path,
     live_panes: Set[Tuple[str, str]],
+    observed_sockets: Set[str],
     now: Optional[int] = None,
 ) -> int:
     """Delete state files whose pane is gone, that are stale, or that are junk.
 
     This is what makes a SessionEnd hook unnecessary: a session that is gone
     from tmux is gone from the model.
+
+    `observed_sockets` is the set of tmux sockets whose pane list was actually
+    obtained this tick. The liveness test -- "this pane is not in live_panes,
+    so its session ended" -- is only applied to a record whose socket is in
+    that set. A failed or merely slow query returns an empty pane list, and
+    judging a record against that emptiness would delete every live session on
+    a socket that only stuttered; a waiting session then fires no further hooks
+    and its row never comes back (F3). A record on an UNOBSERVED socket is left
+    alone on liveness.
+
+    The age and junk checks stay unconditional: an unparseable file, or a
+    genuinely stale one, is removed regardless -- so an unreachable socket's
+    files are still reaped by age rather than leaking forever.
     """
     if now is None:
         now = int(time.time())
@@ -97,13 +111,21 @@ def prune(
                 removed += 1
             continue
 
-        key = (str(record.get("tmux_socket") or ""), str(record.get("tmux_pane") or ""))
+        socket = str(record.get("tmux_socket") or "")
+        pane = str(record.get("tmux_pane") or "")
         try:
             age = now - int(record.get("updated_at", 0))
         except (TypeError, ValueError):
             age = MAX_AGE_SECONDS + 1
 
-        if key not in live_panes or age > MAX_AGE_SECONDS:
+        # A record with no socket/pane can never match a live pane, so it is
+        # judged immediately (there is nothing to "observe"). A placeable
+        # record is judged for liveness only if we actually queried its socket.
+        placeable = bool(socket) and bool(pane)
+        observed = socket in observed_sockets or not placeable
+        gone = observed and (socket, pane) not in live_panes
+
+        if gone or age > MAX_AGE_SECONDS:
             if _try_unlink(path):
                 removed += 1
     return removed

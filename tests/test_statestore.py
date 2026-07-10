@@ -64,7 +64,10 @@ class StateStoreTest(unittest.TestCase):
         statestore.write(self.dir, record(session_id="alive", pane="%1"))
         statestore.write(self.dir, record(session_id="dead", pane="%9"))
         removed = statestore.prune(
-            self.dir, {("/tmp/tmux-1000/default", "%1")}, now=100
+            self.dir,
+            {("/tmp/tmux-1000/default", "%1")},
+            {"/tmp/tmux-1000/default"},
+            now=100,
         )
         self.assertEqual(removed, 1)
         names = sorted(p.name for p in self.dir.iterdir())
@@ -74,14 +77,50 @@ class StateStoreTest(unittest.TestCase):
         statestore.write(self.dir, record(session_id="old", updated_at=0))
         live = {("/tmp/tmux-1000/default", "%1")}
         removed = statestore.prune(
-            self.dir, live, now=statestore.MAX_AGE_SECONDS + 1
+            self.dir,
+            live,
+            {"/tmp/tmux-1000/default"},
+            now=statestore.MAX_AGE_SECONDS + 1,
         )
         self.assertEqual(removed, 1)
         self.assertEqual(list(self.dir.iterdir()), [])
 
     def test_prune_removes_malformed_files(self):
         (self.dir / "broken.json").write_text("{not json")
-        self.assertEqual(statestore.prune(self.dir, set(), now=100), 1)
+        self.assertEqual(statestore.prune(self.dir, set(), set(), now=100), 1)
+        self.assertEqual(list(self.dir.iterdir()), [])
+
+    def test_prune_spares_a_record_whose_socket_was_not_observed(self):
+        # F3: a failed or slow tmux query returns an empty pane set. Pruning on
+        # that would delete a LIVE session's state file, and a waiting session
+        # fires no more hooks, so the row would never come back. A socket that
+        # did not answer this tick must not have its records judged for liveness.
+        statestore.write(self.dir, record(session_id="alive", pane="%1"))
+        removed = statestore.prune(
+            self.dir,
+            set(),  # empty live set, because the query failed
+            set(),  # and the socket was NOT observed
+            now=100,
+        )
+        self.assertEqual(removed, 0)
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["alive.json"])
+
+    def test_prune_still_ages_out_an_unobserved_socket(self):
+        # An unreachable socket's files must not leak forever: age still reaps.
+        statestore.write(self.dir, record(session_id="old", updated_at=0))
+        removed = statestore.prune(
+            self.dir, set(), set(), now=statestore.MAX_AGE_SECONDS + 1
+        )
+        self.assertEqual(removed, 1)
+
+    def test_prune_removes_gone_pane_only_when_socket_was_observed(self):
+        # Same live set (empty) and same record, but now the socket WAS observed
+        # and its pane is genuinely absent -> the record is correctly pruned.
+        statestore.write(self.dir, record(session_id="dead", pane="%9"))
+        removed = statestore.prune(
+            self.dir, set(), {"/tmp/tmux-1000/default"}, now=100
+        )
+        self.assertEqual(removed, 1)
         self.assertEqual(list(self.dir.iterdir()), [])
 
     def test_prune_tolerates_a_file_it_cannot_delete(self):
@@ -92,6 +131,7 @@ class StateStoreTest(unittest.TestCase):
         statestore.write(self.dir, record(session_id="a-gone", pane="%8"))
         statestore.write(self.dir, record(session_id="b-locked", pane="%9"))
         live = {("/tmp/tmux-1000/default", "%1")}  # neither pane is live
+        observed = {"/tmp/tmux-1000/default"}
 
         real_unlink = pathlib.Path.unlink
 
@@ -101,7 +141,7 @@ class StateStoreTest(unittest.TestCase):
             return real_unlink(self, *args, **kwargs)
 
         with mock.patch.object(pathlib.Path, "unlink", guarded_unlink):
-            removed = statestore.prune(self.dir, live, now=100)  # must not raise
+            removed = statestore.prune(self.dir, live, observed, now=100)  # no raise
 
         self.assertEqual(removed, 1)  # only the deletable one counts
         names = sorted(p.name for p in self.dir.iterdir())

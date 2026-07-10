@@ -70,3 +70,43 @@ class QueryTest(unittest.TestCase):
 
         self.assertEqual(tmuxctl.sessions_by_pane("/tmp/s", run=fake_run), {})
         self.assertEqual(tmuxctl.titles_by_pane("/tmp/s", run=fake_run), {})
+
+
+class SessionsByPaneResultTest(unittest.TestCase):
+    """F3: an empty pane dict is ambiguous -- 'no sessions' or 'query failed'.
+    collect_rows must be able to tell them apart or it prunes live state on a
+    stuttering tmux. The _result variant reports whether tmux actually answered.
+    """
+
+    def test_success_reports_ok_and_the_panes(self):
+        ok, panes = tmuxctl.sessions_by_pane_result(
+            "/tmp/s", run=lambda a: (0, "%0=demo\n")
+        )
+        self.assertTrue(ok)
+        self.assertEqual(panes, {"%0": "demo"})
+
+    def test_success_with_no_panes_is_still_ok(self):
+        # tmux exit 0 with empty output is not reachable in practice (an empty
+        # server exits), but if it were, "ok and empty" must not read as failure.
+        ok, panes = tmuxctl.sessions_by_pane_result("/tmp/s", run=lambda a: (0, ""))
+        self.assertTrue(ok)
+        self.assertEqual(panes, {})
+
+    def test_nonzero_exit_reports_not_ok(self):
+        ok, panes = tmuxctl.sessions_by_pane_result(
+            "/tmp/s", run=lambda a: (1, "%0=zombie\n")
+        )
+        self.assertFalse(ok)
+        self.assertEqual(panes, {})
+
+    def test_timeout_status_reports_not_ok(self):
+        # proc.run_command returns (124, "") on TimeoutExpired: a slow, not dead,
+        # tmux. That must read as "could not observe", never as "no sessions".
+        ok, _ = tmuxctl.sessions_by_pane_result("/tmp/s", run=lambda a: (124, ""))
+        self.assertFalse(ok)
+
+    def test_plain_wrapper_still_returns_just_the_dict(self):
+        self.assertEqual(
+            tmuxctl.sessions_by_pane("/tmp/s", run=lambda a: (0, "%0=demo\n")),
+            {"%0": "demo"},
+        )

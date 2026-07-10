@@ -1,7 +1,8 @@
 """Every tmux interaction: the queries that build the model, the actions the UI fires."""
 from __future__ import annotations
 
-from typing import Dict, List
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 
 from .proc import Runner, run_command
 
@@ -28,19 +29,37 @@ def list_argv(socket: str, fmt: str) -> List[str]:
     return ["tmux", "-S", socket, "list-panes", "-a", "-F", fmt]
 
 
-def _query(socket: str, fmt: str, run: Runner) -> Dict[str, str]:
+def _query_result(socket: str, fmt: str, run: Runner) -> Tuple[bool, Dict[str, str]]:
+    """Report BOTH whether tmux answered and what it said.
+
+    A nonzero exit -- a dead socket, or (124, "") from a timed-out but merely
+    slow server -- yields (False, {}). An empty dict alone is ambiguous: it
+    reads identically whether every session vanished or the query never ran.
+    collect_rows needs the difference, because pruning state files on a query
+    that only stuttered would delete live, waiting sessions that fire no more
+    hooks and so never come back. See statestore.prune and F3 in task-13.
+    """
     code, out = run(list_argv(socket, fmt))
     if code != 0:
-        return {}
-    return parse_kv_lines(out)
+        return False, {}
+    return True, parse_kv_lines(out)
+
+
+def sessions_by_pane_result(
+    socket: str, run: Runner = run_command
+) -> Tuple[bool, Dict[str, str]]:
+    return _query_result(socket, "#{pane_id}=#{session_name}", run)
 
 
 def sessions_by_pane(socket: str, run: Runner = run_command) -> Dict[str, str]:
-    return _query(socket, "#{pane_id}=#{session_name}", run)
+    return sessions_by_pane_result(socket, run)[1]
 
 
 def titles_by_pane(socket: str, run: Runner = run_command) -> Dict[str, str]:
-    return _query(socket, "#{pane_id}=#{pane_title}", run)
+    # Titles are cosmetic (build_rows falls back to the pane id), so a failed
+    # titles query costs at most a blank title, never a prune decision. Only
+    # the sessions query gates pruning, so only it needs the _result variant.
+    return _query_result(socket, "#{pane_id}=#{pane_title}", run)[1]
 
 
 def select_argvs(socket: str, pane: str) -> List[List[str]]:
@@ -70,6 +89,41 @@ def select_pane(socket: str, pane: str, run: Runner = run_command) -> None:
         run(argv)
 
 
-def send_text(socket: str, pane: str, text: str, run: Runner = run_command) -> None:
-    for argv in send_text_argvs(socket, pane, text):
-        run(argv)
+@dataclass(frozen=True)
+class SendResult:
+    """Two independent ways a reply can fail, so the UI can say which happened.
+
+    delivered: the literal text reached the pane. submitted: Enter was accepted.
+    A bare bool would collapse "typed but not submitted" (the text sits unsent
+    in the input line) into plain success or plain failure, and the user would
+    never know their reply is stuck.
+    """
+
+    delivered: bool
+    submitted: bool
+
+    @property
+    def ok(self) -> bool:
+        return self.delivered and self.submitted
+
+
+def send_text(
+    socket: str, pane: str, text: str, run: Runner = run_command
+) -> SendResult:
+    """Type the text, then press Enter -- and report whether each step landed.
+
+    F2: the old version discarded both exit codes, so a reply into a server
+    that had just died returned normally and the UI reported success while
+    nothing was delivered. That is this project's signature silent-success
+    failure, in the one feature the user asked for by name.
+    """
+    literal_argv, enter_argv = send_text_argvs(socket, pane, text)
+    code, _ = run(literal_argv)
+    if code != 0:
+        # The text never reached the pane. Do NOT press Enter: submitting a bare
+        # newline into whatever is there is worse than doing nothing, and a
+        # failed literal almost always means the server just died (the segfault
+        # case), so Enter would fail too.
+        return SendResult(delivered=False, submitted=False)
+    code, _ = run(enter_argv)
+    return SendResult(delivered=True, submitted=(code == 0))

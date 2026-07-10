@@ -53,14 +53,14 @@ class CollectRowsTest(unittest.TestCase):
 
         def sessions_for(socket):
             asked.append(socket)
-            return {"%1": "demo"}
+            return True, {"%1": "demo"}
 
         rows = app.collect_rows(
             pathlib.Path("/nonexistent"),
             read_all=lambda d: [record()],
             sessions_for=sessions_for,
             titles_for=lambda s: {"%1": "t"},
-            prune=lambda d, live: 0,
+            prune=lambda d, live, observed: 0,
         )
         self.assertEqual(asked, [SOCK])
         self.assertEqual(len(rows), 1)
@@ -69,18 +69,43 @@ class CollectRowsTest(unittest.TestCase):
     def test_prunes_using_the_live_pane_set(self):
         seen = {}
 
-        def fake_prune(directory, live):
+        def fake_prune(directory, live, observed):
             seen["live"] = live
+            seen["observed"] = observed
             return 0
 
         app.collect_rows(
             pathlib.Path("/nonexistent"),
             read_all=lambda d: [record()],
-            sessions_for=lambda s: {"%1": "demo", "%2": "sandbox"},
+            sessions_for=lambda s: (True, {"%1": "demo", "%2": "sandbox"}),
             titles_for=lambda s: {},
             prune=fake_prune,
         )
         self.assertEqual(seen["live"], {(SOCK, "%1"), (SOCK, "%2")})
+        self.assertEqual(seen["observed"], {SOCK})
+
+    def test_a_socket_whose_query_failed_is_not_handed_to_prune(self):
+        # F3: sessions_for reports ok=False (a slow or dead tmux). collect_rows
+        # must exclude that socket from the observed set so prune leaves its
+        # live state files alone. Without this a one-second stutter deletes a
+        # waiting session that will never re-announce itself.
+        seen = {}
+
+        def fake_prune(directory, live, observed):
+            seen["live"] = live
+            seen["observed"] = observed
+            return 0
+
+        rows = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [record()],
+            sessions_for=lambda s: (False, {}),  # the query did not answer
+            titles_for=lambda s: {},
+            prune=fake_prune,
+        )
+        self.assertEqual(seen["observed"], set(), "a failed socket is not observed")
+        self.assertEqual(seen["live"], set())
+        self.assertEqual(rows, [], "with no live panes there is no row this tick")
 
     def test_no_state_files_means_no_tmux_calls_and_no_rows(self):
         def explode(socket):
@@ -91,7 +116,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [],
             sessions_for=explode,
             titles_for=explode,
-            prune=lambda d, live: 0,
+            prune=lambda d, live, observed: 0,
         )
         self.assertEqual(rows, [])
 
@@ -103,13 +128,13 @@ class CollectRowsTest(unittest.TestCase):
         # -- wasted work, and on a real directory it would delete every state
         # file present, which is exactly the bug "tmux is never called"
         # exists to keep this function cheap enough to avoid.
-        def explode(directory, live):
+        def explode(directory, live, observed):
             raise AssertionError("must not prune when there is nothing to prune")
 
         rows = app.collect_rows(
             pathlib.Path("/nonexistent"),
             read_all=lambda d: [],
-            sessions_for=lambda s: {},
+            sessions_for=lambda s: (True, {}),
             titles_for=lambda s: {},
             prune=explode,
         )
@@ -349,6 +374,31 @@ class ApplicationJumpThreadingTest(unittest.TestCase):
         self.assertTrue(instance.window.status)  # a message, not silence
 
 
+class SendStatusTest(unittest.TestCase):
+    """The pure decision, testable with no threads, GTK or subprocess."""
+
+    def test_full_success_is_silent(self):
+        result = tmuxctl.SendResult(delivered=True, submitted=True)
+        self.assertEqual(app.send_status(result), "")
+
+    def test_not_delivered_explains_it(self):
+        result = tmuxctl.SendResult(delivered=False, submitted=False)
+        status = app.send_status(result)
+        self.assertTrue(status)
+
+    def test_delivered_but_not_submitted_is_distinct_from_not_delivered(self):
+        not_submitted = app.send_status(
+            tmuxctl.SendResult(delivered=True, submitted=False)
+        )
+        not_delivered = app.send_status(
+            tmuxctl.SendResult(delivered=False, submitted=False)
+        )
+        self.assertTrue(not_submitted)
+        self.assertNotEqual(
+            not_submitted, not_delivered, "the two failures must read differently"
+        )
+
+
 class ApplicationSendThreadingTest(unittest.TestCase):
     def setUp(self):
         self._orig_send = tmuxctl.send_text
@@ -361,6 +411,7 @@ class ApplicationSendThreadingTest(unittest.TestCase):
 
         def fake_send_text(socket, pane, text):
             calls.append((socket, pane, text))
+            return tmuxctl.SendResult(delivered=True, submitted=True)
 
         tmuxctl.send_text = fake_send_text
 
@@ -371,6 +422,32 @@ class ApplicationSendThreadingTest(unittest.TestCase):
 
         _pump_until(lambda: instance.window.status == "")
         self.assertEqual(calls, [(r.socket, r.pane, "hello")])
+
+    def test_send_reports_a_delivery_failure_instead_of_looking_successful(self):
+        # F2: the reply never reached the pane (dead server), but the old code
+        # discarded the exit code and left the status blank -- a silent success.
+        def fake_send_text(socket, pane, text):
+            return tmuxctl.SendResult(delivered=False, submitted=False)
+
+        tmuxctl.send_text = fake_send_text
+
+        instance = _bare_application()
+        instance.send(row(), "hello")
+
+        _pump_until(lambda: instance.window.status not in (None, ""))
+        self.assertTrue(instance.window.status)
+
+    def test_send_reports_typed_but_not_submitted(self):
+        def fake_send_text(socket, pane, text):
+            return tmuxctl.SendResult(delivered=True, submitted=False)
+
+        tmuxctl.send_text = fake_send_text
+
+        instance = _bare_application()
+        instance.send(row(), "hello")
+
+        _pump_until(lambda: instance.window.status not in (None, ""))
+        self.assertTrue(instance.window.status)
 
     def test_send_reports_an_error_instead_of_dying_silently(self):
         def fake_send_text(socket, pane, text):

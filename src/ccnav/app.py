@@ -39,7 +39,7 @@ def probe_eval_available() -> bool:
 def collect_rows(
     state_dir: pathlib.Path,
     read_all: Callable[[pathlib.Path], List[Dict[str, object]]] = statestore.read_all,
-    sessions_for: Callable[[str], Dict[str, str]] = tmuxctl.sessions_by_pane,
+    sessions_for: Callable[[str], "tuple"] = tmuxctl.sessions_by_pane_result,
     titles_for: Callable[[str], Dict[str, str]] = tmuxctl.titles_by_pane,
     prune: Callable[..., int] = statestore.prune,
 ) -> List[model.Row]:
@@ -47,9 +47,14 @@ def collect_rows(
     sockets = sorted({str(r.get("tmux_socket") or "") for r in records if r.get("tmux_socket")})
     if not sockets:
         return []
-    sessions = {socket: sessions_for(socket) for socket in sockets}
+    # sessions_for reports (ok, panes): ok is False when tmux did not answer
+    # (dead socket, or a timed-out slow one). Only sockets that DID answer may
+    # gate pruning -- otherwise a one-tick stutter deletes live state (F3).
+    results = {socket: sessions_for(socket) for socket in sockets}
+    sessions = {socket: panes for socket, (_ok, panes) in results.items()}
+    observed = {socket for socket, (ok, _panes) in results.items() if ok}
     titles = {socket: titles_for(socket) for socket in sockets}
-    prune(state_dir, model.live_pane_keys(sessions))
+    prune(state_dir, model.live_pane_keys(sessions), observed)
     return model.build_rows(records, sessions, titles)
 
 
@@ -62,6 +67,16 @@ def jump_status(result: gnome.ActivationResult, window_title: str) -> str:
             "같은 제목의 창이 %d개입니다. tmux 세션 하나에는 "
             "클라이언트 하나만 붙이세요: %s" % (result.matched, window_title)
         )
+    return ""
+
+
+def send_status(result: tmuxctl.SendResult) -> str:
+    """Map a send outcome to the status line. Pure, so it is tested without
+    threads, GTK or a subprocess (like jump_status). Silent on full success."""
+    if not result.delivered:
+        return "답장을 전송하지 못했습니다. tmux 세션이 종료되었을 수 있습니다."
+    if not result.submitted:
+        return "답장을 입력했지만 전송(Enter)에 실패했습니다. 세션을 직접 확인하세요."
     return ""
 
 
@@ -184,9 +199,9 @@ class Application:
 
     def send(self, row: model.Row, text: str) -> None:
         def worker() -> None:
-            status = ""
             try:
-                tmuxctl.send_text(row.socket, row.pane, text)
+                result = tmuxctl.send_text(row.socket, row.pane, text)
+                status = send_status(result)
             except Exception as exc:  # noqa: BLE001 -- never leave the status stuck silently
                 status = "전송 중 예기치 않은 오류가 발생했습니다: %s" % exc
             GLib.idle_add(self._on_send_done, status)
