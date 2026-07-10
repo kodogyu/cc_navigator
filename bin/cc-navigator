@@ -12,4 +12,4 @@ set -e
 target=$(readlink -f "$0" 2>/dev/null) || target=$0
 [ -n "$target" ] || target=$0
 here=$(cd "$(dirname "$target")" && pwd)
-PYTHONPATH="$here/../src${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m ccnav.app
+PYTHONPATH="$here/../src${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m ccnav.app "$@"

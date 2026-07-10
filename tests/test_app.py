@@ -47,6 +47,18 @@ def _pump_until(condition, timeout=2.0):
             time.sleep(0.01)
 
 
+class VersionTest(unittest.TestCase):
+    def test_version_flag_prints_and_exits_zero(self):
+        import io
+        import contextlib
+        from ccnav import __version__
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            code = app.main(["--version"])
+        self.assertEqual(code, 0)
+        self.assertIn(__version__, buf.getvalue())
+
+
 class CollectRowsTest(unittest.TestCase):
     def test_queries_only_the_sockets_the_state_files_mention(self):
         asked = []

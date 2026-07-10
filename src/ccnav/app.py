@@ -271,7 +271,13 @@ class Application:
         return False
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    import sys
+    from . import __version__
+    argv = sys.argv[1:] if argv is None else argv
+    if "--version" in argv:
+        print("cc-navigator %s" % __version__)
+        return 0
     application = Application()
     # Wired here, not in NavigatorWindow: this is where the main loop exists.
     application.window.connect("destroy", Gtk.main_quit)
