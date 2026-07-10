@@ -20,9 +20,20 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
-from . import gnome, model, paths, statestore, tmuxctl, ui  # noqa: E402
+from . import gnome, model, paths, proc, statestore, tmuxctl, ui  # noqa: E402
 
 POLL_SECONDS = 1
+
+# Eval("1+1") is a local D-Bus round trip and answers in milliseconds. The probe
+# runs before the window is mapped, so it cannot freeze a live window -- but on a
+# wedged gdbus it would hold the screen blank for DEFAULT_TIMEOUT with nothing to
+# look at. Bound it tightly and fail to the safe side: Eval counts as unavailable,
+# the jump buttons stay disabled, and EVAL_UNAVAILABLE_HINT explains why.
+EVAL_PROBE_TIMEOUT = 1.0
+
+
+def probe_eval_available() -> bool:
+    return gnome.eval_available(run=proc.runner_with_timeout(EVAL_PROBE_TIMEOUT))
 
 
 def collect_rows(
@@ -75,13 +86,14 @@ class Application:
     def __init__(
         self,
         collect: Callable[[pathlib.Path], List[model.Row]] = collect_rows,
+        probe_eval: Callable[[], bool] = probe_eval_available,
     ) -> None:
         # `collect` is injectable so the poll loop's error handling can be
         # tested with a collector that raises, without GTK or a real tmux.
         self._collect = collect
         self.state_dir = paths.ensure_state_dir()
         self.window = ui.NavigatorWindow(on_jump=self.jump, on_send=self.send)
-        self.window.set_eval_available(gnome.eval_available())
+        self.window.set_eval_available(probe_eval())
 
         self._jumping = set()  # type: Set[str]  # session ids with a jump in flight
 

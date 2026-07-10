@@ -65,3 +65,21 @@ class RunCommandTimeoutTest(unittest.TestCase):
     def test_a_nontimeout_call_still_completes_normally_with_a_generous_timeout(self):
         code, out = proc.run_command(["/usr/bin/python3", "-c", "print('ok')"], timeout=5.0)
         self.assertEqual((code, out), (0, "ok\n"))
+
+
+class RunnerWithTimeoutTest(unittest.TestCase):
+    def test_the_bound_runner_takes_only_argv_and_still_times_out(self):
+        # A Runner's signature is argv-only, so a caller that knows its command
+        # should be instant has no other way to shorten the deadline.
+        runner = proc.runner_with_timeout(0.2)
+
+        started = time.monotonic()
+        code, out = runner(["sleep", "40"])
+        elapsed = time.monotonic() - started
+
+        self.assertEqual((code, out), (124, ""))
+        self.assertLess(elapsed, 2.0)
+
+    def test_the_bound_runner_passes_a_successful_call_through(self):
+        runner = proc.runner_with_timeout(5.0)
+        self.assertEqual(runner(["/usr/bin/python3", "-c", "print('ok')"]), (0, "ok\n"))

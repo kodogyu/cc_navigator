@@ -4,6 +4,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 from gi.repository import Gio, GLib
 
@@ -465,3 +466,33 @@ class ApplicationWiringTest(unittest.TestCase):
             self.assertFalse(instance._poll_thread.is_alive())
         finally:
             instance.window.destroy()
+
+
+class EvalProbeTest(unittest.TestCase):
+    def _fake_run(self, seen, stdout="(true, '2')\n"):
+        def fake_run(argv, timeout=None):
+            seen["argv"] = list(argv)
+            seen["timeout"] = timeout
+            return 0, stdout
+
+        return fake_run
+
+    def test_the_probe_is_bounded_more_tightly_than_an_ordinary_command(self):
+        # Eval("1+1") is a local D-Bus round trip. Letting it wait the full
+        # DEFAULT_TIMEOUT would hold the screen blank before the window is even
+        # mapped, with nothing for the user to look at.
+        seen = {}
+        with mock.patch.object(app.proc, "run_command", self._fake_run(seen)):
+            self.assertTrue(app.probe_eval_available())
+
+        self.assertEqual(seen["argv"][0], "gdbus")
+        self.assertLess(seen["timeout"], app.proc.DEFAULT_TIMEOUT)
+
+    def test_a_wedged_gdbus_fails_to_the_safe_side(self):
+        # 124 is what run_command returns on timeout. Eval must then count as
+        # unavailable, so the jump buttons stay disabled and the hint explains why.
+        def timed_out(argv, timeout=None):
+            return 124, ""
+
+        with mock.patch.object(app.proc, "run_command", timed_out):
+            self.assertFalse(app.probe_eval_available())

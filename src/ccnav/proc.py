@@ -1,6 +1,7 @@
 """The single place cc_navigator spawns a subprocess."""
 from __future__ import annotations
 
+import functools
 import subprocess
 from typing import Callable, Sequence, Tuple
 
@@ -29,3 +30,12 @@ def run_command(argv: Sequence[str], timeout: float = DEFAULT_TIMEOUT) -> Tuple[
         # "code != 0 means failure" check already covers it.
         return 124, ""
     return completed.returncode, completed.stdout
+
+
+def runner_with_timeout(timeout: float) -> Runner:
+    """A Runner bound to a tighter deadline than DEFAULT_TIMEOUT.
+
+    A Runner takes only argv, so a caller that knows its command should be
+    instant has no other way to say so.
+    """
+    return functools.partial(run_command, timeout=timeout)
