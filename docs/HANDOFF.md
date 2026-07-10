@@ -64,19 +64,24 @@ Anaconda's 3.11, which has no `gi`. Every script in this repo hardcodes
 `/usr/bin/python3`. Do not "clean that up".
 
 **`~/.tmux.conf` can kill the tmux server.** A bare `set mode-keys vi` (no `-g`,
-no `-w`) makes tmux 3.0a abort the server on the *first external command*. On the
-original machine, line 1 of `~/.tmux.conf` is exactly that, and it is **still not
-fixed**. With it in place, cc_navigator's very first `list-panes` would kill the
-server and every Claude Code session inside it.
+no `-w`) makes tmux 3.0a abort the server on the *first external command*. With it
+in place, cc_navigator's very first `list-panes` kills the server and every Claude
+Code session inside it.
 
 ```diff
 -set mode-keys vi
 +setw -g mode-keys vi
 ```
 
-`-S` isolates the socket but **not** the config file, so every real-tmux
-experiment in this repo must pass `-f /dev/null` until that line is fixed. This is
-what Task 11's doctor is for.
+`-S` isolates the socket but **not** the config file, so a real-tmux experiment
+against a broken config "crashes" for reasons that have nothing to do with the code
+under test. That misled one implementer into reporting a tmux segfault. Pass
+`-f /dev/null` whenever you are testing tmux behaviour rather than the user's setup.
+
+This was fixed on the original machine on 2026-07-10, and `set-titles` was added at
+the same time. **A different machine has a different dotfile.** Check it before
+running anything, and check it first when tmux behaves impossibly. Task 11's doctor
+exists to make that check automatic.
 
 **`PYTHONDONTWRITEBYTECODE=1` is not tidiness.** CPython invalidates a `.pyc` on
 `(mtime, size)`. A mutation that preserves both — swapping two equal-length
@@ -182,14 +187,10 @@ A whole-branch review (`git merge-base master HEAD`..`HEAD`), then
 
 ## After the code: installing it
 
-None of this has been done yet.
-
-1. Fix `~/.tmux.conf` line 1 (above).
-2. Add to `~/.tmux.conf` so the outer window title becomes the address:
-   ```
-   set -g set-titles on
-   set -g set-titles-string 'ccnav:#{session_name}'
-   ```
+1. ~~Fix `~/.tmux.conf`~~ — **done on the original machine.** Redo it elsewhere.
+2. ~~`set -g set-titles on` and `set -g set-titles-string 'ccnav:#{session_name}'`~~
+   — **done on the original machine.** This is what makes the outer X11 window
+   title the address.
 3. Add the hook to `~/.claude/settings.json` — the exact JSON is in the plan's
    "Post-implementation" section. All four events point at
    `<repo>/bin/cc-navigator-hook`, by **absolute path**.
@@ -199,10 +200,32 @@ None of this has been done yet.
 
 Run `bin/cc-navigator-doctor` first once Task 11 exists; it checks 1–3.
 
+### The chain has been proved end to end, once
+
+After fixing the config, on a private tmux socket: the real `bin/cc-navigator-hook`
+was fed a real `Notification` payload, wrote its state file, and `app.collect_rows`
+joined it against real `tmux list-panes` output:
+
+```
+primary  : myproject
+secondary: permission_prompt — Allow Bash command: npm test?
+waiting  : True
+address  : ccnav:myproject   (pane %0)
+```
+
+Two things fell out of that, both of which the unit tests had only asserted in
+isolation. `set-titles-string` expands to exactly `row.window_title`, so the
+address the model computes is the title the window actually carries. And the
+primary line reads `myproject`, not the hostname — tmux really does report a fresh
+pane's `#{pane_title}` as the hostname, and Task 9's fallback really does catch it.
+
+Not proved: the GNOME activation itself, and `grab_focus()`. Both need a window on
+a screen.
+
 ## Open items
 
-- **`~/.tmux.conf` is still broken.** Asked, no answer yet. Nothing is at risk
-  today — no tmux server is running — but this must be fixed before step 4 above.
+- **`~/.tmux.conf` was fixed on the original machine only.** A new machine needs the
+  same two edits. Until Task 11's doctor exists, check by hand.
 - **`grab_focus()` restoration is untested.** Focus needs a shown toplevel, which
   agents are forbidden from creating. Check it by hand the first time the app runs:
   type into a reply box, wait for another session to change, keep typing.

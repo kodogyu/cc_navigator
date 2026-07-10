@@ -101,7 +101,7 @@ Task 6: complete (cb114a4). Mutations 6/6.
   - Implementer first reported BLOCKED, claiming tmux 3.0a segfaults on
     `send-keys -l` with a space. Misdiagnosis, retracted in the report. See below.
 
-PREREQUISITE, and a hard one: `~/.tmux.conf` line 1 is `set mode-keys vi`.
+PREREQUISITE, FIXED 2026-07-10: `~/.tmux.conf` line 1 was `set mode-keys vi`.
   `mode-keys` is a window option; bare `set` makes tmux 3.0a abort the server on
   the first external command. `-S` isolates the socket but NOT the config file, so
   every real-tmux experiment in this repo must pass `-f /dev/null` until the user
@@ -211,3 +211,30 @@ distrusting your own instrument.
 
 Standing lesson for briefs: "no test can observe X" is a claim to be falsified,
 not accepted. Ask the implementer to spend five minutes trying before writing it.
+
+
+## 2026-07-10, after Task 10: the environment was repaired and the chain proved
+
+~/.tmux.conf line 1 fixed (`setw -g mode-keys vi`), verified against a real server:
+it now survives `list-panes` and `send-keys -l`, and mouse / default-terminal /
+mode-keys / the six root key bindings all still apply. `set-titles on` and
+`set-titles-string 'ccnav:#{session_name}'` added.
+
+First end-to-end run, private socket, no GNOME: the real hook shim consumed a real
+Notification payload, wrote its state file, and collect_rows joined it against real
+tmux output to produce one waiting row addressed `ccnav:myproject`.
+
+Two facts confirmed in reality that the unit tests had only asserted in isolation:
+  - set-titles-string expands to exactly Row.window_title. The address the model
+    computes is the title the window actually carries.
+  - A fresh pane's #{pane_title} really is the HOSTNAME, and ui.primary_line's
+    fallback really does replace it with the tmux session name. The Task 5 finding
+    and the Task 9 fix met each other and held.
+
+Still unproved by anything but reasoning: GNOME activation, and grab_focus().
+Both need a window on a screen, which no agent here is allowed to create.
+
+Environment note for a new machine: `gdbus` may resolve to Anaconda's copy. Both
+/usr/bin/gdbus and ~/anaconda3/bin/gdbus answer Eval("1+1") correctly here.
+`wmctrl` and `xdotool` are NOT installed -- Task 9's report claims a wmctrl check
+that therefore cannot have run. Use `xwininfo -root -tree` instead.
