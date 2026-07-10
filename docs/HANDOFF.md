@@ -63,25 +63,44 @@ status bar says why. Everything else — the list, the waiting badge, typing a r
 Anaconda's 3.11, which has no `gi`. Every script in this repo hardcodes
 `/usr/bin/python3`. Do not "clean that up".
 
-**`~/.tmux.conf` can kill the tmux server.** A bare `set mode-keys vi` (no `-g`,
-no `-w`) makes tmux 3.0a abort the server on the *first external command*. With it
-in place, cc_navigator's very first `list-panes` kills the server and every Claude
-Code session inside it.
+**`~/.tmux.conf` can kill the tmux server — the exact rule, re-measured
+2026-07-11.** The earlier account here was wrong in every specific except the fix.
+Measured against tmux 3.0a (kernel `dmesg` confirms a `segfault`, not a graceful
+abort):
+
+- **Trigger is two conditions AT ONCE.** (1) `~/.tmux.conf` has a `set`-family line
+  (`set`, `setw`, `set-option`, `set-window-option`) whose flags include **none of
+  `-g`, `-q`, `-s`** — this corrupts the server silently at config-load time. (2)
+  Something later sends a **space** through `send-keys` (`send-keys -l -- 'a b'`, or
+  the key name `Space`). Then it segfaults.
+- **It is NOT about `mode-keys`.** `set clock-mode-style 12` and `set status-bg
+  black` (a *session* option) are equally fatal; `set mode-keys emacs` (the default
+  value) is fatal. `-q` and `-s` protect as well as `-g` does.
+- **The read path is safe.** `list-panes`, `select-pane`, `switch-client` all
+  succeed and leave the server alive under the fatal config. So the old claim that
+  "the very first `list-panes` kills the server" is false — and the danger is
+  *worse*: cc_navigator lists and jumps perfectly, then annihilates every **detached**
+  session the first time a reply carries a space. (An **attached** client prevents
+  the crash — measured 7/7 — so a session the user is actively in survives; the
+  blast radius is detached-but-live sessions, which cc_navigator still sends into.)
 
 ```diff
 -set mode-keys vi
 +setw -g mode-keys vi
 ```
 
-`-S` isolates the socket but **not** the config file, so a real-tmux experiment
-against a broken config "crashes" for reasons that have nothing to do with the code
-under test. That misled one implementer into reporting a tmux segfault. Pass
-`-f /dev/null` whenever you are testing tmux behaviour rather than the user's setup.
+`-S` isolates the socket but **not** the config file. When testing tmux behaviour
+rather than the user's setup, pass `-f /dev/null` (or `-f <a known-good conf>`).
+
+**Task 6's implementer was right.** They reported that tmux 3.0a segfaults on
+`send-keys -l` with a space, were told it was a misdiagnosis, and retracted it. The
+retraction was the error: the observation was correct, only the config precondition
+was missing. Reporting a surprising result is cheap; erasing a true one is expensive.
 
 This was fixed on the original machine on 2026-07-10, and `set-titles` was added at
 the same time. **A different machine has a different dotfile.** Check it before
 running anything, and check it first when tmux behaves impossibly. Task 11's doctor
-exists to make that check automatic.
+now reproduces the crash on a private socket instead of guessing from a regex.
 
 **`PYTHONDONTWRITEBYTECODE=1` is not tidiness.** CPython invalidates a `.pyc` on
 `(mtime, size)`. A mutation that preserves both — swapping two equal-length
@@ -122,11 +141,18 @@ report success while doing nothing:
 So `gnome.py` performs its action through one channel (Eval) and verifies the
 effect through another (`xprop`). It believes xprop, never Eval.
 
-The rule generalises past APIs. It caught a false "tmux segfaults on `send-keys`"
-diagnosis (it was the `~/.tmux.conf` line), a test suite that passed against stale
-bytecode, and — twice — my own measurement being wrong rather than the code
-(`pgrep -f 'sleep 47'` matches the *shell* whose command line contains that
-string; `pgrep -x sleep` is the honest count).
+The rule generalises past APIs, and it applies to your own instruments most of all.
+It caught a test suite that passed against stale bytecode; `pgrep -f 'sleep 47'`
+matching the *shell* whose command line contains that string rather than a real
+orphan (`pgrep -x sleep` is the honest count); `pgrep -x tmux` never matching the
+server at all, whose `comm` is `tmux: server`, so it reads "dead" while the server
+serves; and a whole experiment that "failed" identically for every input because the
+socket path exceeded `sun_path`'s 108 bytes — an identical failure across different
+inputs is a common cause upstream of the inputs, not many input-triggered bugs. The
+honest tmux liveness probe is `tmux -L <sock> list-sessions; echo $?`. The one thing
+this rule did *not* catch in time was a true report being overruled: the "tmux
+segfaults on `send-keys`" diagnosis was real, and calling it a misdiagnosis was the
+mistake (see the tmux landmine above).
 
 ## What the code looks like
 

@@ -71,6 +71,13 @@ Task 5: complete (58d32ce impl, dd3fb05 test fix). Mutations 5/5 after fix.
     now asserts its argv too.
   - Mutation 4 (drop `-a`) is a genuine kill: test_list_argv_uses_explicit_socket
     asserts the whole argv list. Left alone.
+  - CORRECTION 2026-07-11: the causal story above is backwards. The `code != 0`
+    guard is what PRODUCES the empty dict on a failed query; it does not "stop"
+    pruning. The guard is still right, but for a different reason -- a failed
+    process's stdout is not evidence (Task 7 pins that). The pruning hazard it was
+    said to prevent was in fact LIVE: an empty pane set made prune delete every
+    live session's state file on a stuttering tmux. That is defect F3, fixed in
+    Task 13 by teaching prune which sockets were actually observed.
 
 909e8a2: run-tests now sets PYTHONDONTWRITEBYTECODE=1.
   CPython invalidates .pyc on (mtime, size). A size-preserving mutation restored
@@ -99,17 +106,32 @@ Task 6: complete (cb114a4). Mutations 6/6.
     find pane"). The plan's "best effort" comment is accurate: the only failure is
     the harmless no-client-attached case. Jump path is sound.
   - Implementer first reported BLOCKED, claiming tmux 3.0a segfaults on
-    `send-keys -l` with a space. Misdiagnosis, retracted in the report. See below.
+    `send-keys -l` with a space. Was told this was a misdiagnosis and retracted it.
+    CORRECTION 2026-07-11: the implementer was RIGHT. Re-measured, `dmesg` confirms
+    `tmux: server[...]: segfault`. See the corrected prerequisite below. The
+    retraction, not the report, was the error.
 
-PREREQUISITE, FIXED 2026-07-10: `~/.tmux.conf` line 1 was `set mode-keys vi`.
-  `mode-keys` is a window option; bare `set` makes tmux 3.0a abort the server on
-  the first external command. `-S` isolates the socket but NOT the config file, so
-  every real-tmux experiment in this repo must pass `-f /dev/null` until the user
-  fixes it (`setw -g mode-keys vi`).
-  Consequence: with the config as it stands, cc_navigator's first `list-panes` --
-  Task 5's read-only query -- would kill the user's tmux server and every Claude
-  session in it. Task 11's doctor is the detector. Asked the user; awaiting reply.
-  No tmux server is running today, so nothing is at risk right now.
+PREREQUISITE, corrected 2026-07-11 (supersedes the 2026-07-10 account):
+  The real rule, measured on tmux 3.0a with a private -L socket and the honest
+  liveness probe `tmux -L <sock> list-sessions; echo $?`:
+    * A `set`-family line (`set`/`setw`/`set-option`/`set-window-option`) whose
+      flags include NONE of -g/-q/-s corrupts the server at config-LOAD time,
+      silently (new-session exits 0). It is NOT specific to `mode-keys`:
+      `set clock-mode-style 12` and `set status-bg black` (a session option) are
+      equally fatal, and `set mode-keys emacs` (the default value) is fatal.
+    * The corruption fires as a SEGFAULT only when a SPACE is later sent via
+      send-keys (`send-keys -l -- 'a b'`, or key name `Space`). The read path
+      (`list-panes`, `select-pane`, `switch-client`) is safe and leaves the server
+      alive -- so the old "first `list-panes` kills the server" was wrong.
+    * An ATTACHED client prevents the crash (7/7). The blast radius is DETACHED
+      but live sessions -- which cc_navigator still lists and sends into. So the
+      danger is the first spaced reply into a detached session, not the first query.
+  `-S`/`-L` isolates the socket but NOT the config file; pass `-f /dev/null` (or a
+  known-good conf) when testing tmux behaviour rather than the user's setup.
+  Task 11's doctor now REPRODUCES this on a private socket rather than guessing from
+  a regex (probe_tmux_conf), and the pure check_tmux_conf is only an advisory hint.
+  The user's ~/.tmux.conf was fixed 2026-07-10 (`setw -g mode-keys vi`), so nothing
+  is at risk today; the doctor is the detector for a new machine.
 
 Method note: an identical crash signature across different inputs is evidence of a
 common cause upstream of the inputs, not of several input-triggered bugs.
@@ -238,3 +260,61 @@ Environment note for a new machine: `gdbus` may resolve to Anaconda's copy. Both
 /usr/bin/gdbus and ~/anaconda3/bin/gdbus answer Eval("1+1") correctly here.
 `wmctrl` and `xdotool` are NOT installed -- Task 9's report claims a wmctrl check
 that therefore cannot have run. Use `xwininfo -root -tree` instead.
+
+
+## 2026-07-11, resumed on a new machine (/home/kodogyu/playground/cc_navigator)
+
+This is the "different machine" the 2026-07-10 handoff anticipated. Environment
+re-verified: /usr/bin/python3 3.8.10 with gi; tmux 3.0a; X11, DISPLAY=:1; GNOME
+Shell 3.36.9 with Eval answering (true, '2'); `gdbus` resolves to Anaconda's copy
+(both it and /usr/bin/gdbus work); `wmctrl`/`xdotool` absent. The user's
+~/.tmux.conf already has `setw -g mode-keys vi` (safe) but does NOT have the
+`set-titles` lines the 2026-07-10 log claimed were added -- the doctor catches this.
+
+Task 11: complete (66a6f24 impl via workflow, b5c840b controller revision).
+  - Built TDD-first: doctor.py, bin/cc-navigator-doctor, test_doctor.py. The plan's
+    check_tmux_conf regex encoded a WRONG rule (see the corrected prerequisite
+    above); replaced with the measured -g/-q/-s rule as a HINT plus probe_tmux_conf,
+    which reproduces the segfault on a private socket and is the authoritative
+    verdict. Act through one channel, verify through another -- the project's rule,
+    applied to its own detector.
+  - Independent verification: 11/11 mutations killed (incl. the two predicted to
+    survive), 3 adversarial reviewers. The reviewers found real gaps the
+    implementer's self-report missed, fixed in b5c840b:
+      * check_tmux_conf was required=True, so a parser false positive (an unjoined
+        line continuation) could veto the authoritative probe. Made it advisory;
+        the probe is the gate.
+      * No test observed the probe's load-bearing -f <conf> and -d (detached) args;
+        dropping either makes every fatal config pass, and both survived. Pinned.
+      * Guarded socket_name="default" so the probe can never target the real server.
+  - Accepted: kill-server leaves a 0-byte socket file (tmux behaviour, not a leak).
+
+Task 13: complete (ae9046f). Two silent successes on the critical path, both found
+  and reproduced against real tmux while preparing Task 11's brief.
+  - F2: tmuxctl.send_text discarded both send-keys exit codes, so a reply into a
+    server that had just segfaulted returned normally and the UI showed success.
+    Now returns SendResult(delivered, submitted); a failed literal stops before
+    Enter; app.send_status maps each outcome to a distinct Korean status, silent
+    only on full success. Reproduced: send_text into a to-be-segfaulted server now
+    reports delivered=False.
+  - F3: collect_rows pruned using every socket's pane set, but a failed/timed-out
+    (124, "") query returns {} -- so one slow tick deleted every live session's
+    state file, and a WAITING session fires no more hooks so its row never returned.
+    sessions_by_pane_result now reports whether tmux answered; only observed sockets
+    gate pruning; age/junk pruning stays unconditional. Reproduced: a SIGSTOP'd tmux
+    no longer loses the state file, and the row returns on unwedge.
+  - All 9 brief mutations killed by named tests, incl. the two predicted to survive
+    (send_text ignoring Enter's exit; prune skipping age for unobserved sockets).
+  - Accepted, argued in the report: when a query fails, the row vanishes from the UI
+    for that tick with no status message, but the state file survives so the row
+    returns within one poll once tmux answers. A status flash for a sub-second
+    stutter would be the kind of flapping noise this project avoids; a persistent
+    wedge is bounded by proc's 5s timeout per tick and reaps by age.
+  Suite: 239 tests, green.
+
+Correction worth keeping (the theme of this whole session): distrusting an API's
+self-report has to extend to distrusting your OWN instruments and your own earlier
+conclusions. Three of this project's load-bearing "facts" were wrong -- the tmux
+rule, Task 6's retraction, and the Task 5 causal story -- and each was written down
+with confidence. The measured matrix, the kernel `dmesg`, and the end-to-end
+reproductions are the evidence; the prose was not.
