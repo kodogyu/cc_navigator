@@ -303,7 +303,7 @@ class SettingsUiTest(unittest.TestCase):
             settings=config.Settings(opacity=0.6),
         )
         try:
-            self.assertAlmostEqual(window.get_opacity(), 0.6, places=2)
+            self.assertAlmostEqual(Gtk.Widget.get_opacity(window), 0.6, places=2)
         finally:
             window.destroy()
 

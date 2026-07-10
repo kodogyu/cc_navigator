@@ -162,7 +162,7 @@ class NavigatorWindow(Gtk.Window):
 
         self.resize(settings.width, settings.height)
         self._apply_geometry(settings)
-        self.set_opacity(settings.opacity)
+        Gtk.Widget.set_opacity(self, settings.opacity)
         self._apply_css(settings)
 
     def _apply_geometry(self, settings: "config.Settings") -> None:
