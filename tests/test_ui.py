@@ -259,6 +259,37 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_expanded_row_shows_the_last_prompt_and_path(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(cwd="/data/projects/demo", session_id="a")])
+            child = window._listbox.get_children()[0]
+            window._listbox.select_row(child)
+            texts = []
+            def walk(w):
+                if isinstance(w, Gtk.Label):
+                    texts.append(w.get_text())
+                if isinstance(w, Gtk.Container):
+                    for c in w.get_children():
+                        walk(c)
+            walk(child)
+            joined = " ".join(texts)
+            self.assertIn("/data/projects/demo", joined)
+        finally:
+            window.destroy()
+
+    def test_reclicking_selected_row_collapses_it(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a")])
+            child = window._listbox.get_children()[0]
+            window._listbox.select_row(child)
+            self.assertIsNotNone(window._listbox.get_selected_row())
+            window._on_row_activated(window._listbox, child)  # re-click
+            self.assertIsNone(window._listbox.get_selected_row())
+        finally:
+            window.destroy()
+
     def test_destroy_does_not_touch_a_main_loop(self):
         # If NavigatorWindow ever reconnects destroy to Gtk.main_quit, GTK
         # prints "gtk_main_quit: assertion 'main_loops != NULL' failed" to

@@ -145,6 +145,7 @@ class NavigatorWindow(Gtk.Window):
         self._listbox = Gtk.ListBox()
         self._listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self._listbox.connect("row-selected", self._on_row_selected)
+        self._listbox.connect("row-activated", self._on_row_activated)
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -551,8 +552,37 @@ class NavigatorWindow(Gtk.Window):
         actions.pack_start(entry, True, True, 0)
         actions.pack_start(jump, False, False, 0)
 
+        detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        path_label = Gtk.Label(xalign=0.0)
+        path_label.set_markup(
+            '<small><span foreground="#77767b">%s</span></small>'
+            % GLib.markup_escape_text(row.cwd))
+        path_label.set_selectable(True)
+        path_label.set_line_wrap(True)
+        detail.pack_start(path_label, False, False, 0)
+
+        if row.last_prompt:
+            prompt_label = Gtk.Label(xalign=0.0)
+            prompt_label.set_markup(
+                "<small>%s</small>" % GLib.markup_escape_text(row.last_prompt))
+            prompt_label.set_line_wrap(True)
+            prompt_label.set_lines(3)
+            prompt_label.set_ellipsize(Pango.EllipsizeMode.END)
+            detail.pack_start(prompt_label, False, False, 0)
+
+        meta = Gtk.Label(xalign=0.0)
+        state_line = row.state + (" · " + row.reason if row.reason else "")
+        meta.set_markup(
+            '<small><span foreground="#77767b">%s</span></small>'
+            % GLib.markup_escape_text(state_line))
+        detail.pack_start(meta, False, False, 0)
+
+        reveal_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        reveal_body.pack_start(detail, False, False, 0)
+        reveal_body.pack_start(actions, False, False, 0)
+
         revealer = Gtk.Revealer()
-        revealer.add(actions)
+        revealer.add(reveal_body)
         # Stash the widgets set_rows and set_eval_available need so they can find
         # them without walking the widget tree. ccnav_row was removed as unused in
         # a pre-flight plan review; it is used now -- set_rows matches on
@@ -578,6 +608,12 @@ class NavigatorWindow(Gtk.Window):
             revealer = getattr(child, "ccnav_revealer", None)
             if revealer is not None:
                 revealer.set_reveal_child(child is selected)
+
+    def _on_row_activated(self, listbox, activated) -> None:
+        """A click on the already-selected row collapses it (deselects). GTK's
+        single-click select does not toggle, so we do it here."""
+        if listbox.get_selected_row() is activated:
+            listbox.unselect_row(activated)
 
     def _on_jump_clicked(self, _button, row: model.Row) -> None:
         self._on_jump(row)
