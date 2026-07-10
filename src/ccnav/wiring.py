@@ -67,3 +67,31 @@ def remove_launcher(apps_dir: Optional[pathlib.Path] = None) -> bool:
         return True
     except OSError:
         return False
+
+
+def _default_autostart_dir() -> pathlib.Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config")
+    return pathlib.Path(base) / "autostart"
+
+
+def autostart_path(autostart_dir: Optional[pathlib.Path] = None) -> pathlib.Path:
+    return (autostart_dir or _default_autostart_dir()) / (APP_ID + ".desktop")
+
+
+def autostart_enabled(autostart_dir: Optional[pathlib.Path] = None) -> bool:
+    path = autostart_path(autostart_dir)
+    try:
+        text = path.read_text()
+    except OSError:
+        return False
+    # Present counts as enabled unless the GNOME key explicitly disables it.
+    return "X-GNOME-Autostart-enabled=false" not in text
+
+
+def set_autostart(
+    enabled: bool, exec_path: str, autostart_dir: Optional[pathlib.Path] = None
+) -> None:
+    flag = "true" if enabled else "false"
+    text = _DESKTOP % {"exec": exec_path} + "X-GNOME-Autostart-enabled=%s\n" % flag
+    _atomic_write(autostart_path(autostart_dir), text)
