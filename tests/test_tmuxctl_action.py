@@ -6,26 +6,38 @@ HOSTILE = "yes; echo 'x' \"y\" $HOME \\ 한글 ✳ Enter C-c"
 
 
 class SelectArgvsTest(unittest.TestCase):
-    def test_switch_then_select_window_then_select_pane(self):
+    def test_select_window_then_select_pane(self):
         argvs = tmuxctl.select_argvs("/tmp/s", "%12")
         self.assertEqual(
             argvs,
             [
-                ["tmux", "-S", "/tmp/s", "switch-client", "-t", "%12"],
                 ["tmux", "-S", "/tmp/s", "select-window", "-t", "%12"],
                 ["tmux", "-S", "/tmp/s", "select-pane", "-t", "%12"],
             ],
         )
+
+    def test_never_switches_client_across_sessions(self):
+        # switch-client is the only command that can move a client to another
+        # session; on a shared socket a jump would then hijack an unrelated
+        # terminal. The jump path must never use it.
+        for argv in tmuxctl.select_argvs("/tmp/s", "%12"):
+            self.assertNotIn("switch-client", argv)
+
+    def test_every_target_is_the_requested_pane_only(self):
+        # Session-scoped safety: every argv addresses exactly the pane we were
+        # asked for, so no other session's client can be affected.
+        for argv in tmuxctl.select_argvs("/tmp/s", "%12"):
+            self.assertEqual(argv[argv.index("-t") + 1], "%12")
 
     def test_select_pane_runs_every_argv_even_if_one_fails(self):
         seen = []
 
         def fake_run(argv):
             seen.append(list(argv))
-            return (1, "") if "switch-client" in argv else (0, "")
+            return (1, "") if "select-window" in argv else (0, "")
 
         tmuxctl.select_pane("/tmp/s", "%12", run=fake_run)
-        self.assertEqual(len(seen), 3)
+        self.assertEqual(len(seen), 2)
 
 
 class SendTextArgvsTest(unittest.TestCase):

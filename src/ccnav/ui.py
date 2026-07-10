@@ -87,6 +87,11 @@ class NavigatorWindow(Gtk.Window):
         self._signature = None
 
         self.set_keep_above(True)
+        # stick(): appear on EVERY workspace, not just the one it was created on.
+        # keep_above alone floats it above other windows but only within its own
+        # workspace, so switching workspaces would lose the panel. The panel's
+        # whole job is to be reachable from any workspace, so it must be sticky.
+        self.stick()
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
         self.set_type_hint(Gdk.WindowTypeHint.UTILITY)

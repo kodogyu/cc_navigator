@@ -63,9 +63,22 @@ def titles_by_pane(socket: str, run: Runner = run_command) -> Dict[str, str]:
 
 
 def select_argvs(socket: str, pane: str) -> List[List[str]]:
-    """switch-client is best effort: it fails when no client is attached."""
+    """Make the pane's OWN session show its window and pane -- nothing else.
+
+    Deliberately NO `switch-client`. switch-client is the one tmux command that
+    re-attaches a client to a different session, and with no `-c` it acts on an
+    arbitrary client on the server. On the documented layout -- several sessions
+    on one socket, one gnome-terminal client attached to each -- a jump to
+    session B would drag some other terminal's client onto session B (the panel
+    lists sessions by socket+pane, so many sessions share the default socket).
+    That was a real bug: jumping to one project switched an unrelated terminal.
+
+    select-window and select-pane are session-scoped: `-t <pane>` resolves to the
+    pane's session and can only ever change THAT session's current window/pane,
+    which the terminal already attached to it follows. GNOME activation raises
+    the right X11 window; tmux never needs to move a client between sessions.
+    """
     return [
-        ["tmux", "-S", socket, "switch-client", "-t", pane],
         ["tmux", "-S", socket, "select-window", "-t", pane],
         ["tmux", "-S", socket, "select-pane", "-t", pane],
     ]
