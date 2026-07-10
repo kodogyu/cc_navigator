@@ -48,6 +48,7 @@ class BuildRecordTest(unittest.TestCase):
                 "reason": "permission_prompt",
                 "message": "Allow Bash command: npm test?",
                 "updated_at": 1783665780,
+                "last_prompt": "",
             },
         )
 
@@ -114,9 +115,13 @@ class MainTest(unittest.TestCase):
         self.assertEqual(result, 0)
 
     def test_writes_nothing_without_tmux(self):
+        # main() now reads the prior record (Task 9) before build_record's
+        # tmux check runs, which creates the state dir as a side effect via
+        # ensure_state_dir. The invariant this test guards is that no state
+        # *file* is written, not that the directory never comes into being.
         result = self._run_main(json.dumps(PAYLOAD), {"XDG_RUNTIME_DIR": self.runtime_dir})
         self.assertEqual(result, 0)
-        self.assertFalse(self.state_dir.exists())
+        self.assertEqual(list(self.state_dir.glob("*.json")), [])
 
     def test_happy_path_writes_expected_state_file(self):
         payload = {
@@ -134,6 +139,33 @@ class MainTest(unittest.TestCase):
         self.assertEqual(written["reason"], "idle")
         self.assertEqual(written["tmux_pane"], "%12")
         self.assertEqual(written["tmux_socket"], "/tmp/tmux-1000/default")
+
+
+class LastPromptTest(unittest.TestCase):
+    ENV = {"TMUX": "/x,1,0", "TMUX_PANE": "%1"}
+
+    def test_user_prompt_is_captured_and_truncated(self):
+        rec = hook.build_record(
+            {"session_id": "s", "hook_event_name": "UserPromptSubmit",
+             "user_prompt": "x" * 500}, self.ENV, 1)
+        self.assertEqual(rec["last_prompt"], "x" * hook.PROMPT_LIMIT)
+
+    def test_falls_back_to_prompt_field(self):
+        rec = hook.build_record(
+            {"session_id": "s", "hook_event_name": "UserPromptSubmit",
+             "prompt": "hello"}, self.ENV, 1)
+        self.assertEqual(rec["last_prompt"], "hello")
+
+    def test_prompt_is_carried_forward_across_a_promptless_event(self):
+        rec = hook.build_record(
+            {"session_id": "s", "hook_event_name": "Stop"}, self.ENV, 1,
+            previous={"last_prompt": "earlier"})
+        self.assertEqual(rec["last_prompt"], "earlier")
+
+    def test_no_previous_and_no_prompt_is_empty(self):
+        rec = hook.build_record(
+            {"session_id": "s", "hook_event_name": "Stop"}, self.ENV, 1)
+        self.assertEqual(rec["last_prompt"], "")
 
 
 class SessionEndTest(unittest.TestCase):

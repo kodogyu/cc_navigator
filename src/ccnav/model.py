@@ -19,6 +19,7 @@ class Row:
     message: str
     cwd: str
     updated_at: int
+    last_prompt: str = ""
 
     @property
     def waiting(self) -> bool:
@@ -92,6 +93,7 @@ def build_rows(
                 message=str(rec.get("message") or ""),
                 cwd=str(rec.get("cwd") or ""),
                 updated_at=_as_int(rec.get("updated_at", 0)),
+                last_prompt=str(rec.get("last_prompt") or ""),
             )
         )
     rows.sort(key=lambda row: (0 if row.waiting else 1, -row.updated_at))

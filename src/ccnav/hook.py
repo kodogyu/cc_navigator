@@ -14,6 +14,7 @@ from typing import Dict, Mapping, Optional
 from . import hookstate, paths, statestore
 
 MESSAGE_LIMIT = 200
+PROMPT_LIMIT = 300
 
 
 def tmux_socket_from_env(env: Mapping[str, str]) -> Optional[str]:
@@ -25,7 +26,8 @@ def tmux_socket_from_env(env: Mapping[str, str]) -> Optional[str]:
 
 
 def build_record(
-    payload: Dict[str, object], env: Mapping[str, str], now: int
+    payload: Dict[str, object], env: Mapping[str, str], now: int,
+    previous: Optional[Dict[str, object]] = None,
 ) -> Optional[Dict[str, object]]:
     pane = env.get("TMUX_PANE")
     socket = tmux_socket_from_env(env)
@@ -41,6 +43,14 @@ def build_record(
         return None
     state, reason = classified
 
+    if payload.get("hook_event_name") == "UserPromptSubmit":
+        prompt = payload.get("user_prompt")
+        if not isinstance(prompt, str):
+            prompt = payload.get("prompt")
+        last_prompt = str(prompt or "")[:PROMPT_LIMIT]
+    else:
+        last_prompt = str((previous or {}).get("last_prompt") or "")
+
     return {
         "session_id": session_id,
         "cwd": str(payload.get("cwd") or ""),
@@ -50,6 +60,7 @@ def build_record(
         "reason": reason,
         "message": str(payload.get("message") or "")[:MESSAGE_LIMIT],
         "updated_at": now,
+        "last_prompt": last_prompt,
     }
 
 
@@ -69,12 +80,15 @@ def main() -> int:
             pass  # a broken navigator must never break Claude Code
         return 0
 
-    record = build_record(payload, os.environ, int(time.time()))
+    state_dir = paths.ensure_state_dir()
+    session_id = str(payload.get("session_id") or "")
+    previous = statestore.read_one(state_dir, session_id)
+    record = build_record(payload, os.environ, int(time.time()), previous)
     if record is None:
         return 0
 
     try:
-        statestore.write(paths.ensure_state_dir(), record)
+        statestore.write(state_dir, record)
     except Exception:
         pass  # a broken navigator must never break Claude Code
     return 0

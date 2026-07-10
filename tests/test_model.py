@@ -121,6 +121,14 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(rows[0].updated_at, 100)
 
 
+class LastPromptRowTest(unittest.TestCase):
+    def test_build_rows_carries_last_prompt(self):
+        records = [{"session_id": "s", "tmux_socket": "/x", "tmux_pane": "%1",
+                    "state": "working", "updated_at": 1, "last_prompt": "do X"}]
+        rows = model.build_rows(records, {"/x": {"%1": "sess"}}, {"/x": {"%1": "t"}})
+        self.assertEqual(rows[0].last_prompt, "do X")
+
+
 class LivePaneKeysTest(unittest.TestCase):
     def test_flattens_sockets_and_panes(self):
         keys = model.live_pane_keys({SOCK: {"%1": "a", "%2": "b"}})
