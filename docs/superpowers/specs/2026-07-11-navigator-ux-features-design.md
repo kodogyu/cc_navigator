@@ -199,11 +199,10 @@ is not on `PATH`. Nothing else; the rest are settings toggles.
   - The canonical hook set lives in ONE place shared with `doctor.py`, so the doctor's check and
     the installer's write cannot drift.
 
-*Alternative noted for the spec review*: Anthropic's own recommended way to avoid editing a user's
-`settings.json` at all is to ship the hook as a Claude Code **plugin** (`hooks/hooks.json`), where
-"wiring on/off" is enabling/disabling the plugin (writes only `enabledPlugins`). It is cleaner but a
-bigger distribution change; the identity-based merge above is the pragmatic fit for a cloned repo.
-Flagged so the user can choose the plugin route instead.
+*Decision (2026-07-11): the identity-based direct-edit merge above is chosen.* The alternative —
+shipping the hook as a Claude Code **plugin** (`hooks/hooks.json`), where "wiring on/off" enables or
+disables the plugin and writes only `enabledPlugins`, never the `hooks` tree — is cleaner but a
+bigger distribution change; it is recorded here as a future option, not built now.
 
 The Integration frame in settings shows each as a `Gtk.CheckButton` whose initial state comes from
 the predicate; toggling runs the install/remove action and reports failure in a label rather than
@@ -308,6 +307,11 @@ convert button.
 Steps 3 and 4 both change the hook contract, so they are adjacent. Step 5 (touching the user's
 `~/.claude/settings.json` and `~/.local`) is isolated. Steps 6 and 7 add the new `agents.py`
 source and build on each other; 7 needs 6's background rows to hang the button on.
+
+**Decision (2026-07-11): two implementation plans.** Plan 1 = steps 1–5 (the "polish" batch, all on
+the existing hook + settings foundation). Plan 2 = steps 6–7 (background sessions, introducing the
+new `claude agents --json` source and the convert flow). Plan 1 is built and verified first; Plan 2
+follows as its own plan/branch so the new subsystem's risk is isolated.
 
 ## 9. Risks
 
