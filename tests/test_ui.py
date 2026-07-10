@@ -207,6 +207,32 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_set_row_jump_sensitive_toggles_one_rows_button(self):
+        # Added for Task 10: Application disables one row's jump button while
+        # its activation is in flight, and must not disturb any other row.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a"), row(session_id="b")])
+            children = {c.ccnav_row.session_id: c for c in window._listbox.get_children()}
+
+            window.set_row_jump_sensitive("a", False)
+            self.assertFalse(children["a"].ccnav_jump.get_sensitive())
+            self.assertTrue(children["b"].ccnav_jump.get_sensitive())
+
+            window.set_row_jump_sensitive("a", True)
+            self.assertTrue(children["a"].ccnav_jump.get_sensitive())
+        finally:
+            window.destroy()
+
+    def test_set_row_jump_sensitive_is_a_noop_for_a_vanished_session(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a")])
+            window.set_row_jump_sensitive("gone", False)  # must not raise
+            self.assertTrue(window._listbox.get_children()[0].ccnav_jump.get_sensitive())
+        finally:
+            window.destroy()
+
     def test_destroy_does_not_touch_a_main_loop(self):
         # If NavigatorWindow ever reconnects destroy to Gtk.main_quit, GTK
         # prints "gtk_main_quit: assertion 'main_loops != NULL' failed" to

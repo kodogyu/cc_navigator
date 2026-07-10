@@ -145,6 +145,18 @@ class NavigatorWindow(Gtk.Window):
         self._transient = text
         self._render_status()
 
+    def set_row_jump_sensitive(self, session_id: str, sensitive: bool) -> None:
+        """Added for Task 10: the smallest accessor that lets Application
+        disable one row's jump button while its activation is in flight (so a
+        double click cannot start two activations) and re-enable it when the
+        result comes back, without Application reaching into the widget tree.
+        A no-op if the row is gone (e.g. the session ended mid-jump).
+        """
+        for child in self._listbox.get_children():
+            if child.ccnav_row.session_id == session_id:
+                child.ccnav_jump.set_sensitive(sensitive)
+                return
+
     def set_rows(self, rows: List[model.Row]) -> None:
         # Task 10 calls this on a one-second timer. Rebuilding the list destroys
         # every child, including the Gtk.Entry the user is typing a reply into,

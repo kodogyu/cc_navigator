@@ -1,0 +1,15 @@
+#!/bin/sh
+# /usr/bin/python3 is mandatory: `which python3` is Anaconda and has no PyGObject.
+# Resolve $0 through any symlinks first -- the same fix bin/cc-navigator-hook
+# already needed: `dirname "$0"` alone yields the symlink's own directory, so
+# a link on $PATH would point PYTHONPATH at a nonexistent src/ and the import
+# would fail.
+#
+# Unlike the hook, this launcher is run by the user directly: it execs (no
+# fork left waiting around) and never swallows stderr, so a failure to start
+# is visible instead of silent.
+set -e
+target=$(readlink -f "$0" 2>/dev/null) || target=$0
+[ -n "$target" ] || target=$0
+here=$(cd "$(dirname "$target")" && pwd)
+PYTHONPATH="$here/../src${PYTHONPATH:+:$PYTHONPATH}" exec /usr/bin/python3 -m ccnav.app
