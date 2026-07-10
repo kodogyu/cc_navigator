@@ -35,12 +35,12 @@ def _default_apps_dir() -> pathlib.Path:
     return pathlib.Path(base) / "applications"
 
 
-def _atomic_write(path: pathlib.Path, text: str) -> None:
+def _atomic_write_bytes(path: pathlib.Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-")
     try:
-        with os.fdopen(fd, "w") as handle:
-            handle.write(text)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp, str(path))
@@ -48,6 +48,10 @@ def _atomic_write(path: pathlib.Path, text: str) -> None:
         if os.path.exists(tmp):
             os.unlink(tmp)
         raise
+
+
+def _atomic_write(path: pathlib.Path, text: str) -> None:
+    _atomic_write_bytes(path, text.encode("utf-8"))
 
 
 def launcher_path(apps_dir: Optional[pathlib.Path] = None) -> pathlib.Path:
@@ -146,11 +150,33 @@ def hooks_installed(hook_command: str, settings_path: pathlib.Path) -> bool:
     return True
 
 
+def _unique_backup_path(settings_path: pathlib.Path) -> pathlib.Path:
+    """A settings.json.bak-<epoch> name that does not already exist. Second
+    granularity collides when two writes land in the same wall-clock second
+    (an install immediately followed by a remove), and _atomic_write would then
+    os.replace the pristine pre-install backup with post-install content -- so
+    fall through to a -1, -2, ... suffix until the name is free."""
+    base = settings_path.name + ".bak-%d" % int(time.time())
+    candidate = settings_path.with_name(base)
+    suffix = 0
+    while candidate.exists():
+        suffix += 1
+        candidate = settings_path.with_name("%s-%d" % (base, suffix))
+    return candidate
+
+
 def _write_settings(settings_path: pathlib.Path, data: dict) -> None:
     if settings_path.exists():
-        backup = settings_path.with_name(
-            settings_path.name + ".bak-%d" % int(time.time()))
-        _atomic_write(backup, settings_path.read_text())
+        # Copy the ORIGINAL as raw bytes: read_text() would raise on a non-UTF-8
+        # file (UnicodeDecodeError, a ValueError) that _load_settings already
+        # tolerated, turning a graceful degrade into a crash. If we cannot read
+        # it at all (e.g. mode 000), do NOT overwrite -- replacing a file we
+        # could not back up would lose it silently.
+        try:
+            original = settings_path.read_bytes()
+        except OSError:
+            return
+        _atomic_write_bytes(_unique_backup_path(settings_path), original)
     _atomic_write(settings_path, json.dumps(data, indent=2))
 
 
@@ -188,9 +214,13 @@ def remove_hooks(hook_command: str, settings_path: pathlib.Path) -> bool:
                 continue
             kept = [h for h in g["hooks"]
                     if not (isinstance(h, dict) and h.get("command") == hook_command)]
-            if len(kept) != len(g["hooks"]):
+            removed_here = len(kept) != len(g["hooks"])
+            if removed_here:
                 changed = True
-            if kept:
+            # Drop a group only when removing OUR command is what emptied it.
+            # A group that was ALREADY empty (foreign structure we touched
+            # nothing in) must survive, or a plain remove silently deletes it.
+            if kept or not removed_here:
                 new = dict(g)
                 new["hooks"] = kept
                 new_groups.append(new)

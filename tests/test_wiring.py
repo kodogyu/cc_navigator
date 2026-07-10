@@ -1,6 +1,8 @@
+import os
 import pathlib
 import tempfile
 import unittest
+from unittest import mock
 
 from ccnav import wiring
 
@@ -109,3 +111,56 @@ class HooksMergeTest(unittest.TestCase):
         wiring.install_hooks(self.cmd, self.path)
         backups = list(self.path.parent.glob("settings.json.bak-*"))
         self.assertEqual(len(backups), 1)
+
+    def test_install_on_non_utf8_settings_degrades_and_backs_up(self):
+        # A non-UTF-8 settings.json must not crash install_hooks: read_text()
+        # would raise UnicodeDecodeError (a ValueError) that _load_settings
+        # already tolerated. The raw bytes must be preserved in a backup.
+        self.path.parent.mkdir(parents=True)
+        raw = b"\xff\xfe\x00bad \x80\x81"
+        self.path.write_bytes(raw)
+        wiring.install_hooks(self.cmd, self.path)  # must not raise
+        self.assertTrue(wiring.hooks_installed(self.cmd, self.path))
+        backups = list(self.path.parent.glob("settings.json.bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), raw)  # original bytes intact
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0,
+                     "mode 000 is still readable by root")
+    def test_install_on_unreadable_settings_leaves_it_untouched(self):
+        # If the existing file cannot be read to back it up, it must NOT be
+        # overwritten -- replacing an un-backupable file would lose it silently.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text('{"model": "sonnet"}')
+        os.chmod(str(self.path), 0)
+        self.addCleanup(lambda: os.chmod(str(self.path), 0o600))
+        wiring.install_hooks(self.cmd, self.path)  # must not raise
+        os.chmod(str(self.path), 0o600)
+        self.assertEqual(json.loads(self.path.read_text()), {"model": "sonnet"})
+        self.assertFalse(wiring.hooks_installed(self.cmd, self.path))
+
+    def test_install_then_remove_in_same_second_keeps_pristine_backup(self):
+        # Two writes in the same wall-clock second must not clobber the pristine
+        # pre-install backup (second-granularity names would collide).
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"hooks": {"Stop": [
+            {"matcher": "", "hooks": [{"type": "command", "command": "/other/tool"}]}]}}))
+        with mock.patch("ccnav.wiring.time.time", return_value=1000000000):
+            wiring.install_hooks(self.cmd, self.path)
+            wiring.remove_hooks(self.cmd, self.path)
+        backups = sorted(self.path.parent.glob("settings.json.bak-*"))
+        self.assertEqual(len(backups), 2)  # neither clobbered the other
+        pristine = json.loads(backups[0].read_text())  # install's = pre-install
+        stop_cmds = [h["command"] for g in pristine["hooks"]["Stop"] for h in g["hooks"]]
+        self.assertEqual(stop_cmds, ["/other/tool"])  # our cmd never in the pristine copy
+
+    def test_remove_preserves_an_already_empty_foreign_group(self):
+        # A foreign matcher group that was ALREADY empty must survive a remove;
+        # only a group WE emptied (by stripping our command) may be pruned.
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"hooks": {"Stop": [
+            {"matcher": "foo", "hooks": []},
+            {"matcher": "", "hooks": [{"type": "command", "command": self.cmd}]}]}}))
+        self.assertTrue(wiring.remove_hooks(self.cmd, self.path))
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["hooks"]["Stop"], [{"matcher": "foo", "hooks": []}])
