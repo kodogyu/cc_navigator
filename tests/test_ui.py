@@ -275,21 +275,35 @@ class SettingsUiTest(unittest.TestCase):
     reliably read back on an unmapped window, so apply_settings is exercised for
     'does not raise' and the parts we CAN observe (font, stored settings)."""
 
-    def test_font_size_writes_scoped_css_and_zero_clears_it(self):
+    def test_css_carries_font_and_background(self):
         from ccnav import config
         window = ui.NavigatorWindow(
             on_jump=lambda r: None, on_send=lambda r, t: None,
-            settings=config.Settings(font_size=15),
+            settings=config.Settings(font_size=15, bg_color="#123456"),
         )
         try:
-            # A positive size produces a .ccnav-scoped rule at that size.
             css = window._css.to_string()
             self.assertIn("15pt", css)
-            self.assertIn(".ccnav", css)
-
-            # font_size 0 means "system default": the provider is cleared.
-            window._apply_font(0)
+            # GTK's CssProvider re-serializes on to_string(): a hex color comes
+            # back as rgb(r,g,b), not the original "#123456" literal, so we
+            # assert the round-tripped decimal form rather than the hex text.
+            self.assertIn("rgb(18,52,86)", css)
+            self.assertIn("background-color", css)
+            # Clearing both means an empty provider.
+            window.apply_settings(config.Settings(font_size=0, bg_color=""))
             self.assertNotIn("pt", window._css.to_string())
+            self.assertNotIn("background-color", window._css.to_string())
+        finally:
+            window.destroy()
+
+    def test_opacity_is_applied(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.Settings(opacity=0.6),
+        )
+        try:
+            self.assertAlmostEqual(window.get_opacity(), 0.6, places=2)
         finally:
             window.destroy()
 

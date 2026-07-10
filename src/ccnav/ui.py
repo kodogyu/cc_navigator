@@ -162,7 +162,8 @@ class NavigatorWindow(Gtk.Window):
 
         self.resize(settings.width, settings.height)
         self._apply_geometry(settings)
-        self._apply_font(settings.font_size)
+        self.set_opacity(settings.opacity)
+        self._apply_css(settings)
 
     def _apply_geometry(self, settings: "config.Settings") -> None:
         """Pin the window to the chosen corner of the primary monitor.
@@ -194,14 +195,17 @@ class NavigatorWindow(Gtk.Window):
         x, y = positions.get(settings.corner, positions["top-right"])
         self.move(x, y)
 
-    def _apply_font(self, font_size: int) -> None:
-        """Scale the panel's font via its scoped CSS provider. font_size 0 means
-        'do not override', so we clear the provider and the system font returns."""
-        if font_size <= 0:
-            self._css.load_from_data(b"")
-            return
-        css = ".ccnav, .ccnav * { font-size: %dpt; }" % font_size
-        self._css.load_from_data(css.encode("utf-8"))
+    def _apply_css(self, settings: "config.Settings") -> None:
+        """Scale the panel's font and tint its background via the scoped provider.
+        Both are optional: font_size 0 and bg_color "" each omit their rule, and
+        an empty provider restores the theme. Scoped to .ccnav so no other app is
+        touched."""
+        parts = []
+        if settings.bg_color:
+            parts.append(".ccnav { background-color: %s; }" % settings.bg_color)
+        if settings.font_size > 0:
+            parts.append(".ccnav, .ccnav * { font-size: %dpt; }" % settings.font_size)
+        self._css.load_from_data("\n".join(parts).encode("utf-8"))
 
     def _on_settings_clicked(self, _button) -> None:
         dialog = self._build_settings_dialog()
