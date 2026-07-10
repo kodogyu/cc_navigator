@@ -49,17 +49,24 @@ class QueryTest(unittest.TestCase):
         self.assertEqual(calls[0][-1], "#{pane_id}=#{session_name}")
 
     def test_titles_by_pane(self):
+        calls = []
+
         def fake_run(argv):
+            calls.append(list(argv))
             return 0, "%0=✳ 작업 중 (demo-project)\n"
 
         result = tmuxctl.titles_by_pane("/tmp/s", run=fake_run)
         self.assertEqual(
             result, {"%0": "✳ 작업 중 (demo-project)"}
         )
+        self.assertEqual(calls[0][-1], "#{pane_id}=#{pane_title}")
 
-    def test_no_tmux_server_yields_empty_dict(self):
+    def test_nonzero_exit_yields_empty_dict_even_with_output(self):
+        # A dead tmux socket may still print a line to stdout. The exit-code
+        # guard is what makes "no server" mean "no panes"; without it a dead
+        # socket would read as "every session vanished" and prune live state.
         def fake_run(argv):
-            return 1, ""
+            return 1, "%0=zombie\n"
 
         self.assertEqual(tmuxctl.sessions_by_pane("/tmp/s", run=fake_run), {})
         self.assertEqual(tmuxctl.titles_by_pane("/tmp/s", run=fake_run), {})
