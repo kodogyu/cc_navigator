@@ -83,3 +83,39 @@ class StateStoreTest(unittest.TestCase):
         (self.dir / "broken.json").write_text("{not json")
         self.assertEqual(statestore.prune(self.dir, set(), now=100), 1)
         self.assertEqual(list(self.dir.iterdir()), [])
+
+    def test_write_replaces_the_file_rather_than_mutating_it(self):
+        # An atomic write renames a fresh temp file over the target, so the
+        # target gets a new inode every time. An in-place writer (open+truncate,
+        # copyfile) keeps the same inode. The divergence only shows on the
+        # second write, once a target already exists to be replaced or mutated.
+        statestore.write(self.dir, record(updated_at=100))
+        target = self.dir / "s1.json"
+        ino_first = target.stat().st_ino
+        statestore.write(self.dir, record(updated_at=200))
+        ino_second = target.stat().st_ino
+        self.assertNotEqual(ino_first, ino_second)
+
+    def test_reader_during_write_never_sees_a_partial_file(self):
+        # Observe the target at the exact instant json.dump runs -- the moment a
+        # naive writer that opened the target directly would have truncated it.
+        # A correct writer stages in a temp file, so at that instant the target
+        # is either absent (first write) or still the previous, complete record.
+        target = self.dir / "s1.json"
+        real_dump = json.dump
+        observed = []
+
+        def dump_spy(obj, fp, *args, **kwargs):
+            if target.exists():
+                observed.append(json.loads(target.read_text()))
+            else:
+                observed.append(None)
+            return real_dump(obj, fp, *args, **kwargs)
+
+        with mock.patch("json.dump", side_effect=dump_spy):
+            statestore.write(self.dir, record(updated_at=100))
+            statestore.write(self.dir, record(updated_at=200))
+
+        # Non-vacuous: the spy ran once per write, and each time the target was
+        # untouched -- absent, then the complete first record, never a fragment.
+        self.assertEqual(observed, [None, record(updated_at=100)])
