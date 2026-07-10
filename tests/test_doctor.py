@@ -81,6 +81,12 @@ class FakeTmux(object):
                 return call
         return None
 
+    def new_session_call(self):
+        for call in self.calls:
+            if _verb(call) == "new-session":
+                return call
+        return None
+
 
 # --------------------------------------------------------------------------
 # check_tmux_conf -- the corrected, per-character flag rule
@@ -329,6 +335,36 @@ class ProbeTmuxConfTest(unittest.TestCase):
         self.assertEqual(payload, "a b")
         self.assertIn(" ", payload)
 
+    def test_probe_loads_the_users_config_with_dash_f(self):
+        # A probe that boots tmux's DEFAULT (empty) config instead of loading the
+        # user's -f conf tests nothing: every fatal config would pass.
+        fake = FakeTmux()
+        doctor.probe_tmux_conf(self.conf, run=fake)
+        new_session = fake.new_session_call()
+        self.assertIsNotNone(new_session, "the probe must start a session")
+        self.assertIn("-f", new_session, "the probe must load the user's config")
+        self.assertEqual(
+            new_session[new_session.index("-f") + 1],
+            self.conf,
+            "-f must name the user's conf, not some other file",
+        )
+
+    def test_probe_session_is_detached(self):
+        # An attached session never crashes (report investigation (b)), so a probe
+        # that drops -d would report every fatal config as safe.
+        fake = FakeTmux()
+        doctor.probe_tmux_conf(self.conf, run=fake)
+        new_session = fake.new_session_call()
+        self.assertIsNotNone(new_session)
+        self.assertIn("-d", new_session, "the probe session must be detached")
+
+    def test_refuses_the_default_socket(self):
+        # `tmux -L default` is the user's real server; kill-server would wipe it.
+        fake = FakeTmux()
+        with self.assertRaises(ValueError):
+            doctor.probe_tmux_conf(self.conf, run=fake, socket_name="default")
+        self.assertEqual(fake.calls, [], "must refuse before running any tmux")
+
     def test_reports_fatal_when_the_server_dies(self):
         fake = FakeTmux(responses={"list-sessions": (1, "")})
         check = doctor.probe_tmux_conf(self.conf, run=fake)
@@ -446,6 +482,34 @@ class RunAllTest(unittest.TestCase):
         )
         eval_check = [c for c in checks if c.name == "gnome shell eval"][0]
         self.assertFalse(eval_check.required)
+
+    def test_tmux_conf_parse_is_advisory_not_the_gate(self):
+        # The parse is a hint; probe_tmux_conf is the verdict. If the parse were
+        # required, a false positive (e.g. a line-continuation it cannot join)
+        # would veto a passing probe and fail the doctor on a working config.
+        check = doctor.check_tmux_conf("set mode-keys vi\n")
+        self.assertFalse(check.ok)
+        self.assertFalse(
+            check.required, "the tmux.conf parse must be advisory, not the gate"
+        )
+
+    def test_malformed_settings_json_does_not_crash(self):
+        import pathlib
+
+        conf, _ = self._files()
+        bad = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)
+        bad.write("{ this is not json")
+        bad.close()
+        self.addCleanup(lambda: os.path.exists(bad.name) and os.unlink(bad.name))
+        calls = []
+        checks = doctor.run_all(
+            tmux_conf=pathlib.Path(conf),
+            claude_settings=pathlib.Path(bad.name),
+            hook_path=HOOK,
+            run=self._fake_run(calls),
+        )
+        hooks_check = [c for c in checks if c.name == "claude hooks"][0]
+        self.assertFalse(hooks_check.ok, "a garbage settings file has no hook")
 
 
 class MainExitCodeTest(unittest.TestCase):

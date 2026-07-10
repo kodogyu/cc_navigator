@@ -82,14 +82,24 @@ def check_tmux_conf(text: str) -> Check:
     first word is one of set/set-option/setw/set-window-option AND none of the
     single-letter flags in its leading `-xyz` groups is g, q or s.
 
-    Two limits, stated rather than papered over:
-      * `source-file` includes are not followed -- the live probe covers them,
-        this parse cannot.
-      * The flag rule is derived from a measured matrix, not from tmux's source.
-        Bare `setenv FOO bar` and `set-hook after-new-session ""` were ALSO
-        measured fatal (see report investigation (a)) but are deliberately out
-        of scope here: chasing tmux's whole command surface with a regex is the
-        trap this two-layer design exists to avoid. probe_tmux_conf catches them.
+    This check is ADVISORY (required=False): it names a likely offender and its
+    fix, but it is not the gate. probe_tmux_conf is. A hint that could fail the
+    doctor on its own would let the parser's blind spots (below) override the
+    authoritative reproduction -- e.g. a line-continuation `set \` + `-g ...`
+    reads as fatal here but actually works, and must not veto a passing probe.
+
+    Known blind spots, stated rather than papered over. Each is caught by the
+    probe; none is caught here:
+      * `source-file` includes are not followed.
+      * A line split across a trailing `\` continuation is judged unjoined, so
+        `set \` on its own line reads as a false positive.
+      * Command-name abbreviations (`set-o`, `set-w`, `set-win`) and a fatal set
+        nested inside `if-shell "..." "set ..."` read as safe (false negatives).
+      * The flag rule is derived from a measured matrix, not tmux's source. Bare
+        `setenv FOO bar` and `set-hook after-new-session ""` were ALSO measured
+        fatal (report investigation (a)) but are out of scope: chasing tmux's
+        whole command surface with a regex is the trap the two-layer design
+        exists to avoid.
     """
     offenders = []  # type: List[str]
     for raw in text.splitlines():
@@ -108,9 +118,14 @@ def check_tmux_conf(text: str) -> Check:
                 "to a detached session: " + "; ".join(offenders)
             ),
             fix="add -g, e.g. `set mode-keys vi` -> `setw -g mode-keys vi`",
+            required=False,
         )
     return Check(
-        "tmux.conf mode-keys", True, "no `set`-family line is missing -g/-q/-s", ""
+        "tmux.conf mode-keys",
+        True,
+        "no `set`-family line is missing -g/-q/-s",
+        "",
+        required=False,
     )
 
 
@@ -231,6 +246,11 @@ def probe_tmux_conf(
         )
 
     socket = socket_name or _probe_socket_name()
+    # `tmux -L default` resolves to the user's REAL server: kill-server here would
+    # destroy every live Claude session. The project's prime directive is never to
+    # touch the default socket, so refuse it before any tmux runs.
+    if socket == "default":
+        raise ValueError("probe_tmux_conf must never target the default socket")
     base = ["tmux", "-L", socket]
     try:
         run(base + ["kill-server"])  # ignore failure: nothing to kill yet

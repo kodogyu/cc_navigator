@@ -311,3 +311,61 @@ hiding it.
 - `bin/cc-navigator-doctor` — new, executable (100755)
 - `tests/test_doctor.py` — new (54 tests)
 - `docs/superpowers/sdd/task-11-report.md` — this file
+
+---
+
+## Post-review revision (controller, 2026-07-11)
+
+The Task 11 workflow ran 11 mutation testers and 3 adversarial reviewers against the
+committed doctor (66a6f24). All 11 mutations were independently confirmed KILLED,
+including the two the brief predicted might survive (4 and 9). The reviewers, however,
+found real gaps the implementer's self-report claimed were covered. Verified each,
+then fixed the load-bearing ones:
+
+**Fixed**
+
+- **check_tmux_conf was a required gate, contradicting its own docstring.** The
+  module says the parse "is a hint, not a verdict; probe_tmux_conf is THE VERDICT,"
+  yet run_all wired both `required=True`. So a parser false positive — e.g. a
+  line-continuation `set \` + `-g ...`, which reads as fatal unjoined but actually
+  works — would veto a passing probe and fail the doctor on a working config
+  (RULE reviewer, reproduced). Made check_tmux_conf advisory (`required=False`). The
+  probe remains the required gate, so no fatal config slips through: when tmux is
+  present the probe catches it; when tmux is absent both the tmux check and the probe
+  fail required. New test: `test_tmux_conf_parse_is_advisory_not_the_gate`.
+
+- **Two survived mutations the implementer never tested.** No named test observed
+  that the probe loads the user's config with `-f conf_path`, or that its session is
+  detached (`-d`). Dropping `-f` boots tmux's empty default config so every fatal
+  config passes; dropping `-d` attaches a client, and an attached session never
+  crashes (investigation (b)), so every fatal config passes. Both survived the
+  committed suite (TEST reviewer, reproduced). Added
+  `test_probe_loads_the_users_config_with_dash_f` and `test_probe_session_is_detached`,
+  and verified each fails under its mutation.
+
+- **`socket_name="default"` footgun.** `tmux -L default` targets the user's real
+  server; the probe's kill-server would wipe every live Claude session. Not reachable
+  today (no caller passes socket_name), but the project's prime directive is never to
+  touch the default socket. Added a guard that raises before any tmux runs, plus
+  `test_refuses_the_default_socket` (SAFETY reviewer).
+
+- **Malformed ~/.claude/settings.json guard was untested.** Added
+  `test_malformed_settings_json_does_not_crash`.
+
+- **Docstring blind spots.** check_tmux_conf now states its false negatives
+  (abbreviations `set-o`/`set-w`/`set-win`, and a fatal set nested in `if-shell`) and
+  false positives (line continuations) — all caught by the probe.
+
+**Accepted, not fixed**
+
+- **kill-server leaves a 0-byte socket file** under /tmp/tmux-<uid>/. Confirmed tmux
+  3.0a behaviour, not a leak: no server and no process survive (SAFETY reviewer
+  approved). Reconstructing tmux's socket-path logic to unlink it is more dangerous
+  than a harmless empty file, so it stays.
+
+- **check_tmux_conf false negatives on abbreviations / if-shell.** The probe is
+  authoritative and catches them; widening the regex to chase tmux's whole command
+  surface is the exact trap the two-layer design avoids. Documented, not chased.
+
+Suite after revision: 222 tests, green (163 pre-existing + 59 doctor). Headless green
+(skipped=11). Doctor output unchanged on this machine. No live tmux server leaked.
