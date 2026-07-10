@@ -71,3 +71,33 @@ class EnsureStateDirTest(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(self.mode_of(second), 0o700)
         self.assertEqual((second / "session.json").read_text(), "{}")
+
+    def test_refuses_a_symlinked_state_dir_and_does_not_chmod_its_target(self):
+        # An attacker plants our predictable path as a symlink to a dir they
+        # want chmod'd. We must refuse rather than follow it.
+        victim = pathlib.Path(self.runtime.name) / "victim"
+        victim.mkdir()
+        os.chmod(str(victim), 0o755)
+        os.symlink(str(victim), str(self.expected))
+
+        with self.assertRaises(OSError):
+            paths.ensure_state_dir()
+
+        self.assertEqual(
+            self.mode_of(victim), 0o755, "the symlink target must be untouched"
+        )
+
+    def test_refuses_a_state_dir_owned_by_another_user(self):
+        self.expected.mkdir(parents=True)
+        # We own self.expected, so pretend to be a different uid: the ownership
+        # check must then reject a directory we do not own.
+        with mock.patch("os.getuid", return_value=os.getuid() + 1):
+            with self.assertRaises(PermissionError):
+                paths.ensure_state_dir()
+
+    def test_refuses_a_state_dir_that_is_a_regular_file(self):
+        self.expected.parent.mkdir(parents=True, exist_ok=True)
+        self.expected.write_text("not a directory")
+
+        with self.assertRaises(OSError):
+            paths.ensure_state_dir()

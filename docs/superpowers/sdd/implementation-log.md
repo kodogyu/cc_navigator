@@ -318,3 +318,30 @@ conclusions. Three of this project's load-bearing "facts" were wrong -- the tmux
 rule, Task 6's retraction, and the Task 5 causal story -- and each was written down
 with confidence. The measured matrix, the kernel `dmesg`, and the end-to-end
 reproductions are the evidence; the prose was not.
+
+
+## 2026-07-11, whole-branch review and the /tmp hardening
+
+Whole-branch review (base..HEAD) by a fresh reviewer: READY_TO_MERGE. Priority-1
+surfaces all clean and reproduced-safe: single subprocess spawn point with no
+shell, send-keys text and pane titles cannot break out of an argv, session_id
+cannot escape the state dir, GNOME Eval JS injection is neutralised by escape_js
+(quotes/backslashes) with U+2028/U+2029 harmless on gjs 3.36 (measured) and xprop
+re-verification as the backstop, and probe_tmux_conf runs a hostile config only on
+its own private socket.
+
+One substantive finding, FIXED: the /tmp fallback state dir (reached only when
+XDG_RUNTIME_DIR is unset -- absent on a normal logind desktop, present on some
+shared hosts) was symlink-unsafe. `ensure_state_dir`'s chmod followed a planted
+symlink (arbitrary-directory chmod) and, had prune ever run there, it would have
+deleted arbitrary `*.json`. This is the item Task 1 left open ("the /tmp fallback
+would follow a pre-existing symlink ... Revisit only if cc_navigator ever runs on a
+shared host") -- now closed. paths.ensure_state_dir creates the dir itself
+(os.mkdir never follows a final-component symlink) and, when it already exists,
+opens it O_NOFOLLOW | O_DIRECTORY and does the ownership check and fchmod against
+that one fd -- no lstat->chmod TOCTOU. It fails closed: an unsafe dir raises, so the
+app does not start and prune (which only ever receives ensure_state_dir's output)
+never runs on it; /tmp's sticky bit stops a post-startup swap of a dir we own.
+Reproduced the reviewer's two primitives against the fix: the symlink target's mode
+and files are untouched. Tests: symlink, wrong-owner (mocked uid), and regular-file
+cases all refuse. Suite: 249 green.
