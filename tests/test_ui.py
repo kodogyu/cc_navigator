@@ -8,11 +8,12 @@ from gi.repository import Gtk  # noqa: E402
 
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
-        cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중"):
+        cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
+        last_prompt=""):
     return model.Row(
         session_id=session_id, socket="/tmp/s", pane="%1", tmux_session="demo",
         title=title, state=state, reason=reason,
-        message=message, cwd=cwd, updated_at=1,
+        message=message, cwd=cwd, updated_at=1, last_prompt=last_prompt,
     )
 
 
@@ -259,22 +260,51 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    @staticmethod
+    def _labels_under(child):
+        texts = []
+        def walk(w):
+            if isinstance(w, Gtk.Label):
+                texts.append(w.get_text())
+            if isinstance(w, Gtk.Container):
+                for c in w.get_children():
+                    walk(c)
+        walk(child)
+        return texts
+
+    @staticmethod
+    def _click(window, child):
+        # Reproduce a real single click's signal order: button-press captures the
+        # prior selection, then GTK selects the row (row-selected reveals it),
+        # then it activates it (row-activated). row-selected precedes row-activated.
+        window._on_listbox_button_press(window._listbox, None)
+        window._listbox.select_row(child)
+        window._on_row_activated(window._listbox, child)
+
     def test_expanded_row_shows_the_last_prompt_and_path(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
-            window.set_rows([row(cwd="/data/projects/demo", session_id="a")])
+            window.set_rows([row(cwd="/data/projects/demo", session_id="a",
+                                 last_prompt="fix the parser bug")])
             child = window._listbox.get_children()[0]
-            window._listbox.select_row(child)
-            texts = []
-            def walk(w):
-                if isinstance(w, Gtk.Label):
-                    texts.append(w.get_text())
-                if isinstance(w, Gtk.Container):
-                    for c in w.get_children():
-                        walk(c)
-            walk(child)
-            joined = " ".join(texts)
+            self._click(window, child)
+            joined = " ".join(self._labels_under(child))
             self.assertIn("/data/projects/demo", joined)
+            self.assertIn("fix the parser bug", joined)  # prompt actually rendered
+        finally:
+            window.destroy()
+
+    def test_clicking_an_unselected_row_expands_it(self):
+        # Regression guard: a first click must SELECT (expand), never collapse.
+        # row-selected fires before row-activated, so a naive activated-handler
+        # that compares against the live selection collapses every first click.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a"), row(session_id="b")])
+            _a, b = window._listbox.get_children()
+            window._listbox.unselect_all()
+            self._click(window, b)
+            self.assertIs(window._listbox.get_selected_row(), b)  # stays expanded
         finally:
             window.destroy()
 
@@ -283,10 +313,26 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a")])
             child = window._listbox.get_children()[0]
-            window._listbox.select_row(child)
-            self.assertIsNotNone(window._listbox.get_selected_row())
-            window._on_row_activated(window._listbox, child)  # re-click
+            self._click(window, child)               # first click: expands
+            self.assertIs(window._listbox.get_selected_row(), child)
+            self._click(window, child)               # re-click: collapses
             self.assertIsNone(window._listbox.get_selected_row())
+        finally:
+            window.destroy()
+
+    def test_detail_labels_escape_pango_markup(self):
+        # cwd/prompt are user-controlled; a '&' or '<' must not corrupt or crash
+        # the Pango markup in the detail labels. get_text() returns the unescaped
+        # text, so a round-trip proves the markup was well-formed.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(cwd="/a & b/<x>", session_id="a",
+                                 last_prompt="grep 'a & b' <file>")])
+            child = window._listbox.get_children()[0]
+            self._click(window, child)
+            joined = " ".join(self._labels_under(child))
+            self.assertIn("/a & b/<x>", joined)
+            self.assertIn("grep 'a & b' <file>", joined)
         finally:
             window.destroy()
 

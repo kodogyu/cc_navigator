@@ -146,6 +146,13 @@ class NavigatorWindow(Gtk.Window):
         self._listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
         self._listbox.connect("row-selected", self._on_row_selected)
         self._listbox.connect("row-activated", self._on_row_activated)
+        # row-selected fires BEFORE row-activated, so by the time the activation
+        # arrives get_selected_row() already points at the just-clicked row --
+        # a first click is then indistinguishable from a re-click. Capture the
+        # selection at button-press, before GTK moves it, so _on_row_activated
+        # can tell them apart and only collapse a genuine re-click.
+        self._pre_press_selected = None
+        self._listbox.connect("button-press-event", self._on_listbox_button_press)
 
         scroller = Gtk.ScrolledWindow()
         scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -468,7 +475,7 @@ class NavigatorWindow(Gtk.Window):
         # tuple order anyway, so ordering is still covered.
         signature = tuple(
             (r.session_id, r.socket, r.pane, r.tmux_session, r.title,
-             r.state, r.reason, r.message, r.cwd)
+             r.state, r.reason, r.message, r.cwd, r.last_prompt)
             for r in rows
         )
         if signature == self._signature:
@@ -609,10 +616,19 @@ class NavigatorWindow(Gtk.Window):
             if revealer is not None:
                 revealer.set_reveal_child(child is selected)
 
+    def _on_listbox_button_press(self, listbox, _event) -> bool:
+        """Runs before GTK moves the selection for this click. Stash what WAS
+        selected so _on_row_activated can distinguish a re-click (collapse) from
+        a first click (expand). Return False so the click is never swallowed."""
+        self._pre_press_selected = listbox.get_selected_row()
+        return False
+
     def _on_row_activated(self, listbox, activated) -> None:
-        """A click on the already-selected row collapses it (deselects). GTK's
-        single-click select does not toggle, so we do it here."""
-        if listbox.get_selected_row() is activated:
+        """A click on the row that was ALREADY selected collapses it (deselects).
+        row-selected has by now moved the selection onto `activated`, so compare
+        against the pre-press selection, not the live one, or every first click
+        would collapse the row it just opened."""
+        if activated is self._pre_press_selected:
             listbox.unselect_row(activated)
 
     def _on_jump_clicked(self, _button, row: model.Row) -> None:
