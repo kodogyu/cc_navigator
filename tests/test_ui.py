@@ -236,6 +236,18 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_collapse_hides_content_and_expand_restores(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row()])
+            self.assertTrue(window._content.get_visible())
+            window.set_collapsed(True)
+            self.assertFalse(window._content.get_visible())
+            window.set_collapsed(False)
+            self.assertTrue(window._content.get_visible())
+        finally:
+            window.destroy()
+
     def test_destroy_does_not_touch_a_main_loop(self):
         # If NavigatorWindow ever reconnects destroy to Gtk.main_quit, GTK
         # prints "gtk_main_quit: assertion 'main_loops != NULL' failed" to

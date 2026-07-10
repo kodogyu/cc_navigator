@@ -107,6 +107,15 @@ class NavigatorWindow(Gtk.Window):
         gear.set_tooltip_text("설정")
         gear.connect("clicked", self._on_settings_clicked)
         header.pack_end(gear)
+
+        collapse = Gtk.ToggleButton()
+        collapse.set_relief(Gtk.ReliefStyle.NONE)
+        collapse.add(Gtk.Image.new_from_icon_name("pan-up-symbolic", Gtk.IconSize.BUTTON))
+        collapse.set_tooltip_text("접기")
+        collapse.connect("toggled", self._on_collapse_toggled)
+        header.pack_start(collapse)
+        self._collapse_button = collapse
+
         self.set_titlebar(header)
 
         # Font override lives in a CSS provider scoped to this window by a class,
@@ -137,7 +146,13 @@ class NavigatorWindow(Gtk.Window):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.pack_start(scroller, True, True, 0)
         box.pack_start(self._status, False, False, 4)
+        self._content = box
         self.add(box)
+        # Default state is expanded: without this, box.get_visible() is False
+        # until something shows it, and the collapse toggle would have nothing
+        # correct to restore to. Application.main() still calls window.show_all()
+        # to reveal every child widget on screen; this only pins the box itself.
+        self._content.show()
         # No destroy -> Gtk.main_quit here: app.main() owns the main loop.
 
         # Apply the saved settings once everything exists: this sets size,
@@ -206,6 +221,24 @@ class NavigatorWindow(Gtk.Window):
         if settings.font_size > 0:
             parts.append(".ccnav, .ccnav * { font-size: %dpt; }" % settings.font_size)
         self._css.load_from_data("\n".join(parts).encode("utf-8"))
+
+    def _on_collapse_toggled(self, button: Gtk.ToggleButton) -> None:
+        self.set_collapsed(button.get_active())
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        """Collapsed hides the body and shrinks the window to its titlebar; the
+        panel stays floating and one click brings the list back."""
+        image = self._collapse_button.get_child()
+        if collapsed:
+            self._content.hide()
+            image.set_from_icon_name("pan-down-symbolic", Gtk.IconSize.BUTTON)
+            self.resize(self._settings.width, 1)  # shrink to titlebar's minimum
+        else:
+            self._content.show()
+            image.set_from_icon_name("pan-up-symbolic", Gtk.IconSize.BUTTON)
+            self.resize(self._settings.width, self._settings.height)
+        if self._collapse_button.get_active() != collapsed:
+            self._collapse_button.set_active(collapsed)
 
     def _on_settings_clicked(self, _button) -> None:
         dialog = self._build_settings_dialog()
