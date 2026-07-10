@@ -38,6 +38,22 @@ def live_pane_keys(sessions_by_socket: Dict[str, Dict[str, str]]) -> Set[Tuple[s
     return keys
 
 
+def _as_int(value) -> int:
+    """Coerce a state file's updated_at to an int, or 0 if it is garbage.
+
+    read_all returns whatever is on disk, and a hand-edited file may carry a
+    non-numeric timestamp. build_rows runs on a one-second GTK timer, so an
+    unhandled TypeError/ValueError here would propagate out of the timeout
+    callback and freeze the model for the life of the process. Mirror
+    statestore.prune's policy: an unparseable timestamp means maximally stale
+    (0), so the row sorts oldest and prune deletes its file on age.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
 def _newest_per_pane(records):
     newest = {}  # type: Dict[Tuple[str, str], dict]
     for rec in records:
@@ -45,7 +61,7 @@ def _newest_per_pane(records):
         if not key[0] or not key[1]:
             continue
         current = newest.get(key)
-        if current is None or int(rec.get("updated_at", 0)) > int(
+        if current is None or _as_int(rec.get("updated_at", 0)) > _as_int(
             current.get("updated_at", 0)
         ):
             newest[key] = rec
@@ -75,7 +91,7 @@ def build_rows(
                 reason=str(rec.get("reason") or ""),
                 message=str(rec.get("message") or ""),
                 cwd=str(rec.get("cwd") or ""),
-                updated_at=int(rec.get("updated_at", 0)),
+                updated_at=_as_int(rec.get("updated_at", 0)),
             )
         )
     rows.sort(key=lambda row: (0 if row.waiting else 1, -row.updated_at))

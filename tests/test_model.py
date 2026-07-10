@@ -72,6 +72,54 @@ class BuildRowsTest(unittest.TestCase):
         bad = {"session_id": "x", "tmux_socket": "", "tmux_pane": "", "updated_at": 1}
         self.assertEqual(model.build_rows([bad], {}, {}), [])
 
+    def test_a_record_without_a_socket_cannot_acquire_a_window_address(self):
+        # Pins the empty socket/pane guard in _newest_per_pane specifically.
+        # test_records_without_socket_or_pane_are_dropped above passes even
+        # without that guard, because build_rows's `pane not in sessions`
+        # guard catches the blank key first (sessions_by_socket is {}). This
+        # test steers a live socket keyed "" into place so that second guard
+        # would let the garbage through: without the _newest_per_pane guard
+        # the record joins against {"": "ghost-session"} and its window_title
+        # becomes "ccnav:ghost-session" -- a corrupted/hand-edited state file
+        # naming a real window that Task 7 would then activate. Both tests are
+        # deliberate; neither is a duplicate of the other. Do not delete either.
+        bad = {"session_id": "x", "tmux_socket": "", "tmux_pane": "", "updated_at": 1}
+        rows = model.build_rows([bad], {"": {"": "ghost-session"}}, {"": {"": ""}})
+        self.assertEqual(rows, [])
+
+    def test_present_but_empty_title_falls_back_to_the_pane_id(self):
+        # titles.get(pane) or pane vs titles.get(pane, pane): they differ only
+        # when the title is present but empty. tmux can return "", and the UI's
+        # primary line must not be blank.
+        rows = model.build_rows(
+            [record("a", "%1")], {SOCK: {"%1": "demo"}}, {SOCK: {"%1": ""}}
+        )
+        self.assertEqual(rows[0].title, "%1")
+
+    def test_unparseable_updated_at_coerces_to_zero_and_never_raises(self):
+        # build_rows runs on a one-second GTK timer; a raise here freezes the
+        # model for the life of the process. A hand-edited state file must not
+        # be able to do that. Bad timestamp -> 0 (maximally stale), matching
+        # statestore.prune's policy.
+        for value in ("abc", None):
+            rec = record("a", "%1", updated_at=value)
+            rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+            self.assertEqual(rows[0].updated_at, 0)
+
+    def test_absent_updated_at_coerces_to_zero(self):
+        rec = record("a", "%1")
+        del rec["updated_at"]
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].updated_at, 0)
+
+    def test_numeric_string_updated_at_is_still_honoured(self):
+        # The coercion must not over-narrow: int("100") succeeds, so a numeric
+        # string timestamp must survive as 100, not be flattened to 0.
+        rows = model.build_rows(
+            [record("a", "%1", updated_at="100")], {SOCK: {"%1": "demo"}}, {SOCK: {}}
+        )
+        self.assertEqual(rows[0].updated_at, 100)
+
 
 class LivePaneKeysTest(unittest.TestCase):
     def test_flattens_sockets_and_panes(self):
