@@ -53,6 +53,48 @@ def read_all(state_dir: pathlib.Path) -> List[Dict[str, object]]:
     return records
 
 
+def read_one(state_dir: pathlib.Path, session_id: str) -> Optional[Dict[str, object]]:
+    """Read one session's record, or None on missing/garbage/unsafe id. Never
+    raises: the hook uses this to carry a prior field forward and must degrade
+    to 'no previous record' rather than fail."""
+    if not is_safe_session_id(session_id):
+        return None
+    try:
+        text = (state_dir / (session_id + ".json")).read_text()
+    except OSError:
+        return None
+    try:
+        record = json.loads(text)
+    except ValueError:
+        return None
+    return record if isinstance(record, dict) else None
+
+
+def remove(state_dir: pathlib.Path, session_id: str) -> bool:
+    """Delete one session's state file. Returns True iff a file was removed.
+    Tolerates a missing file, an unsafe id, and an undeletable file (returns
+    False) -- the SessionEnd hook must never raise back into Claude Code.
+
+    _try_unlink alone is not enough here: it calls unlink(missing_ok=True),
+    which swallows FileNotFoundError and reports success even when there was
+    nothing to delete. That is fine for prune (it only ever unlinks a path a
+    glob just found), but remove's contract is True iff a file was actually
+    removed, so a missing file must be checked for first."""
+    if not is_safe_session_id(session_id):
+        return False
+    path = state_dir / (session_id + ".json")
+    try:
+        exists = path.exists()
+    except OSError:
+        # exists() itself can raise for errors it does not treat as "absent"
+        # (e.g. ENAMETOOLONG) -- an id this task never bounds in length must
+        # still degrade to "nothing removed" rather than escape.
+        return False
+    if not exists:
+        return False
+    return _try_unlink(path)
+
+
 def _try_unlink(path: pathlib.Path) -> bool:
     """Delete `path`, tolerating a file we are not allowed to remove.
 

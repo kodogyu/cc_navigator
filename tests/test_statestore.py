@@ -202,3 +202,39 @@ class StateStoreTest(unittest.TestCase):
         # Non-vacuous: the spy ran once per write, and each time the target was
         # untouched -- absent, then the complete first record, never a fragment.
         self.assertEqual(observed, [None, record(updated_at=100)])
+
+
+class RemoveAndReadOneTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = pathlib.Path(self._tmp.name)
+
+    def _write(self, sid, rec):
+        statestore.write(self.dir, dict(rec, session_id=sid))
+
+    def test_remove_deletes_and_reports_true(self):
+        self._write("abc", {"state": "working"})
+        self.assertTrue(statestore.remove(self.dir, "abc"))
+        self.assertFalse((self.dir / "abc.json").exists())
+
+    def test_remove_missing_is_false_not_error(self):
+        self.assertFalse(statestore.remove(self.dir, "nope"))
+
+    def test_remove_rejects_unsafe_id(self):
+        self.assertFalse(statestore.remove(self.dir, "../etc/passwd"))
+
+    def test_read_one_returns_record(self):
+        self._write("abc", {"state": "waiting", "last_prompt": "hi"})
+        rec = statestore.read_one(self.dir, "abc")
+        self.assertEqual(rec["last_prompt"], "hi")
+
+    def test_read_one_missing_is_none(self):
+        self.assertIsNone(statestore.read_one(self.dir, "gone"))
+
+    def test_read_one_garbage_is_none(self):
+        (self.dir / "bad.json").write_text("{ not json")
+        self.assertIsNone(statestore.read_one(self.dir, "bad"))
+
+    def test_read_one_unsafe_id_is_none(self):
+        self.assertIsNone(statestore.read_one(self.dir, "../x"))
