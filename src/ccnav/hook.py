@@ -49,7 +49,7 @@ def build_record(
             prompt = payload.get("prompt")
         last_prompt = str(prompt or "")[:PROMPT_LIMIT]
     else:
-        last_prompt = str((previous or {}).get("last_prompt") or "")
+        last_prompt = str((previous or {}).get("last_prompt") or "")[:PROMPT_LIMIT]
 
     return {
         "session_id": session_id,
@@ -80,14 +80,19 @@ def main() -> int:
             pass  # a broken navigator must never break Claude Code
         return 0
 
-    state_dir = paths.ensure_state_dir()
-    session_id = str(payload.get("session_id") or "")
-    previous = statestore.read_one(state_dir, session_id)
-    record = build_record(payload, os.environ, int(time.time()), previous)
-    if record is None:
-        return 0
-
+    # ensure_state_dir() is *designed to raise* (PermissionError on a foreign
+    # state dir, OSError from mkdir/open) and read_one/write touch the disk, so
+    # the whole non-SessionEnd path lives inside one guard: a broken navigator
+    # must never break Claude Code. Before Task 9 only write() was protected;
+    # moving ensure_state_dir()/read_one() to the top re-exposed that surface,
+    # so the guard now spans acquire-dir -> read-previous -> build -> write.
     try:
+        state_dir = paths.ensure_state_dir()
+        session_id = str(payload.get("session_id") or "")
+        previous = statestore.read_one(state_dir, session_id)
+        record = build_record(payload, os.environ, int(time.time()), previous)
+        if record is None:
+            return 0
         statestore.write(state_dir, record)
     except Exception:
         pass  # a broken navigator must never break Claude Code

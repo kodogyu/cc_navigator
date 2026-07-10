@@ -236,5 +236,17 @@ class RemoveAndReadOneTest(unittest.TestCase):
         (self.dir / "bad.json").write_text("{ not json")
         self.assertIsNone(statestore.read_one(self.dir, "bad"))
 
+    def test_read_one_non_utf8_is_none(self):
+        # read_text() raises UnicodeDecodeError (a ValueError, not OSError) on
+        # non-UTF-8 bytes; an externally corrupted file must degrade, not raise.
+        (self.dir / "corrupt.json").write_bytes(b"\xff\xfe\x00\x01")
+        self.assertIsNone(statestore.read_one(self.dir, "corrupt"))
+
+    def test_read_one_non_dict_json_is_none(self):
+        # Well-formed JSON that is not an object (array/string/number) is not a
+        # record and must read back as None, never a non-dict passed downstream.
+        (self.dir / "arr.json").write_text("[1, 2, 3]")
+        self.assertIsNone(statestore.read_one(self.dir, "arr"))
+
     def test_read_one_unsafe_id_is_none(self):
         self.assertIsNone(statestore.read_one(self.dir, "../x"))

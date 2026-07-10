@@ -114,6 +114,27 @@ class MainTest(unittest.TestCase):
             result = self._run_main(json.dumps(PAYLOAD), env)
         self.assertEqual(result, 0)
 
+    def test_returns_0_when_ensure_state_dir_raises(self):
+        # ensure_state_dir() is designed to raise (PermissionError on a foreign
+        # state dir; OSError from mkdir/open). Task 9 moved it to the top of
+        # main() -- unwrapped it would propagate and break Claude Code.
+        env = dict(ENV, XDG_RUNTIME_DIR=self.runtime_dir)
+        with mock.patch(
+            "ccnav.hook.paths.ensure_state_dir",
+            side_effect=PermissionError("foreign-owned state dir"),
+        ):
+            result = self._run_main(json.dumps(PAYLOAD), env)
+        self.assertEqual(result, 0)
+
+    def test_returns_0_when_read_one_raises(self):
+        # read_one() joined the critical path in Task 9. Even if it ever raised
+        # (e.g. a decode error on a corrupt prior record), main() must return 0.
+        env = dict(ENV, XDG_RUNTIME_DIR=self.runtime_dir)
+        boom = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+        with mock.patch("ccnav.hook.statestore.read_one", side_effect=boom):
+            result = self._run_main(json.dumps(PAYLOAD), env)
+        self.assertEqual(result, 0)
+
     def test_writes_nothing_without_tmux(self):
         # main() now reads the prior record (Task 9) before build_record's
         # tmux check runs, which creates the state dir as a side effect via

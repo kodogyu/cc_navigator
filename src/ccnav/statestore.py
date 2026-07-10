@@ -61,7 +61,10 @@ def read_one(state_dir: pathlib.Path, session_id: str) -> Optional[Dict[str, obj
         return None
     try:
         text = (state_dir / (session_id + ".json")).read_text()
-    except OSError:
+    except (ValueError, OSError):
+        # OSError: missing/unreadable. ValueError: read_text() raises
+        # UnicodeDecodeError (a ValueError) on non-UTF-8 bytes -- an
+        # externally corrupted file must degrade to "no previous", not raise.
         return None
     try:
         record = json.loads(text)
