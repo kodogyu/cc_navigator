@@ -1282,32 +1282,33 @@ def escape_js(value: str) -> str:
     )
 
 
-def activate_js(title: str) -> str:
-    """Activate only the FIRST match. Main.activateWindow handles workspace and timestamp.
+def _match_first_js(title: str, prelude: str, action: str) -> str:
+    """Build JS that finds windows titled exactly `title`, acts on the FIRST, counts all.
 
     Two matches mean two clients on one tmux session. The count comes back so
     the caller can warn instead of silently raising an arbitrary window.
     """
     return (
-        "(function(){var found=null,n=0;"
+        "(function(){%svar found=null,n=0;"
         "global.get_window_actors().forEach(function(a){"
         "var w=a.get_meta_window();"
         "if((w.get_title()||'')==='%s'){n++;if(!found)found=w;}"
-        "});if(found)Main.activateWindow(found);"
-        "return 'matched='+n;})()" % escape_js(title)
+        "});if(found)%s;"
+        "return 'matched='+n;})()" % (prelude, escape_js(title), action)
     )
+
+
+def activate_js(title: str) -> str:
+    """Main.activateWindow picks the workspace and the timestamp for us."""
+    return _match_first_js(title, "", "Main.activateWindow(found)")
 
 
 def activate_ts_js(title: str) -> str:
     """Fallback: an explicit, valid X timestamp. Never pass 0."""
-    return (
-        "(function(){var t=global.display.get_current_time_roundtrip();"
-        "var found=null,n=0;"
-        "global.get_window_actors().forEach(function(a){"
-        "var w=a.get_meta_window();"
-        "if((w.get_title()||'')==='%s'){n++;if(!found)found=w;}"
-        "});if(found)found.activate(t);"
-        "return 'matched='+n;})()" % escape_js(title)
+    return _match_first_js(
+        title,
+        "var t=global.display.get_current_time_roundtrip();",
+        "found.activate(t)",
     )
 
 
@@ -1618,10 +1619,14 @@ git commit -m "feat: join state files and live tmux panes into rows"
 **Interfaces:**
 - Consumes: `model.Row`.
 - Produces:
+  - `ui.SECONDARY_LIMIT: int`, `ui.EMPTY_HINT: str`
   - `ui.secondary_line(row: model.Row) -> str`
+  - `ui.compose_status(sticky: str, hint: str, transient: str) -> str`
   - `ui.NavigatorWindow(on_jump: Callable[[Row], None], on_send: Callable[[Row, str], None])` with methods `set_rows(rows: List[Row]) -> None`, `set_status(text: str) -> None`, `set_eval_available(available: bool) -> None`.
 
-`secondary_line` is pure and carries all the formatting logic, so the GTK class stays thin.
+`secondary_line` and `compose_status` are pure and carry all the formatting logic, so the GTK class stays thin.
+
+The status bar has three independent slots, because they can co-occur and must not clobber one another: `sticky` (Eval unavailable — set once at startup), `hint` (the empty-list message — driven by `set_rows`), and `transient` (a jump failure or warning — set by the caller). `NavigatorWindow` does **not** connect `destroy` to `Gtk.main_quit`; Task 10 wires that in `app.main()`, where the main loop actually exists.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1673,6 +1678,21 @@ class SecondaryLineTest(unittest.TestCase):
         self.assertLessEqual(len(line), ui.SECONDARY_LIMIT)
 
 
+class ComposeStatusTest(unittest.TestCase):
+    def test_all_three_slots_are_shown(self):
+        self.assertEqual(ui.compose_status("a", "b", "c"), "a  b  c")
+
+    def test_the_eval_warning_survives_an_empty_list(self):
+        # A jump failure must never hide the fact that Eval is unavailable.
+        self.assertEqual(ui.compose_status("eval off", "no sessions", ""), "eval off  no sessions")
+
+    def test_empty_slots_are_dropped(self):
+        self.assertEqual(ui.compose_status("", "", "c"), "c")
+
+    def test_all_empty_is_empty(self):
+        self.assertEqual(ui.compose_status("", "", ""), "")
+
+
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
 class NavigatorWindowTest(unittest.TestCase):
     def test_constructs_and_accepts_rows(self):
@@ -1680,6 +1700,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window.set_rows([row(), row(state=hookstate.WORKING)])
         window.set_status("hello")
         window.set_eval_available(False)
+        # destroy must not call Gtk.main_quit: no main loop is running here.
         window.destroy()
 ```
 
@@ -1709,6 +1730,11 @@ from . import model  # noqa: E402
 SECONDARY_LIMIT = 80
 WINDOW_WIDTH = 340
 WINDOW_HEIGHT = 420
+EMPTY_HINT = (
+    "세션이 없습니다. tmux 안에서 실행 중이고 훅이 설치되었는지 "
+    "확인하세요 (bin/cc-navigator-doctor)."
+)
+EVAL_UNAVAILABLE_HINT = "GNOME Shell Eval을 쓸 수 없어 '이동'이 비활성화되었습니다."
 
 
 def secondary_line(row: model.Row) -> str:
@@ -1716,6 +1742,11 @@ def secondary_line(row: model.Row) -> str:
         parts = [part for part in (row.reason, row.message) if part]
         return " — ".join(parts)[:SECONDARY_LIMIT]
     return os.path.basename(row.cwd.rstrip("/"))
+
+
+def compose_status(sticky: str, hint: str, transient: str) -> str:
+    """Three independent slots that must not clobber one another."""
+    return "  ".join(part for part in (sticky, hint, transient) if part)
 
 
 class NavigatorWindow(Gtk.Window):
@@ -1728,6 +1759,9 @@ class NavigatorWindow(Gtk.Window):
         self._on_jump = on_jump
         self._on_send = on_send
         self._eval_available = True
+        self._sticky = ""
+        self._hint = ""
+        self._transient = ""
 
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
@@ -1753,30 +1787,27 @@ class NavigatorWindow(Gtk.Window):
         box.pack_start(scroller, True, True, 0)
         box.pack_start(self._status, False, False, 4)
         self.add(box)
-        self.connect("destroy", Gtk.main_quit)
+        # No destroy -> Gtk.main_quit here: app.main() owns the main loop.
+
+    def _render_status(self) -> None:
+        self._status.set_text(compose_status(self._sticky, self._hint, self._transient))
 
     def set_eval_available(self, available: bool) -> None:
         self._eval_available = available
-        if not available:
-            self.set_status(
-                "GNOME Shell Eval을 쓸 수 없어 '이동'이 "
-                "비활성화되었습니다."
-            )
+        self._sticky = "" if available else EVAL_UNAVAILABLE_HINT
+        self._render_status()
 
     def set_status(self, text: str) -> None:
-        self._status.set_text(text)
+        self._transient = text
+        self._render_status()
 
     def set_rows(self, rows: List[model.Row]) -> None:
         for child in self._listbox.get_children():
             self._listbox.remove(child)
         for row in rows:
             self._listbox.add(self._build_row(row))
-        if not rows:
-            self.set_status(
-                "세션이 없습니다. tmux 안에서 "
-                "실행 중이고 훅이 설치되었는지 "
-                "확인하세요 (bin/cc-navigator-doctor)."
-            )
+        self._hint = "" if rows else EMPTY_HINT
+        self._render_status()
         self._listbox.show_all()
 
     def _build_row(self, row: model.Row) -> Gtk.ListBoxRow:
@@ -1854,8 +1885,8 @@ class NavigatorWindow(Gtk.Window):
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `./run-tests -k SecondaryLineTest -k NavigatorWindowTest`
-Expected: `Ran 8 tests` / `OK` (the window test is skipped without `DISPLAY`)
+Run: `./run-tests -k SecondaryLineTest -k ComposeStatusTest -k NavigatorWindowTest`
+Expected: `Ran 12 tests` / `OK`, with no `Gtk-CRITICAL` warnings in the output (the window test is skipped without `DISPLAY`)
 
 - [ ] **Step 5: Commit**
 
@@ -1874,7 +1905,7 @@ git commit -m "feat: always-on-top overlay listing sessions"
 - Test: `tests/test_app.py`
 
 **Interfaces:**
-- Consumes: `paths.ensure_state_dir`, `statestore.read_all`, `statestore.prune`, `tmuxctl.sessions_by_pane`, `tmuxctl.titles_by_pane`, `tmuxctl.select_pane`, `tmuxctl.send_text`, `gnome.eval_available`, `gnome.activate_window_titled`, `model.build_rows`, `model.live_pane_keys`, `ui.NavigatorWindow`.
+- Consumes: `paths.ensure_state_dir`, `statestore.read_all`, `statestore.prune`, `tmuxctl.sessions_by_pane`, `tmuxctl.titles_by_pane`, `tmuxctl.select_pane`, `tmuxctl.send_text`, `gnome.eval_available`, `gnome.activate_window_titled` (returns `ActivationResult`), `model.build_rows`, `model.live_pane_keys`, `ui.NavigatorWindow`. `NavigatorWindow` deliberately does not connect `destroy`; `app.main()` must.
 - Produces: `app.collect_rows(state_dir, read_all, sessions_for, titles_for, prune) -> List[model.Row]`, `app.main() -> int`, `app.POLL_SECONDS: int`.
 
 `collect_rows` holds all the logic and takes its collaborators as arguments, so it is testable without GTK, tmux, or a display.
@@ -2034,6 +2065,8 @@ class Application:
 
 def main() -> int:
     application = Application()
+    # Wired here, not in NavigatorWindow: this is where the main loop exists.
+    application.window.connect("destroy", Gtk.main_quit)
     application.refresh()
     application.window.show_all()
     Gtk.main()
@@ -2602,7 +2635,7 @@ for w in $(xprop -root _NET_CLIENT_LIST | sed 's/.*# //' | tr -d ' ' | tr ',' '\
   case "$n" in *ccnav:spikeproj*) echo "  $w $n";; esac
 done
 echo "--- activate via Main.activateWindow, then verify with xprop ---"
-EV "(function(){var n=0;global.get_window_actors().forEach(function(a){var w=a.get_meta_window();if((w.get_title()||'')==='ccnav:spikeproj'){Main.activateWindow(w);n++;}});return 'activated='+n;})()"
+EV "(function(){var found=null,n=0;global.get_window_actors().forEach(function(a){var w=a.get_meta_window();if((w.get_title()||'')==='ccnav:spikeproj'){n++;if(!found)found=w;}});if(found)Main.activateWindow(found);return 'matched='+n;})()"
 sleep 1
 A=$(xprop -root _NET_ACTIVE_WINDOW | sed 's/.*# *//' | cut -d, -f1)
 echo "  focused now: $(xprop -id "$A" _NET_WM_NAME | sed 's/.*= //')"
