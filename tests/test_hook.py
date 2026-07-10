@@ -2,11 +2,12 @@ import io
 import json
 import os
 import pathlib
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from ccnav import hook, hookstate
+from ccnav import hook, hookstate, paths, statestore
 
 
 ENV = {"TMUX": "/tmp/tmux-1000/default,4039841,0", "TMUX_PANE": "%12"}
@@ -133,3 +134,44 @@ class MainTest(unittest.TestCase):
         self.assertEqual(written["reason"], "idle")
         self.assertEqual(written["tmux_pane"], "%12")
         self.assertEqual(written["tmux_socket"], "/tmp/tmux-1000/default")
+
+
+class SessionEndTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.dir = pathlib.Path(self._tmp.name)
+        self._orig = paths.ensure_state_dir
+        paths.ensure_state_dir = lambda: self.dir
+
+    def tearDown(self):
+        paths.ensure_state_dir = self._orig
+
+    def _run(self, payload, env):
+        stdin = io.StringIO(json.dumps(payload))
+        orig_stdin, sys.stdin = sys.stdin, stdin
+        orig_env = os.environ.copy()
+        os.environ.clear(); os.environ.update(env)
+        try:
+            return hook.main()
+        finally:
+            sys.stdin = orig_stdin
+            os.environ.clear(); os.environ.update(orig_env)
+
+    def test_session_end_deletes_the_state_file(self):
+        statestore.write(self.dir, {"session_id": "s1", "state": "waiting",
+                                    "tmux_socket": "/x", "tmux_pane": "%1"})
+        code = self._run(
+            {"session_id": "s1", "hook_event_name": "SessionEnd", "source": "logout"},
+            {"TMUX": "/x,1,0", "TMUX_PANE": "%1"})
+        self.assertEqual(code, 0)
+        self.assertFalse((self.dir / "s1.json").exists())
+
+    def test_session_end_without_pane_still_deletes(self):
+        statestore.write(self.dir, {"session_id": "s2", "state": "waiting",
+                                    "tmux_socket": "/x", "tmux_pane": "%1"})
+        code = self._run(
+            {"session_id": "s2", "hook_event_name": "SessionEnd", "source": "clear"},
+            {})  # no TMUX in a background session
+        self.assertEqual(code, 0)
+        self.assertFalse((self.dir / "s2.json").exists())

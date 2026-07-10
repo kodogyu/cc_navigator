@@ -61,6 +61,14 @@ def main() -> int:
     if not isinstance(payload, dict):
         return 0
 
+    if payload.get("hook_event_name") == "SessionEnd":
+        session_id = str(payload.get("session_id") or "")
+        try:
+            statestore.remove(paths.ensure_state_dir(), session_id)
+        except Exception:
+            pass  # a broken navigator must never break Claude Code
+        return 0
+
     record = build_record(payload, os.environ, int(time.time()))
     if record is None:
         return 0
