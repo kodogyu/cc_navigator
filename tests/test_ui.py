@@ -236,6 +236,17 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_refresh_button_calls_back(self):
+        called = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            on_refresh=lambda: called.append(True))
+        try:
+            window._refresh_button.clicked()
+            self.assertEqual(called, [True])
+        finally:
+            window.destroy()
+
     def test_collapse_hides_content_and_expand_restores(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:

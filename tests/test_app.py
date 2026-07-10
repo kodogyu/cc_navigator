@@ -269,6 +269,14 @@ class OnStateChangedTest(unittest.TestCase):
         self.assertTrue(instance._wake.is_set())
 
 
+class RefreshTest(unittest.TestCase):
+    def test_refresh_wakes_the_poll_thread(self):
+        instance = app.Application.__new__(app.Application)
+        instance._wake = threading.Event()
+        app.Application.refresh(instance)
+        self.assertTrue(instance._wake.is_set())
+
+
 class _FakeWindow:
     """A stand-in for ui.NavigatorWindow that records what Application asked
     of it, without needing a display."""

@@ -81,11 +81,13 @@ class NavigatorWindow(Gtk.Window):
         on_send: Callable[[model.Row, str], None],
         settings: "config.Settings" = None,
         on_settings_changed: Callable[["config.Settings"], None] = None,
+        on_refresh: Callable[[], None] = None,
     ) -> None:
         super().__init__(title="cc_navigator")
         self._on_jump = on_jump
         self._on_send = on_send
         self._on_settings_changed = on_settings_changed
+        self._on_refresh = on_refresh
         self._settings = settings or config.Settings()
         self._eval_available = True
         self._sticky = ""
@@ -107,6 +109,14 @@ class NavigatorWindow(Gtk.Window):
         gear.set_tooltip_text("설정")
         gear.connect("clicked", self._on_settings_clicked)
         header.pack_end(gear)
+
+        refresh = Gtk.Button()
+        refresh.set_relief(Gtk.ReliefStyle.NONE)
+        refresh.add(Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON))
+        refresh.set_tooltip_text("새로고침")
+        refresh.connect("clicked", self._on_refresh_clicked)
+        header.pack_end(refresh)
+        self._refresh_button = refresh
 
         collapse = Gtk.ToggleButton()
         collapse.set_relief(Gtk.ReliefStyle.NONE)
@@ -239,6 +249,10 @@ class NavigatorWindow(Gtk.Window):
             self.resize(self._settings.width, self._settings.height)
         if self._collapse_button.get_active() != collapsed:
             self._collapse_button.set_active(collapsed)
+
+    def _on_refresh_clicked(self, _button) -> None:
+        if self._on_refresh is not None:
+            self._on_refresh()
 
     def _on_settings_clicked(self, _button) -> None:
         dialog = self._build_settings_dialog()

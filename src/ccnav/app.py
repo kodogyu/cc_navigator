@@ -147,6 +147,7 @@ class Application:
             on_send=self.send,
             settings=self._settings,
             on_settings_changed=self._on_settings_changed,
+            on_refresh=self.refresh,
         )
         self.window.set_eval_available(probe_eval())
 
@@ -217,6 +218,12 @@ class Application:
         wake the poll thread so it does not wait out the old period first. The
         window itself persisted the file, so there is nothing to save here."""
         self._settings = settings
+        self._wake.set()
+
+    def refresh(self) -> None:
+        """Force an immediate poll: wake the poll thread so collect_rows re-runs
+        now, pruning any pane already gone from tmux. Inherits the poll loop's
+        survive-a-raising-collect behaviour."""
         self._wake.set()
 
     def stop(self) -> None:
