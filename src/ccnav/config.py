@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import tempfile
 from dataclasses import dataclass, replace
 from typing import Optional
@@ -27,6 +28,9 @@ HEIGHT_MIN, HEIGHT_MAX = 150, 2000
 # font_size 0 is special: "do not override", so the panel keeps the system font
 # unless the user opts in. Any other value is clamped into this readable range.
 FONT_MIN, FONT_MAX = 7, 30
+OPACITY_MIN, OPACITY_MAX = 0.3, 1.0
+# A background colour is either "" (no override, keep the theme) or a #rrggbb hex.
+_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
 
 
 @dataclass(frozen=True)
@@ -38,6 +42,8 @@ class Settings:
     keep_above: bool = True
     all_workspaces: bool = True
     font_size: int = 0  # 0 = use the system default font size
+    opacity: float = 1.0
+    bg_color: str = ""  # "" = no override, keep the theme
 
     def to_dict(self) -> dict:
         return {
@@ -48,6 +54,8 @@ class Settings:
             "keep_above": self.keep_above,
             "all_workspaces": self.all_workspaces,
             "font_size": self.font_size,
+            "opacity": self.opacity,
+            "bg_color": self.bg_color,
         }
 
 
@@ -85,6 +93,11 @@ def _coerce(raw: dict, base: Settings) -> Settings:
     font_raw = _as_number(raw.get("font_size"), base.font_size)
     font = 0 if font_raw <= 0 else int(_clamp(font_raw, FONT_MIN, FONT_MAX))
 
+    opacity = _clamp(_as_number(raw.get("opacity"), base.opacity), OPACITY_MIN, OPACITY_MAX)
+
+    bg = raw.get("bg_color")
+    bg = bg if isinstance(bg, str) and _HEX_RE.match(bg) else base.bg_color
+
     return Settings(
         poll_seconds=poll,
         corner=corner,
@@ -93,6 +106,8 @@ def _coerce(raw: dict, base: Settings) -> Settings:
         keep_above=keep_above,
         all_workspaces=all_ws,
         font_size=font,
+        opacity=opacity,
+        bg_color=bg,
     )
 
 

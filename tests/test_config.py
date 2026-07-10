@@ -15,13 +15,18 @@ class DefaultsTest(unittest.TestCase):
         self.assertTrue(s.all_workspaces)
         self.assertEqual(s.font_size, 0)
 
+    def test_appearance_defaults(self):
+        s = config.Settings()
+        self.assertEqual(s.opacity, 1.0)
+        self.assertEqual(s.bg_color, "")
+
 
 class FromDictCoercionTest(unittest.TestCase):
     def test_a_full_valid_dict_round_trips(self):
         raw = {
             "poll_seconds": 2.5, "corner": "bottom-left", "width": 500,
             "height": 600, "keep_above": False, "all_workspaces": False,
-            "font_size": 14,
+            "font_size": 14, "opacity": 0.8, "bg_color": "#101010",
         }
         self.assertEqual(config.from_dict(raw).to_dict(), raw)
 
@@ -66,6 +71,19 @@ class FromDictCoercionTest(unittest.TestCase):
     def test_font_size_is_clamped_when_positive(self):
         self.assertEqual(config.from_dict({"font_size": 2}).font_size, config.FONT_MIN)
         self.assertEqual(config.from_dict({"font_size": 99}).font_size, config.FONT_MAX)
+
+    def test_opacity_is_clamped_and_garbage_ignored(self):
+        self.assertEqual(config.from_dict({"opacity": 0.0}).opacity, config.OPACITY_MIN)
+        self.assertEqual(config.from_dict({"opacity": 5}).opacity, config.OPACITY_MAX)
+        self.assertEqual(config.from_dict({"opacity": "clear"}).opacity, 1.0)  # default
+        self.assertEqual(config.from_dict({"opacity": float("nan")}).opacity, 1.0)
+
+    def test_bg_color_accepts_only_hex_rrggbb(self):
+        self.assertEqual(config.from_dict({"bg_color": "#1a2b3c"}).bg_color, "#1a2b3c")
+        self.assertEqual(config.from_dict({"bg_color": "red"}).bg_color, "")
+        self.assertEqual(config.from_dict({"bg_color": "#fff"}).bg_color, "")
+        self.assertEqual(config.from_dict({"bg_color": "#12345g"}).bg_color, "")
+        self.assertEqual(config.from_dict({"bg_color": 123}).bg_color, "")
 
 
 class WithUpdatesTest(unittest.TestCase):
