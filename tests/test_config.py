@@ -85,6 +85,9 @@ class FromDictCoercionTest(unittest.TestCase):
         self.assertEqual(config.from_dict({"bg_color": "#12345g"}).bg_color, "")
         self.assertEqual(config.from_dict({"bg_color": 123}).bg_color, "")
 
+    def test_bg_color_rejects_a_trailing_newline(self):
+        self.assertEqual(config.from_dict({"bg_color": "#101010\n"}).bg_color, "")
+
 
 class WithUpdatesTest(unittest.TestCase):
     def test_update_is_revalidated(self):

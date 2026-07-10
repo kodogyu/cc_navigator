@@ -30,7 +30,7 @@ HEIGHT_MIN, HEIGHT_MAX = 150, 2000
 FONT_MIN, FONT_MAX = 7, 30
 OPACITY_MIN, OPACITY_MAX = 0.3, 1.0
 # A background colour is either "" (no override, keep the theme) or a #rrggbb hex.
-_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}$")
+_HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}\Z")
 
 
 @dataclass(frozen=True)
