@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pathlib
 import threading
+from dataclasses import dataclass
 from typing import Callable, Dict, List, Set
 
 import gi
@@ -36,17 +37,33 @@ def probe_eval_available() -> bool:
     return gnome.eval_available(run=proc.runner_with_timeout(EVAL_PROBE_TIMEOUT))
 
 
+@dataclass(frozen=True)
+class Collected:
+    """The rows to show, plus how many sockets held sessions but did not answer.
+
+    `unreachable` exists so the UI can say *something* when a query fails.
+    Without it a wedged tmux makes a live, waiting session's row simply vanish
+    (its pane is not in the empty result, so build_rows drops it) with no hint
+    -- indistinguishable from the session having ended. That is the project's
+    signature silent-failure, muted. The state file now survives (see prune),
+    so the row returns as soon as tmux answers; the hint covers the gap.
+    """
+
+    rows: List[model.Row]
+    unreachable: int
+
+
 def collect_rows(
     state_dir: pathlib.Path,
     read_all: Callable[[pathlib.Path], List[Dict[str, object]]] = statestore.read_all,
     sessions_for: Callable[[str], "tuple"] = tmuxctl.sessions_by_pane_result,
     titles_for: Callable[[str], Dict[str, str]] = tmuxctl.titles_by_pane,
     prune: Callable[..., int] = statestore.prune,
-) -> List[model.Row]:
+) -> Collected:
     records = read_all(state_dir)
     sockets = sorted({str(r.get("tmux_socket") or "") for r in records if r.get("tmux_socket")})
     if not sockets:
-        return []
+        return Collected([], 0)
     # sessions_for reports (ok, panes): ok is False when tmux did not answer
     # (dead socket, or a timed-out slow one). Only sockets that DID answer may
     # gate pruning -- otherwise a one-tick stutter deletes live state (F3).
@@ -55,7 +72,8 @@ def collect_rows(
     observed = {socket for socket, (ok, _panes) in results.items() if ok}
     titles = {socket: titles_for(socket) for socket in sockets}
     prune(state_dir, model.live_pane_keys(sessions), observed)
-    return model.build_rows(records, sessions, titles)
+    rows = model.build_rows(records, sessions, titles)
+    return Collected(rows, len(set(sockets) - observed))
 
 
 def jump_status(result: gnome.ActivationResult, window_title: str) -> str:
@@ -72,9 +90,22 @@ def jump_status(result: gnome.ActivationResult, window_title: str) -> str:
 
 def send_status(result: tmuxctl.SendResult) -> str:
     """Map a send outcome to the status line. Pure, so it is tested without
-    threads, GTK or a subprocess (like jump_status). Silent on full success."""
+    threads, GTK or a subprocess (like jump_status). Silent on full success.
+
+    The "not delivered" case covers both a hard failure (tmux exited nonzero)
+    and a timeout ((124, "") -- a slow tmux the reply may yet reach). We cannot
+    tell them apart from the exit code, so the message claims only that delivery
+    could not be *confirmed*, never that it definitely failed. This is the same
+    distrust of a self-report that makes prune refuse to delete state on a
+    (124, "") (F3): the difference is only in stakes -- a hedged status is
+    reversible, deleting a live session's state is not -- so here we inform, and
+    there we decline to act. Both are "do not trust the empty/failed answer."
+    """
     if not result.delivered:
-        return "답장을 전송하지 못했습니다. tmux 세션이 종료되었을 수 있습니다."
+        return (
+            "답장 전송을 확인하지 못했습니다. tmux 세션이 응답하지 않거나 "
+            "종료되었을 수 있습니다. 세션을 직접 확인하세요."
+        )
     if not result.submitted:
         return "답장을 입력했지만 전송(Enter)에 실패했습니다. 세션을 직접 확인하세요."
     return ""
@@ -136,8 +167,8 @@ class Application:
         the GTK main thread."""
         while not self._stop.is_set():
             try:
-                rows = self._collect(self.state_dir)
-                GLib.idle_add(self._apply_rows, rows)
+                collected = self._collect(self.state_dir)
+                GLib.idle_add(self._apply_rows, collected)
             except Exception as exc:  # noqa: BLE001
                 # Not BaseException: a KeyboardInterrupt must still end us.
                 # A collect that raises (e.g. statestore.prune hitting an
@@ -153,8 +184,11 @@ class Application:
             self._wake.wait(POLL_SECONDS)
             self._wake.clear()
 
-    def _apply_rows(self, rows: List[model.Row]) -> bool:
-        self.window.set_rows(rows)
+    def _apply_rows(self, collected: Collected) -> bool:
+        self.window.set_rows(collected.rows)
+        # Surface an unreachable-tmux hint in its own status slot, so a wedged
+        # socket is not silently indistinguishable from every session ending.
+        self.window.set_unreachable(collected.unreachable)
         return False  # one-shot idle source; True would re-run it forever
 
     def _apply_poll_error(self, message: str) -> bool:

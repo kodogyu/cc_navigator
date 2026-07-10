@@ -113,6 +113,26 @@ class StateStoreTest(unittest.TestCase):
         )
         self.assertEqual(removed, 1)
 
+    def test_prune_removes_a_placeless_record_even_when_unobserved(self):
+        # A record missing EITHER a socket or a pane can never match a live pane
+        # and can never be shown: it is junk, removed immediately regardless of
+        # what was observed. Each of the three missing-field shapes is tested,
+        # because they pin different branches: both-empty kills `or not
+        # placeable`; exactly-one-empty (socket present, pane absent) is the only
+        # shape that kills `and`->`or` in `placeable = bool(socket) and bool(pane)`.
+        cases = [
+            ("both", "", ""),
+            ("no_pane", "/tmp/tmux-1000/default", ""),
+            ("no_socket", "", "%1"),
+        ]
+        for name, socket, pane in cases:
+            (self.dir / (name + ".json")).write_text(
+                json.dumps(record(session_id=name, socket=socket, pane=pane))
+            )
+        removed = statestore.prune(self.dir, set(), set(), now=100)
+        self.assertEqual(removed, len(cases), "every placeless record is junk")
+        self.assertEqual(list(self.dir.iterdir()), [])
+
     def test_prune_removes_gone_pane_only_when_socket_was_observed(self):
         # Same live set (empty) and same record, but now the socket WAS observed
         # and its pane is genuinely absent -> the record is correctly pruned.

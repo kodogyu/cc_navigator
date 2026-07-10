@@ -25,6 +25,7 @@ EMPTY_HINT = (
     "확인하세요 (bin/cc-navigator-doctor)."
 )
 EVAL_UNAVAILABLE_HINT = "GNOME Shell Eval을 쓸 수 없어 '이동'이 비활성화되었습니다."
+UNREACHABLE_HINT = "tmux %d곳에 연결하지 못해 일부 세션이 목록에서 빠졌을 수 있습니다."
 
 # Resolved once, at import, so it costs nothing per row. Tests inject their own
 # via the `hostname` parameter rather than depending on this machine's name.
@@ -143,6 +144,13 @@ class NavigatorWindow(Gtk.Window):
 
     def set_status(self, text: str) -> None:
         self._transient = text
+        self._render_status()
+
+    def set_unreachable(self, count: int) -> None:
+        """The hint slot: a poll found `count` sockets that held sessions but did
+        not answer. Its own slot so it never clobbers a jump/send status, and it
+        clears itself the moment every socket answers again (count == 0)."""
+        self._hint = UNREACHABLE_HINT % count if count else ""
         self._render_status()
 
     def set_row_jump_sensitive(self, session_id: str, sensitive: bool) -> None:

@@ -55,7 +55,7 @@ class CollectRowsTest(unittest.TestCase):
             asked.append(socket)
             return True, {"%1": "demo"}
 
-        rows = app.collect_rows(
+        result = app.collect_rows(
             pathlib.Path("/nonexistent"),
             read_all=lambda d: [record()],
             sessions_for=sessions_for,
@@ -63,8 +63,9 @@ class CollectRowsTest(unittest.TestCase):
             prune=lambda d, live, observed: 0,
         )
         self.assertEqual(asked, [SOCK])
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0].window_title, "ccnav:demo")
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(result.rows[0].window_title, "ccnav:demo")
+        self.assertEqual(result.unreachable, 0)
 
     def test_prunes_using_the_live_pane_set(self):
         seen = {}
@@ -96,7 +97,7 @@ class CollectRowsTest(unittest.TestCase):
             seen["observed"] = observed
             return 0
 
-        rows = app.collect_rows(
+        result = app.collect_rows(
             pathlib.Path("/nonexistent"),
             read_all=lambda d: [record()],
             sessions_for=lambda s: (False, {}),  # the query did not answer
@@ -105,20 +106,22 @@ class CollectRowsTest(unittest.TestCase):
         )
         self.assertEqual(seen["observed"], set(), "a failed socket is not observed")
         self.assertEqual(seen["live"], set())
-        self.assertEqual(rows, [], "with no live panes there is no row this tick")
+        self.assertEqual(result.rows, [], "with no live panes there is no row this tick")
+        self.assertEqual(result.unreachable, 1, "the failed socket is reported to the UI")
 
     def test_no_state_files_means_no_tmux_calls_and_no_rows(self):
         def explode(socket):
             raise AssertionError("must not query tmux")
 
-        rows = app.collect_rows(
+        result = app.collect_rows(
             pathlib.Path("/nonexistent"),
             read_all=lambda d: [],
             sessions_for=explode,
             titles_for=explode,
             prune=lambda d, live, observed: 0,
         )
-        self.assertEqual(rows, [])
+        self.assertEqual(result.rows, [])
+        self.assertEqual(result.unreachable, 0)
 
     def test_no_state_files_means_no_prune_either(self):
         # Deriving `sockets` from records and looping over it already makes a
@@ -131,14 +134,14 @@ class CollectRowsTest(unittest.TestCase):
         def explode(directory, live, observed):
             raise AssertionError("must not prune when there is nothing to prune")
 
-        rows = app.collect_rows(
+        result = app.collect_rows(
             pathlib.Path("/nonexistent"),
             read_all=lambda d: [],
             sessions_for=lambda s: (True, {}),
             titles_for=lambda s: {},
             prune=explode,
         )
-        self.assertEqual(rows, [])
+        self.assertEqual(result.rows, [])
 
 
 class JumpStatusTest(unittest.TestCase):
@@ -262,6 +265,7 @@ class _FakeWindow:
         self.sensitivity = {}
         self.status = None
         self.rows = None
+        self.unreachable = None
 
     def set_row_jump_sensitive(self, session_id, sensitive):
         self.sensitivity[session_id] = sensitive
@@ -271,6 +275,9 @@ class _FakeWindow:
 
     def set_rows(self, rows):
         self.rows = rows
+
+    def set_unreachable(self, count):
+        self.unreachable = count
 
 
 def _bare_application():
@@ -398,6 +405,19 @@ class SendStatusTest(unittest.TestCase):
             not_submitted, not_delivered, "the two failures must read differently"
         )
 
+    def test_each_message_names_its_own_cause(self):
+        # Without pinning content, swapping the two messages passes the suite --
+        # the user would get the wrong diagnostic. Only the submit-failure names
+        # the Enter step; a delivery failure never reached Enter, so it must not.
+        not_submitted = app.send_status(
+            tmuxctl.SendResult(delivered=True, submitted=False)
+        )
+        not_delivered = app.send_status(
+            tmuxctl.SendResult(delivered=False, submitted=False)
+        )
+        self.assertIn("Enter", not_submitted)
+        self.assertNotIn("Enter", not_delivered)
+
 
 class ApplicationSendThreadingTest(unittest.TestCase):
     def setUp(self):
@@ -493,7 +513,7 @@ class PollLoopTest(unittest.TestCase):
             if len(calls) == 1:
                 raise RuntimeError("prune could not delete a stale file")
             instance._stop.set()  # exit after the second, recovered iteration
-            return []
+            return app.Collected([], 0)
 
         instance._collect = flaky_collect
 
@@ -507,6 +527,26 @@ class PollLoopTest(unittest.TestCase):
             lambda: instance.window.status is not None and instance.window.rows == []
         )
         self.assertIn("prune could not delete a stale file", instance.window.status)
+
+    def test_an_unreachable_socket_is_surfaced_to_the_window(self):
+        # F3 fix's other half: a wedged tmux must not silently drop a live row.
+        # collect_rows returns unreachable>0, and Application must hand that to
+        # the window so the user sees a hint instead of an unexplained gap.
+        instance = app.Application.__new__(app.Application)
+        instance.window = _FakeWindow()
+        instance._stop = threading.Event()
+        instance._wake = threading.Event()
+        instance.state_dir = pathlib.Path("/nonexistent")
+
+        def collect(state_dir):
+            instance._wake.set()
+            instance._stop.set()
+            return app.Collected([], 2)
+
+        instance._collect = collect
+        instance._poll_loop()
+        _pump_until(lambda: instance.window.unreachable == 2)
+        self.assertEqual(instance.window.unreachable, 2)
 
 
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
