@@ -18,6 +18,11 @@ def state_dir() -> pathlib.Path:
 
 
 def ensure_state_dir() -> pathlib.Path:
+    """Create the state directory if needed and force it to mode 0700.
+
+    The chmod runs on every call, not just on creation, so a directory left
+    world-readable by an earlier version or a stray umask gets tightened.
+    """
     directory = state_dir()
     directory.mkdir(parents=True, exist_ok=True)
     os.chmod(str(directory), 0o700)
