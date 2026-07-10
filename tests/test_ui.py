@@ -352,3 +352,39 @@ class SettingsUiTest(unittest.TestCase):
         finally:
             config.config_path = orig_path
             window.destroy()
+
+    def test_dialog_shows_version_and_commits_colour(self):
+        import tempfile, pathlib
+        from ccnav import config, __version__
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.Settings(),
+        )
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        orig = config.config_path
+        config.config_path = lambda: pathlib.Path(tmp.name) / "c.json"
+        try:
+            window._commit_settings(config.with_updates(window._settings, bg_color="#abcdef"))
+            # GTK's CssProvider re-serializes on to_string(): a hex color comes
+            # back as rgb(r,g,b), not the original "#abcdef" literal (as with
+            # "#123456" -> "rgb(18,52,86)" above), so we assert the round-tripped
+            # decimal form: 0xab=171, 0xcd=205, 0xef=239.
+            self.assertIn("rgb(171,205,239)", window._css.to_string())
+            dialog = window._build_settings_dialog()
+            try:
+                # The version string appears somewhere in the dialog's labels.
+                found = []
+                def walk(w):
+                    if isinstance(w, Gtk.Label):
+                        found.append(w.get_text())
+                    if isinstance(w, Gtk.Container):
+                        for c in w.get_children():
+                            walk(c)
+                walk(dialog.get_content_area())
+                self.assertTrue(any(__version__ in t for t in found))
+            finally:
+                dialog.destroy()
+        finally:
+            config.config_path = orig
+            window.destroy()

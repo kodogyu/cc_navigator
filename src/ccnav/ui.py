@@ -297,6 +297,45 @@ class NavigatorWindow(Gtk.Window):
         grid.attach(font_box, 1, row, 1, 1)
         row += 1
 
+        # Background colour: a colour button plus a "테마 그대로" clear button.
+        add_label("배경색")
+        color_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        color_btn = Gtk.ColorButton()
+        if s.bg_color:
+            rgba = Gdk.RGBA()
+            rgba.parse(s.bg_color)
+            color_btn.set_rgba(rgba)
+
+        def on_color(btn):
+            rgba = btn.get_rgba()
+            hexcolor = "#%02x%02x%02x" % (
+                int(round(rgba.red * 255)), int(round(rgba.green * 255)),
+                int(round(rgba.blue * 255)))
+            self._commit_settings(config.with_updates(self._settings, bg_color=hexcolor))
+
+        clear_btn = Gtk.Button(label="테마 그대로")
+
+        def on_clear(_b):
+            self._commit_settings(config.with_updates(self._settings, bg_color=""))
+
+        color_btn.connect("color-set", on_color)
+        clear_btn.connect("clicked", on_clear)
+        color_box.pack_start(color_btn, False, False, 0)
+        color_box.pack_start(clear_btn, False, False, 0)
+        grid.attach(color_box, 1, row, 1, 1)
+        row += 1
+
+        # Opacity.
+        add_label("투명도")
+        opacity = Gtk.Scale.new_with_range(
+            Gtk.Orientation.HORIZONTAL, config.OPACITY_MIN, config.OPACITY_MAX, 0.05)
+        opacity.set_value(s.opacity)
+        opacity.set_hexpand(True)
+        opacity.connect("value-changed", lambda w: self._commit_settings(
+            config.with_updates(self._settings, opacity=w.get_value())))
+        grid.attach(opacity, 1, row, 1, 1)
+        row += 1
+
         # Keep-above and all-workspaces toggles.
         keep_above = Gtk.CheckButton(label="항상 위에 표시")
         keep_above.set_active(s.keep_above)
@@ -311,6 +350,11 @@ class NavigatorWindow(Gtk.Window):
             config.with_updates(self._settings, all_workspaces=w.get_active())))
         grid.attach(all_ws, 1, row, 1, 1)
         row += 1
+
+        from . import __version__
+        footer = Gtk.Label(label="cc-navigator v%s" % __version__, xalign=1.0)
+        footer.get_style_context().add_class("dim-label")
+        content.add(footer)
 
         dialog.show_all()
         return dialog
