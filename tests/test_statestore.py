@@ -84,6 +84,29 @@ class StateStoreTest(unittest.TestCase):
         self.assertEqual(statestore.prune(self.dir, set(), now=100), 1)
         self.assertEqual(list(self.dir.iterdir()), [])
 
+    def test_prune_tolerates_a_file_it_cannot_delete(self):
+        # A state file owned by another uid in a shared /tmp fallback raises
+        # PermissionError on unlink. That one file must stay put, must not be
+        # counted as removed, and -- crucially -- must not stop prune from
+        # removing the others or let an OSError escape to kill the poll thread.
+        statestore.write(self.dir, record(session_id="a-gone", pane="%8"))
+        statestore.write(self.dir, record(session_id="b-locked", pane="%9"))
+        live = {("/tmp/tmux-1000/default", "%1")}  # neither pane is live
+
+        real_unlink = pathlib.Path.unlink
+
+        def guarded_unlink(self, *args, **kwargs):
+            if self.name == "b-locked.json":
+                raise PermissionError(13, "Permission denied")
+            return real_unlink(self, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "unlink", guarded_unlink):
+            removed = statestore.prune(self.dir, live, now=100)  # must not raise
+
+        self.assertEqual(removed, 1)  # only the deletable one counts
+        names = sorted(p.name for p in self.dir.iterdir())
+        self.assertEqual(names, ["b-locked.json"])  # the locked file is left in place
+
     def test_write_replaces_the_file_rather_than_mutating_it(self):
         # An atomic write renames a fresh temp file over the target, so the
         # target gets a new inode every time. An in-place writer (open+truncate,

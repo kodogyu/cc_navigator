@@ -53,6 +53,26 @@ def read_all(state_dir: pathlib.Path) -> List[Dict[str, object]]:
     return records
 
 
+def _try_unlink(path: pathlib.Path) -> bool:
+    """Delete `path`, tolerating a file we are not allowed to remove.
+
+    A state file owned by another uid in the shared /tmp fallback, or a
+    directory that has turned read-only, makes unlink raise OSError
+    (PermissionError, EROFS, ...). prune runs inside collect_rows on the poll
+    thread, so an OSError escaping here would propagate out of collect_rows
+    and kill the poller for the life of the process -- a dead poll thread
+    leaves the window frozen on stale rows while looking alive, the exact
+    silent-success failure this project exists to catch. So one undeletable
+    file must leave itself in place and let prune carry on with the rest.
+    Returns True only when the file actually went away.
+    """
+    try:
+        path.unlink(missing_ok=True)
+        return True
+    except OSError:
+        return False
+
+
 def prune(
     state_dir: pathlib.Path,
     live_panes: Set[Tuple[str, str]],
@@ -73,8 +93,8 @@ def prune(
         try:
             record = json.loads(path.read_text())
         except (ValueError, OSError):
-            path.unlink(missing_ok=True)
-            removed += 1
+            if _try_unlink(path):
+                removed += 1
             continue
 
         key = (str(record.get("tmux_socket") or ""), str(record.get("tmux_pane") or ""))
@@ -84,6 +104,6 @@ def prune(
             age = MAX_AGE_SECONDS + 1
 
         if key not in live_panes or age > MAX_AGE_SECONDS:
-            path.unlink(missing_ok=True)
-            removed += 1
+            if _try_unlink(path):
+                removed += 1
     return removed

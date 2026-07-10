@@ -72,7 +72,13 @@ def perform_jump(
 
 
 class Application:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        collect: Callable[[pathlib.Path], List[model.Row]] = collect_rows,
+    ) -> None:
+        # `collect` is injectable so the poll loop's error handling can be
+        # tested with a collector that raises, without GTK or a real tmux.
+        self._collect = collect
         self.state_dir = paths.ensure_state_dir()
         self.window = ui.NavigatorWindow(on_jump=self.jump, on_send=self.send)
         self.window.set_eval_available(gnome.eval_available())
@@ -102,13 +108,30 @@ class Application:
         """Runs on a daemon thread. Every tmux call happens here, never on
         the GTK main thread."""
         while not self._stop.is_set():
-            rows = collect_rows(self.state_dir)
-            GLib.idle_add(self._apply_rows, rows)
+            try:
+                rows = self._collect(self.state_dir)
+                GLib.idle_add(self._apply_rows, rows)
+            except Exception as exc:  # noqa: BLE001
+                # Not BaseException: a KeyboardInterrupt must still end us.
+                # A collect that raises (e.g. statestore.prune hitting an
+                # OSError we did not foresee) must NOT kill this thread. A dead
+                # poller leaves the window frozen on stale rows while looking
+                # perfectly alive -- the silent-success failure this whole
+                # project exists to catch. So we keep looping and make the
+                # failure visible instead of swallowing it. Re-posting the same
+                # status every tick while it flaps is deliberately fine: set_text
+                # on an unchanged string is idempotent and cheap, so a counter
+                # or backoff would be complexity with no payoff.
+                GLib.idle_add(self._apply_poll_error, str(exc))
             self._wake.wait(POLL_SECONDS)
             self._wake.clear()
 
     def _apply_rows(self, rows: List[model.Row]) -> bool:
         self.window.set_rows(rows)
+        return False  # one-shot idle source; True would re-run it forever
+
+    def _apply_poll_error(self, message: str) -> bool:
+        self.window.set_status("세션 목록을 새로 고치지 못했습니다: " + message)
         return False  # one-shot idle source; True would re-run it forever
 
     def stop(self) -> None:

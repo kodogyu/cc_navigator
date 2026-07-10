@@ -385,6 +385,52 @@ class ApplicationSendThreadingTest(unittest.TestCase):
         self.assertIn("tmux is gone", instance.window.status)
 
 
+class PollLoopTest(unittest.TestCase):
+    """The poll thread must survive a collector that raises. A dead poller
+    leaves the window frozen on stale rows while looking alive -- the
+    silent-success failure this project exists to catch, so a crash that at
+    least stops the loop cleanly and shows why is strictly better than a
+    thread that vanishes and leaves a healthy-looking, frozen window.
+
+    Runs _poll_loop directly on the test thread (no real background thread):
+    the injected collector drives the loop -- it raises on the first
+    iteration and stops the loop on the second -- and GLib.idle_add callbacks
+    are drained afterwards by pumping the default main context, exactly as
+    Gtk.main() would. The collector is injected via Application.__init__'s
+    `collect=` seam, set here directly on a bare __new__ instance.
+    """
+
+    def test_survives_a_raising_collect_keeps_polling_and_posts_a_status(self):
+        instance = app.Application.__new__(app.Application)
+        instance.window = _FakeWindow()
+        instance._stop = threading.Event()
+        instance._wake = threading.Event()
+        instance.state_dir = pathlib.Path("/nonexistent")
+
+        calls = []
+
+        def flaky_collect(state_dir):
+            calls.append(state_dir)
+            instance._wake.set()  # keep the loop's wait from blocking a full second
+            if len(calls) == 1:
+                raise RuntimeError("prune could not delete a stale file")
+            instance._stop.set()  # exit after the second, recovered iteration
+            return []
+
+        instance._collect = flaky_collect
+
+        instance._poll_loop()  # returns only because the loop kept going past the raise
+
+        # The body ran again after the raise: the loop did not die on iteration 1.
+        self.assertGreaterEqual(len(calls), 2)
+
+        # Both idle callbacks (the error from #1, the empty rows from #2) drain.
+        _pump_until(
+            lambda: instance.window.status is not None and instance.window.rows == []
+        )
+        self.assertIn("prune could not delete a stale file", instance.window.status)
+
+
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
 class ApplicationWiringTest(unittest.TestCase):
     """Constructs a real Application -- a real ui.NavigatorWindow exists --
