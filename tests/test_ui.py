@@ -275,26 +275,37 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
-    def test_refresh_button_calls_back(self):
-        called = []
-        window = ui.NavigatorWindow(
-            on_jump=lambda r: None, on_send=lambda r, t: None,
-            on_refresh=lambda: called.append(True))
-        try:
-            window._refresh_button.clicked()
-            self.assertEqual(called, [True])
-        finally:
-            window.destroy()
-
     def test_collapse_hides_content_and_expand_restores(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
         try:
             window.set_rows([row()])
             self.assertTrue(window._content.get_visible())
             window.set_collapsed(True)
             self.assertFalse(window._content.get_visible())
+            # Collapsing must show a bare titlebar -- NOT leak the dock bar's icon
+            # and detach button (GtkStack used to fall back to the visible bar).
+            self.assertFalse(window._dock_bar.get_visible())
+            self.assertNotEqual(window._stack.get_visible_child_name(), "docked")
             window.set_collapsed(False)
             self.assertTrue(window._content.get_visible())
+            self.assertEqual(window._stack.get_visible_child_name(), "full")
+        finally:
+            window.destroy()
+
+    def test_collapse_after_undock_does_not_leak_the_dock_bar(self):
+        # Once docked-then-detached, the dock bar must go hidden again so a later
+        # collapse cannot make the stack fall back to showing it.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
+        try:
+            window._dock_to_edge("right")
+            self.assertTrue(window._dock_bar.get_visible())
+            window._undock()
+            self.assertFalse(window._dock_bar.get_visible())
+            window.set_collapsed(True)
+            self.assertFalse(window._dock_bar.get_visible())  # no stale leak
+            self.assertNotEqual(window._stack.get_visible_child_name(), "docked")
         finally:
             window.destroy()
 
@@ -678,7 +689,11 @@ class NavigatorWindowTest(unittest.TestCase):
             status_win.set_rows([row(session_id="a")])
             group_win.set_rows([row(session_id="a")])
             self.assertFalse(status_win._listbox.get_children()[0].ccnav_grip.get_visible())
-            self.assertTrue(self._row_by_id(group_win, "a").ccnav_grip.get_visible())
+            grip = self._row_by_id(group_win, "a").ccnav_grip
+            self.assertTrue(grip.get_visible())
+            # The '⠿' glyph must be shown too: no_show_all on the grip stops
+            # show_all reaching the label, so it is shown explicitly or renders empty.
+            self.assertTrue(grip.get_child().get_visible())
         finally:
             status_win.destroy()
             group_win.destroy()

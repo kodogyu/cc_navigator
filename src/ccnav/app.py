@@ -147,7 +147,6 @@ class Application:
             on_send=self.send,
             settings=self._settings,
             on_settings_changed=self._on_settings_changed,
-            on_refresh=self.refresh,
         )
         self.window.set_eval_available(probe_eval())
 

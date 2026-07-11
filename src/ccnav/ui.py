@@ -260,13 +260,11 @@ class NavigatorWindow(Gtk.Window):
         on_send: Callable[[model.Row, str], None],
         settings: "config.Settings" = None,
         on_settings_changed: Callable[["config.Settings"], None] = None,
-        on_refresh: Callable[[], None] = None,
     ) -> None:
         super().__init__(title="cc_navigator")
         self._on_jump = on_jump
         self._on_send = on_send
         self._on_settings_changed = on_settings_changed
-        self._on_refresh = on_refresh
         self._settings = settings or config.Settings()
         # Section metadata for the two list views, recomputed on each set_rows
         # and read by the sort/header funcs. Initialised empty so those funcs are
@@ -328,14 +326,6 @@ class NavigatorWindow(Gtk.Window):
         gear.set_tooltip_text("설정")
         gear.connect("clicked", self._on_settings_clicked)
         header.pack_end(gear)
-
-        refresh = Gtk.Button()
-        refresh.set_relief(Gtk.ReliefStyle.NONE)
-        refresh.add(Gtk.Image.new_from_icon_name("view-refresh-symbolic", Gtk.IconSize.BUTTON))
-        refresh.set_tooltip_text("새로고침")
-        refresh.connect("clicked", self._on_refresh_clicked)
-        header.pack_end(refresh)
-        self._refresh_button = refresh
 
         collapse = Gtk.ToggleButton()
         collapse.set_relief(Gtk.ReliefStyle.NONE)
@@ -451,8 +441,12 @@ class NavigatorWindow(Gtk.Window):
         # until something shows it, and the collapse toggle would have nothing
         # correct to restore to. Application.main() still calls window.show_all()
         # to reveal every child widget on screen; this only pins the box itself.
+        # The dock bar stays HIDDEN until we actually dock: if it were a visible
+        # stack child, collapsing (which hides _content, the shown child) would
+        # make GtkStack fall back to showing the dock bar -- leaking its icon and
+        # detach button into what should be a bare titlebar. _build_dock_bar has
+        # already shown its children, so _dock_to_edge only needs to show the bar.
         self._content.show()
-        self._dock_bar.show_all()
         self._stack.show()
         # No destroy -> Gtk.main_quit here: app.main() owns the main loop.
 
@@ -549,6 +543,10 @@ class NavigatorWindow(Gtk.Window):
             self.resize(self._settings.width, 1)  # shrink to titlebar's minimum
         else:
             self._content.show()
+            # Force the stack back onto the full view: if a prior collapse hid
+            # _content while docked state left the stack pointing elsewhere, just
+            # showing _content would not re-select it.
+            self._stack.set_visible_child_name("full")
             image.set_from_icon_name("pan-up-symbolic", Gtk.IconSize.BUTTON)
             self.resize(self._settings.width, self._settings.height)
         if self._collapse_button.get_active() != collapsed:
@@ -577,6 +575,13 @@ class NavigatorWindow(Gtk.Window):
         bar.pack_start(self._dock_icon, False, False, 0)
         bar.pack_start(self._dock_count, False, False, 0)
         bar.pack_start(detach, False, False, 0)
+        # Show the bar's children now, then hide the bar itself and mark it
+        # no-show-all: the children are ready to render the instant _dock_to_edge
+        # calls bar.show(), while window.show_all() at startup can't re-reveal the
+        # bar (which would leak it into the collapsed titlebar view).
+        bar.show_all()
+        bar.set_no_show_all(True)
+        bar.hide()
         return bar
 
     def _on_collapse_long_press(self, gesture, _x, _y) -> None:
@@ -631,6 +636,9 @@ class NavigatorWindow(Gtk.Window):
             Gtk.Orientation.VERTICAL if edge in ("left", "right")
             else Gtk.Orientation.HORIZONTAL)
         self._update_dock_count()
+        # Reveal the bar before switching: GtkStack refuses to switch to a hidden
+        # child, and the bar is kept hidden while undocked (see _build_dock_bar).
+        self._dock_bar.show()
         self._stack.set_visible_child_name("docked")
         # Hide the titlebar so the window can shrink to just the dock bar (its
         # buttons otherwise force a wide minimum); the detach button lives in the
@@ -650,6 +658,9 @@ class NavigatorWindow(Gtk.Window):
             self._collapse_button.set_active(False)  # set_collapsed(False) shows _content
         self._content.show()
         self._stack.set_visible_child_name("full")
+        # Hide the bar again so a later collapse (which hides _content) can't make
+        # the stack fall back to showing it.
+        self._dock_bar.hide()
         self._header.show()  # restore the titlebar
         self.resize(self._settings.width, self._settings.height)
         if self._pre_dock_pos is not None:
@@ -687,10 +698,6 @@ class NavigatorWindow(Gtk.Window):
         waiting = self._status_counts.get(model.INPUT_NEEDED, 0)
         self._dock_count.set_markup(
             '<span foreground="#e01b24"><b>%d</b></span>' % waiting if waiting else "")
-
-    def _on_refresh_clicked(self, _button) -> None:
-        if self._on_refresh is not None:
-            self._on_refresh()
 
     def _on_settings_clicked(self, _button) -> None:
         dialog = self._build_settings_dialog()
@@ -1514,6 +1521,10 @@ class NavigatorWindow(Gtk.Window):
         grip.set_tooltip_text("드래그해서 순서 변경 / 그룹 이동")
         grip.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, _DRAG_TARGETS, Gdk.DragAction.MOVE)
         grip.connect("drag-data-get", self._on_grip_drag_get, list_row)
+        # no_show_all protects the grip's OWN visibility from row.show_all() (so the
+        # sort-mode toggle below wins), but that also stops show_all reaching the
+        # label -- so show the '⠿' glyph explicitly, or the box renders empty.
+        grip_label.show()
         grip.set_no_show_all(True)
         grip.set_visible(self._settings.sort_mode == "group")
         header.pack_start(grip, False, False, 0)
