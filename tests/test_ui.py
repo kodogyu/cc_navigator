@@ -322,27 +322,41 @@ class NavigatorWindowTest(unittest.TestCase):
         walk(root)
         return found
 
-    def test_working_row_shows_a_rotating_arrow_and_no_waiting_text(self):
+    def test_working_row_shows_a_spinner_and_no_waiting_text(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(state=hookstate.WORKING, session_id="a")])
             child = window._listbox.get_children()[0]
-            arrows = [t for t in self._labels_under(child) if t in ui._WORKING_FRAMES]
-            self.assertEqual(len(arrows), 1)  # exactly one rotating-arrow indicator
-            self.assertEqual(len(self._widgets_of_type(child, Gtk.Spinner)), 0)  # no spinner
+            # the working indicator is the cairo reload spinner (a DrawingArea)
+            self.assertEqual(len(self._widgets_of_type(child, Gtk.DrawingArea)), 1)
             for text in self._labels_under(child):
                 self.assertNotIn("Waiting input", text)  # the old badge is gone
         finally:
             window.destroy()
 
-    def test_waiting_row_shows_a_dot_not_an_arrow(self):
+    def test_waiting_row_shows_a_dot_not_a_spinner(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(state=hookstate.WAITING, reason="idle", session_id="a")])
             child = window._listbox.get_children()[0]
-            texts = self._labels_under(child)
-            self.assertIn("●", texts)  # a coloured dot
-            self.assertEqual([t for t in texts if t in ui._WORKING_FRAMES], [])  # no arrow
+            self.assertIn("●", self._labels_under(child))  # a coloured dot
+            self.assertEqual(len(self._widgets_of_type(child, Gtk.DrawingArea)), 0)  # no spinner
+        finally:
+            window.destroy()
+
+    def test_spinner_rotation_advances_under_the_main_loop(self):
+        from gi.repository import GLib
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WORKING)])
+            spinner = self._widgets_of_type(
+                window._listbox.get_children()[0], Gtk.DrawingArea)[0]
+            before = spinner.ccnav_angle
+            loop = GLib.MainLoop()
+            GLib.timeout_add(300, loop.quit)
+            loop.run()
+            self.assertNotEqual(spinner.ccnav_angle, before)  # it spun
         finally:
             window.destroy()
 
@@ -381,16 +395,16 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
-    def test_state_flip_swaps_dot_for_arrow_in_place(self):
+    def test_state_flip_swaps_dot_for_spinner_in_place(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
             child = window._listbox.get_children()[0]
             self.assertIn("●", self._labels_under(child))  # a dot
+            self.assertEqual(len(self._widgets_of_type(child, Gtk.DrawingArea)), 0)
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
             self.assertIs(window._listbox.get_children()[0], child)  # same row widget
-            arrows = [t for t in self._labels_under(child) if t in ui._WORKING_FRAMES]
-            self.assertEqual(len(arrows), 1)  # dot swapped for a rotating arrow
+            self.assertEqual(len(self._widgets_of_type(child, Gtk.DrawingArea)), 1)  # dot -> spinner
         finally:
             window.destroy()
 
@@ -423,19 +437,18 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
-    def test_swapping_arrow_for_dot_detaches_the_arrow_so_its_timer_stops(self):
-        # The rotating arrow's timer self-stops when the label loses its ListBox
-        # ancestor. After a working->waiting in-place swap the old arrow must be
-        # detached (else the 8Hz timer leaks for the window's life).
+    def test_swapping_spinner_for_dot_detaches_it_so_its_timer_stops(self):
+        # The spinner's timer self-stops when the widget loses its ListBox
+        # ancestor. After a working->waiting in-place swap the old spinner must
+        # be detached (else its timer leaks for the window's life).
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
             child = window._listbox.get_children()[0]
-            arrow = [l for l in self._widgets_of_type(child, Gtk.Label)
-                     if l.get_text() in ui._WORKING_FRAMES][0]
-            self.assertIsNotNone(arrow.get_ancestor(Gtk.ListBox))  # live -> timer runs
+            spinner = self._widgets_of_type(child, Gtk.DrawingArea)[0]
+            self.assertIsNotNone(spinner.get_ancestor(Gtk.ListBox))  # live -> timer runs
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
-            self.assertIsNone(arrow.get_ancestor(Gtk.ListBox))  # detached -> timer self-stops
+            self.assertIsNone(spinner.get_ancestor(Gtk.ListBox))  # detached -> timer self-stops
         finally:
             window.destroy()
 

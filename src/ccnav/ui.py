@@ -1,11 +1,13 @@
 """The always-on-top overlay. All formatting lives in pure functions above the widgets."""
 from __future__ import annotations
 
+import math
 import os
 import socket
 import threading
 from typing import Callable, List
 
+import cairo
 import gi
 
 # Pin every namespace we import below. Without an explicit version, PyGObject
@@ -109,43 +111,79 @@ def dot_state(row: model.Row) -> str:
     return "input"
 
 
-# A rotating arrow for the "working" state: eight compass glyphs cycled on a
-# timer read as an arrow spinning clockwise. (The user asked for a rotating
-# arrow rather than GTK's circular spinner.)
-_WORKING_FRAMES = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
-_WORKING_COLOUR = "#3584e4"
-_WORKING_PERIOD_MS = 120
+# The "working" indicator: two curved arrows (a reload/refresh glyph) that spin.
+# Drawn with cairo rather than a font glyph so it renders identically everywhere
+# and can rotate smoothly.
+_WORKING_COLOUR = (0.208, 0.518, 0.894)  # #3584e4
+_WORKING_SIZE = 16
+_WORKING_PERIOD_MS = 80
+_WORKING_STEP = 0.30  # radians per tick
 
 
-def _build_working_arrow() -> Gtk.Label:
-    """A small arrow that rotates while Claude works. A single self-cleaning
-    GLib timeout drives it: each tick advances one frame and drops itself the
-    moment the label is no longer inside a list -- which covers BOTH the row
-    being removed AND the indicator being swapped out for a dot in place
-    (label.get_parent() goes None on a swap; get_ancestor covers a row removal
-    where the label stays parented but its row leaves the listbox). Keying the
-    stop on the label's own ancestry, not its row's, is what stops a
-    working->waiting flip from orphaning the timer."""
-    label = Gtk.Label()
-    state = {"i": 0}
+def _draw_reload_spinner(widget: Gtk.Widget, cr: "cairo.Context", angle: float) -> None:
+    """Draw two curved arrows chasing each other around a circle, rotated by
+    `angle`. Two ~150-degree arcs on opposite sides, each capped by a triangular
+    arrowhead pointing clockwise along the arc."""
+    w = widget.get_allocated_width() or _WORKING_SIZE
+    h = widget.get_allocated_height() or _WORKING_SIZE
+    size = min(w, h)
+    r = size * 0.30
+    head = size * 0.24
+    cr.save()
+    cr.translate(w / 2.0, h / 2.0)
+    cr.rotate(angle)
+    cr.set_source_rgb(*_WORKING_COLOUR)
+    cr.set_line_width(max(1.5, size * 0.12))
+    cr.set_line_cap(cairo.LINE_CAP_ROUND)
+    for base in (0.0, math.pi):
+        a0 = base + 0.42
+        a1 = base + math.pi - 0.42
+        cr.new_sub_path()
+        cr.arc(0, 0, r, a0, a1)
+        cr.stroke()
+        # Arrowhead at a1 -- the clockwise-leading tip of the arc.
+        px, py = r * math.cos(a1), r * math.sin(a1)
+        tx, ty = -math.sin(a1), math.cos(a1)   # clockwise tangent
+        nx, ny = math.cos(a1), math.sin(a1)    # radial outward
+        cr.move_to(px + tx * head, py + ty * head)  # tip, ahead along the arc
+        cr.line_to(px - tx * head * 0.2 + nx * head * 0.75,
+                   py - ty * head * 0.2 + ny * head * 0.75)
+        cr.line_to(px - tx * head * 0.2 - nx * head * 0.75,
+                   py - ty * head * 0.2 - ny * head * 0.75)
+        cr.close_path()
+        cr.fill()
+    cr.restore()
 
-    def markup(i: int) -> str:
-        return '<span foreground="%s">%s</span>' % (_WORKING_COLOUR, _WORKING_FRAMES[i])
 
-    label.set_markup(markup(0))
+def _build_working_arrow() -> Gtk.DrawingArea:
+    """Two curved arrows that spin while Claude works. One self-cleaning GLib
+    timeout advances the rotation and drops itself the moment the widget is no
+    longer inside a list -- which covers BOTH the row being removed AND the
+    indicator being swapped out for a dot in place. Keying the stop on the
+    widget's own ancestry (not its row's) is what stops a working->waiting flip
+    from orphaning the timer. The current angle is exposed for tests."""
+    area = Gtk.DrawingArea()
+    area.set_size_request(_WORKING_SIZE, _WORKING_SIZE)
+    area.ccnav_angle = 0.0  # type: ignore[attr-defined]
+
+    def on_draw(widget, cr):
+        _draw_reload_spinner(widget, cr, widget.ccnav_angle)
+        return False
+
+    area.connect("draw", on_draw)
 
     def tick() -> bool:
         try:
-            if label.get_ancestor(Gtk.ListBox) is None:
-                return False  # arrow detached (swap) or its row left the list -> stop
-            state["i"] = (state["i"] + 1) % len(_WORKING_FRAMES)
-            label.set_markup(markup(state["i"]))
+            if area.get_ancestor(Gtk.ListBox) is None:
+                return False  # detached (swap) or its row left the list -> stop
+            area.ccnav_angle = (area.ccnav_angle + _WORKING_STEP) % (2 * math.pi)
+            area.queue_draw()
             return True
         except Exception:  # noqa: BLE001 -- widget torn down mid-animation
             return False
 
     GLib.timeout_add(_WORKING_PERIOD_MS, tick)
-    return label
+    return area
 
 
 def _app_icon_pixbuf(size):
