@@ -466,6 +466,37 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_dock_to_edge_switches_to_the_docked_bar_with_orientation(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window._dock_to_edge("left")
+            self.assertEqual(window._docked_edge, "left")
+            self.assertEqual(window._stack.get_visible_child_name(), "docked")
+            self.assertEqual(window._dock_bar.get_orientation(), Gtk.Orientation.VERTICAL)
+            window._dock_to_edge("top")  # re-dock horizontally
+            self.assertEqual(window._dock_bar.get_orientation(), Gtk.Orientation.HORIZONTAL)
+        finally:
+            window.destroy()
+
+    def test_detach_restores_the_full_view(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window._dock_to_edge("right")
+            window._dock_detach.emit("clicked")  # the detach button
+            self.assertIsNone(window._docked_edge)
+            self.assertEqual(window._stack.get_visible_child_name(), "full")
+        finally:
+            window.destroy()
+
+    def test_dock_ignores_an_unknown_edge(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window._dock_to_edge("nowhere")
+            self.assertIsNone(window._docked_edge)
+            self.assertEqual(window._stack.get_visible_child_name(), "full")
+        finally:
+            window.destroy()
+
     def test_status_mode_orders_rows_into_sections(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:

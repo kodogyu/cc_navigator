@@ -333,12 +333,20 @@ class NavigatorWindow(Gtk.Window):
         collapse = Gtk.ToggleButton()
         collapse.set_relief(Gtk.ReliefStyle.NONE)
         collapse.add(Gtk.Image.new_from_icon_name("pan-up-symbolic", Gtk.IconSize.BUTTON))
-        collapse.set_tooltip_text("접기")
+        collapse.set_tooltip_text("접기 (길게 눌러 가장자리에 붙이기)")
         collapse.connect("toggled", self._on_collapse_toggled)
         header.pack_start(collapse)
         self._collapse_button = collapse
+        # Long-press the collapse button to enter attach mode (a direction picker
+        # to dock the panel to a screen edge). The gesture claims the press, so a
+        # short click still collapses; the flag undoes the toggle a long press
+        # would otherwise cause.
+        self._suppress_collapse_toggle = False
+        self._collapse_long_press = Gtk.GestureLongPress.new(collapse)
+        self._collapse_long_press.connect("pressed", self._on_collapse_long_press)
 
         self.set_titlebar(header)
+        self._header = header  # kept so attach mode can drop/restore the titlebar
 
         # Font override lives in a CSS provider scoped to this window by a class,
         # so changing the panel's font size never touches any other application.
@@ -401,12 +409,28 @@ class NavigatorWindow(Gtk.Window):
         box.pack_start(scroller, True, True, 0)
         box.pack_start(self._status, False, False, 4)
         self._content = box
-        self.add(box)
+
+        # A Stack holds the full panel and a minimal "docked" bar. Attach mode
+        # (long-press the collapse button, then pick an edge) swaps to the docked
+        # bar pinned to a screen edge; the detach button swaps back.
+        self._docked_edge = None
+        self._pre_dock_size = None
+        self._pre_dock_pos = None
+        self._dock_bar = self._build_dock_bar()
+        self._stack = Gtk.Stack()
+        self._stack.set_hhomogeneous(False)
+        self._stack.set_vhomogeneous(False)
+        self._stack.add_named(self._content, "full")
+        self._stack.add_named(self._dock_bar, "docked")
+        self._stack.set_visible_child_name("full")
+        self.add(self._stack)
         # Default state is expanded: without this, box.get_visible() is False
         # until something shows it, and the collapse toggle would have nothing
         # correct to restore to. Application.main() still calls window.show_all()
         # to reveal every child widget on screen; this only pins the box itself.
         self._content.show()
+        self._dock_bar.show_all()
+        self._stack.show()
         # No destroy -> Gtk.main_quit here: app.main() owns the main loop.
 
         # Apply the saved settings once everything exists: this sets size,
@@ -481,6 +505,12 @@ class NavigatorWindow(Gtk.Window):
         self._css.load_from_data("\n".join(parts).encode("utf-8"))
 
     def _on_collapse_toggled(self, button: Gtk.ToggleButton) -> None:
+        if self._suppress_collapse_toggle:
+            # A long press fired: undo the toggle it caused rather than collapse.
+            self._suppress_collapse_toggle = False
+            if button.get_active():
+                button.set_active(False)  # re-enters with the flag cleared -> no-op
+            return
         self.set_collapsed(button.get_active())
 
     def set_collapsed(self, collapsed: bool) -> None:
@@ -497,6 +527,114 @@ class NavigatorWindow(Gtk.Window):
             self.resize(self._settings.width, self._settings.height)
         if self._collapse_button.get_active() != collapsed:
             self._collapse_button.set_active(collapsed)
+
+    # -- attach mode (dock to a screen edge) ---------------------------------
+
+    def _build_dock_bar(self) -> Gtk.Box:
+        """The minimal bar shown while docked: the app icon, the waiting-count,
+        and a detach button. Its orientation is set when docking."""
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        bar.set_margin_top(4)
+        bar.set_margin_bottom(4)
+        bar.set_margin_start(4)
+        bar.set_margin_end(4)
+        icon_pixbuf = _app_icon_pixbuf(22)
+        self._dock_icon = (Gtk.Image.new_from_pixbuf(icon_pixbuf)
+                           if icon_pixbuf is not None else Gtk.Image())
+        self._dock_count = Gtk.Label()
+        detach = Gtk.Button()
+        detach.set_relief(Gtk.ReliefStyle.NONE)
+        detach.add(Gtk.Image.new_from_icon_name("view-restore-symbolic", Gtk.IconSize.BUTTON))
+        detach.set_tooltip_text("떼기 (detach)")
+        detach.connect("clicked", lambda _b: self._undock())
+        self._dock_detach = detach
+        bar.pack_start(self._dock_icon, False, False, 0)
+        bar.pack_start(self._dock_count, False, False, 0)
+        bar.pack_start(detach, False, False, 0)
+        return bar
+
+    def _on_collapse_long_press(self, _gesture, _x, _y) -> None:
+        """A long press on the collapse button opens a direction picker to dock
+        the panel to a screen edge."""
+        self._suppress_collapse_toggle = True
+        popover = Gtk.Popover.new(self._collapse_button)
+        grid = Gtk.Grid()
+        grid.set_row_spacing(2)
+        grid.set_column_spacing(2)
+        grid.set_border_width(6)
+
+        def edge_button(icon, edge, col, row):
+            btn = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.BUTTON)
+            btn.set_relief(Gtk.ReliefStyle.NONE)
+            btn.connect("clicked", lambda _b, e=edge: (popover.popdown(), self._dock_to_edge(e)))
+            grid.attach(btn, col, row, 1, 1)
+
+        edge_button("go-up-symbolic", "top", 1, 0)
+        edge_button("go-previous-symbolic", "left", 0, 1)
+        edge_button("go-next-symbolic", "right", 2, 1)
+        edge_button("go-down-symbolic", "bottom", 1, 2)
+        grid.show_all()
+        popover.add(grid)
+        popover.popup()
+
+    def _dock_to_edge(self, edge: str) -> None:
+        """Dock as a minimal bar pinned to one screen edge. Icons run vertically
+        when docked left/right, horizontally when docked top/bottom."""
+        if edge not in ("top", "bottom", "left", "right"):
+            return
+        if self._docked_edge is None:  # remember where to return on detach
+            self._pre_dock_size = (self._settings.width, self._settings.height)
+            self._pre_dock_pos = self.get_position()
+        self._docked_edge = edge
+        self._dock_bar.set_orientation(
+            Gtk.Orientation.VERTICAL if edge in ("left", "right")
+            else Gtk.Orientation.HORIZONTAL)
+        self._update_dock_count()
+        self._stack.set_visible_child_name("docked")
+        # Hide the titlebar so the window can shrink to just the dock bar (its
+        # buttons otherwise force a wide minimum); the detach button lives in the
+        # bar itself while docked. (set_titlebar(None) warns on a realized window,
+        # so hide the header widget instead.)
+        self._header.hide()
+        self._resize_and_position_dock(edge)
+
+    def _undock(self) -> None:
+        if self._docked_edge is None:
+            return
+        self._docked_edge = None
+        self._stack.set_visible_child_name("full")
+        self._header.show()  # restore the titlebar
+        width, height = self._pre_dock_size or (self._settings.width, self._settings.height)
+        self.resize(width, height)
+        if self._pre_dock_pos is not None:
+            self.move(*self._pre_dock_pos)
+        else:
+            self._apply_geometry(self._settings)
+
+    def _resize_and_position_dock(self, edge: str) -> None:
+        thick = 44    # the minimal strip thickness
+        length = 220  # extent along the edge
+        display = Gdk.Display.get_default()
+        monitor = (display.get_primary_monitor() or display.get_monitor(0)) if display else None
+        if monitor is None:
+            return
+        geo = monitor.get_geometry()
+        if edge in ("left", "right"):
+            w, h = thick, min(geo.height, length)
+            self.resize(w, h)
+            y = geo.y + (geo.height - h) // 2
+            x = geo.x if edge == "left" else geo.x + geo.width - w
+        else:
+            w, h = min(geo.width, length), thick
+            self.resize(w, h)
+            x = geo.x + (geo.width - w) // 2
+            y = geo.y if edge == "top" else geo.y + geo.height - h
+        self.move(x, y)
+
+    def _update_dock_count(self) -> None:
+        waiting = self._status_counts.get(model.INPUT_NEEDED, 0)
+        self._dock_count.set_markup(
+            '<span foreground="#e01b24"><b>%d</b></span>' % waiting if waiting else "")
 
     def _on_refresh_clicked(self, _button) -> None:
         if self._on_refresh is not None:
@@ -876,6 +1014,7 @@ class NavigatorWindow(Gtk.Window):
         self._recompute_sections(rows)
         self._reconcile_group_headers(rows)
         self._update_count_badge()
+        self._update_dock_count()
         self._listbox.invalidate_sort()
         self._listbox.invalidate_headers()
         self._listbox.invalidate_filter()
