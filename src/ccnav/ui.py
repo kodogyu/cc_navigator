@@ -255,6 +255,11 @@ _DRAG_TARGETS = [Gtk.TargetEntry.new("CCNAV_SESSION", Gtk.TargetFlags.SAME_APP, 
 # Docked-bar dimensions: a thin strip pinned across one screen edge.
 _DOCK_THICK = 44    # thickness perpendicular to the edge
 _DOCK_LENGTH = 220  # extent along the edge
+# Re-snap the docked bar flush a moment after docking: the very first placement
+# can land a few px off the edge (CSD shadow / size-change race under the WM),
+# and re-applying the plain move once the geometry settles fixes it.
+_DOCK_RESNAP_MS = 60
+_DOCK_EDGES = ("top", "bottom", "left", "right")
 
 
 def _dock_rect(edge, geo, along=None):
@@ -386,16 +391,27 @@ class NavigatorWindow(Gtk.Window):
             Gtk.StyleContext.add_provider_for_screen(
                 screen, self._css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
-            # While docked we add the "docked" class; zero the client-side
-            # decoration so the bar sits FLUSH against the screen edge. The CSD
-            # shadow reserves an (asymmetric, bottom/side-heavy) margin around the
-            # window, which is what left it inset from the left/right/bottom edges.
+            # While docked we add the "docked" class (+ a "docked-<edge>" one); zero
+            # the client-side decoration so the bar sits FLUSH against the screen
+            # edge. The CSD shadow reserves an (asymmetric, bottom/side-heavy) margin
+            # around the window, which is what left it inset from the edge. The two
+            # corners AWAY from the edge stay rounded (per-edge rules below, which
+            # override the shared border-radius:0 by later-source order at equal
+            # specificity); the two corners on the edge are square so it meets flush.
             dock_css = Gtk.CssProvider()
             dock_css.load_from_data(
                 b"window.ccnav.docked decoration,"
                 b" window.ccnav.docked.background {"
                 b" margin: 0; padding: 0; box-shadow: none; border-radius: 0;"
-                b" border-width: 0; }")
+                b" border-width: 0; }"
+                b"window.ccnav.docked-right decoration {"
+                b" border-top-left-radius: 12px; border-bottom-left-radius: 12px; }"
+                b"window.ccnav.docked-left decoration {"
+                b" border-top-right-radius: 12px; border-bottom-right-radius: 12px; }"
+                b"window.ccnav.docked-top decoration {"
+                b" border-bottom-left-radius: 12px; border-bottom-right-radius: 12px; }"
+                b"window.ccnav.docked-bottom decoration {"
+                b" border-top-left-radius: 12px; border-top-right-radius: 12px; }")
             Gtk.StyleContext.add_provider_for_screen(
                 screen, dock_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1
             )
@@ -467,6 +483,7 @@ class NavigatorWindow(Gtk.Window):
         self._docked_edge = None
         self._pre_dock_pos = None
         self._dock_geo = None  # monitor rect of the current dock, for edge-sliding
+        self._dock_resnap_source = 0  # pending one-shot re-snap timeout, if any
         self._dock_bar = self._build_dock_bar()
         self._stack = Gtk.Stack()
         self._stack.set_hhomogeneous(False)
@@ -700,7 +717,14 @@ class NavigatorWindow(Gtk.Window):
                        else Gtk.Orientation.HORIZONTAL)
         self._dock_bar.set_orientation(orientation)
         self._dock_drag_inner.set_orientation(orientation)  # icon over count when vertical
-        self.get_style_context().add_class("docked")  # zero the CSD shadow -> flush
+        # "docked" zeroes the CSD shadow (flush); "docked-<edge>" rounds the two
+        # corners away from the edge. Clear any prior edge class first (a re-dock
+        # to a different edge).
+        ctx = self.get_style_context()
+        ctx.add_class("docked")
+        for other in _DOCK_EDGES:
+            ctx.remove_class("docked-" + other)
+        ctx.add_class("docked-" + edge)
         self._update_dock_count()
         # Reveal the bar before switching: GtkStack refuses to switch to a hidden
         # child, and the bar is kept hidden while undocked (see _build_dock_bar).
@@ -712,10 +736,35 @@ class NavigatorWindow(Gtk.Window):
         # so hide the header widget instead.)
         self._header.hide()
         self._resize_and_position_dock(edge)
+        # Re-pin flush once the resize/style has settled -- the first placement can
+        # sit a few px off the edge, but a later plain move (as a drag does) lands
+        # flush. One-shot; a prior pending re-snap is cancelled so rapid re-docks
+        # don't stack sources.
+        self._cancel_dock_resnap()
+        self._dock_resnap_source = GLib.timeout_add(_DOCK_RESNAP_MS, self._resnap_dock, edge)
+
+    def _cancel_dock_resnap(self) -> None:
+        if self._dock_resnap_source:
+            GLib.source_remove(self._dock_resnap_source)
+            self._dock_resnap_source = 0
+
+    def _resnap_dock(self, edge: str) -> bool:
+        self._dock_resnap_source = 0  # this source is firing now
+        # Skip if we've detached, re-docked elsewhere, lost the monitor geometry,
+        # or the user already grabbed the bar to slide it (re-centering would fight
+        # an in-progress drag).
+        if (self._docked_edge != edge or self._dock_geo is None
+                or self._dock_drag is not None):
+            return False
+        x, y, _w, _h = _dock_rect(edge, self._dock_geo)
+        self.move(x, y)
+        return False  # one-shot
 
     def _undock(self) -> None:
         if self._docked_edge is None:
             return
+        self._cancel_dock_resnap()  # drop a re-snap still pending from the dock
+        self._dock_geo = None       # so a stale rect can't be re-used on an odd display
         if self._dock_drag is not None:
             self._dock_drag = None  # defensively release a live slide grab
             display = Gdk.Display.get_default()
@@ -723,7 +772,10 @@ class NavigatorWindow(Gtk.Window):
             if seat is not None:
                 seat.ungrab()
         self._docked_edge = None
-        self.get_style_context().remove_class("docked")  # restore the normal frame
+        ctx = self.get_style_context()  # restore the normal (shadowed, rounded) frame
+        ctx.remove_class("docked")
+        for other in _DOCK_EDGES:
+            ctx.remove_class("docked-" + other)
         # Hide the bar before the switch so a later collapse (which hides _content)
         # can't make the stack fall back to showing it.
         self._dock_bar.hide()

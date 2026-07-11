@@ -773,6 +773,43 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_docking_sets_a_per_edge_class_for_rounded_corners(self):
+        # "docked-<edge>" rounds the two corners away from the edge; a re-dock must
+        # swap it, and undock must clear every docked class.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        ctx = window.get_style_context()
+        try:
+            window._dock_to_edge("right")
+            self.assertTrue(ctx.has_class("docked-right"))
+            window._dock_to_edge("top")  # re-dock swaps the edge class
+            self.assertFalse(ctx.has_class("docked-right"))
+            self.assertTrue(ctx.has_class("docked-top"))
+            window._undock()
+            for c in ("docked", "docked-top", "docked-bottom", "docked-left", "docked-right"):
+                self.assertFalse(ctx.has_class(c))
+        finally:
+            window.destroy()
+
+    def test_dock_resnap_repins_flush_only_while_still_docked(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window._dock_to_edge("right")
+            moves = []
+            window.move = lambda x, y: moves.append((x, y))
+            window._dock_geo = _Geo()
+            window._dock_drag = None
+            self.assertFalse(window._resnap_dock("right"))       # one-shot -> False
+            self.assertEqual(moves, [(1920 - 44, (1080 - 220) // 2)])  # flush right, centred
+            moves.clear()
+            self.assertFalse(window._resnap_dock("left"))        # stale edge -> guarded
+            self.assertEqual(moves, [])
+            # A slide started within the settle window must NOT be re-centered.
+            window._dock_drag = (500, 430)
+            self.assertFalse(window._resnap_dock("right"))
+            self.assertEqual(moves, [])                          # drag in progress -> no move
+        finally:
+            window.destroy()
+
     def test_dragging_a_docked_bar_slides_along_the_edge_and_pins_the_other_axis(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
