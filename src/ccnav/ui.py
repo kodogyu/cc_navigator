@@ -155,6 +155,51 @@ def _app_icon_pixbuf(size):
         return None
 
 
+# The per-field markup, shared by _build_row (first render) and _update_row
+# (in-place refresh). Keeping them in one place means a rebuilt row and an
+# updated row can never render the same field two different ways.
+def _title_markup(row: model.Row) -> str:
+    return "<b>%s</b>" % GLib.markup_escape_text(_oneline(primary_line(row)))
+
+
+def _secondary_markup(row: model.Row) -> str:
+    return ('<small><span foreground="#77767b">%s</span></small>'
+            % GLib.markup_escape_text(_oneline(secondary_line(row))))
+
+
+def _path_markup(row: model.Row) -> str:
+    return ('<small><span foreground="#77767b">%s</span></small>'
+            % GLib.markup_escape_text(_oneline(row.cwd)))
+
+
+def _prompt_markup(prompt: str) -> str:
+    return "<small>%s</small>" % GLib.markup_escape_text(prompt)
+
+
+def _meta_markup(row: model.Row) -> str:
+    state_line = _oneline(row.state + (" · " + row.reason if row.reason else ""))
+    return ('<small><span foreground="#77767b">%s</span></small>'
+            % GLib.markup_escape_text(state_line))
+
+
+def _build_indicator(kind: str, row_widget: Gtk.Widget) -> Gtk.Widget:
+    """The status widget for a row: a rotating arrow while working, else a
+    coloured dot (green 'reported', red 'input')."""
+    if kind == "working":
+        return _build_working_arrow(row_widget)
+    dot = Gtk.Label()
+    colour = "#2ec27e" if kind == "reported" else "#e01b24"
+    dot.set_markup('<span foreground="%s">●</span>' % colour)
+    return dot
+
+
+def _row_signature(row: model.Row):
+    """The fields whose change the user can see. Excludes updated_at on purpose:
+    the hook never bumps a timestamp without also changing state or reason."""
+    return (row.session_id, row.socket, row.pane, row.tmux_session, row.title,
+            row.state, row.reason, row.message, row.cwd, row.last_prompt)
+
+
 class NavigatorWindow(Gtk.Window):
     def __init__(
         self,
@@ -654,17 +699,14 @@ class NavigatorWindow(Gtk.Window):
                 return
 
     def set_rows(self, rows: List[model.Row]) -> None:
-        # Task 10 calls this on a one-second timer. Rebuilding the list destroys
-        # every child, including the Gtk.Entry the user is typing a reply into,
-        # so we must not rebuild when nothing the user can see has changed.
-        # updated_at is excluded on purpose: the hook never bumps a timestamp
-        # without also changing state or reason, and a reordering changes the
-        # tuple order anyway, so ordering is still covered.
-        signature = tuple(
-            (r.session_id, r.socket, r.pane, r.tmux_session, r.title,
-             r.state, r.reason, r.message, r.cwd, r.last_prompt)
-            for r in rows
-        )
+        # Called on a one-second timer. It RECONCILES in place rather than
+        # rebuilding: only rows that actually changed are updated, gone rows are
+        # removed, new rows are inserted. Rebuilding destroyed every widget --
+        # including the Gtk.Entry a reply is being typed into and the row's
+        # selection/expansion -- which flashed the whole list and reset the
+        # working arrow on every tick (the "flicker" report). Keeping each
+        # widget alive means an unchanged row is never touched at all.
+        signature = tuple(_row_signature(r) for r in rows)
         if signature == self._signature:
             # _hint is a pure function of emptiness, and emptiness is encoded in
             # the signature (the empty tuple iff rows is empty). An unchanged
@@ -673,37 +715,59 @@ class NavigatorWindow(Gtk.Window):
             return
         self._signature = signature
 
-        # Preserve what the user was doing across a rebuild that does happen:
-        # the selected session, its half-typed text, and whether it held focus.
-        restore_id = None
-        restore_text = ""
-        restore_focus = False
-        selected = self._listbox.get_selected_row()
-        if selected is not None:
-            restore_id = selected.ccnav_row.session_id
-            restore_text = selected.ccnav_entry.get_text()
-            restore_focus = selected.ccnav_entry.has_focus()
+        existing = {c.ccnav_row.session_id: c for c in self._listbox.get_children()}
+        desired_ids = set(r.session_id for r in rows)
 
-        for child in self._listbox.get_children():
-            self._listbox.remove(child)
-        for row in rows:
-            self._listbox.add(self._build_row(row))
+        # Remove rows whose session is gone.
+        for session_id, child in list(existing.items()):
+            if session_id not in desired_ids:
+                self._listbox.remove(child)
+                del existing[session_id]
+
+        # Add new rows and update changed ones in place. build_rows yields a
+        # stable per-session order (sorted by state-file name), so existing rows
+        # never need reordering relative to one another: a new row inserted at
+        # its index lands correctly and pushes later rows down.
+        for index, row in enumerate(rows):
+            child = existing.get(row.session_id)
+            if child is None:
+                child = self._build_row(row)
+                self._listbox.insert(child, index)
+                child.show_all()
+            elif child.ccnav_sig != _row_signature(row):
+                self._update_row(child, row)
+
         self._hint = "" if rows else EMPTY_HINT
         self._render_status()
-        self._listbox.show_all()
 
-        if restore_id is not None:
-            for child in self._listbox.get_children():
-                if child.ccnav_row.session_id == restore_id:
-                    # select_row re-reveals the row through _on_row_selected.
-                    self._listbox.select_row(child)
-                    child.ccnav_entry.set_text(restore_text)
-                    child.ccnav_entry.set_position(-1)
-                    if restore_focus:
-                        child.ccnav_entry.grab_focus()
-                        child.ccnav_entry.set_position(-1)
-                    break
-        # If that session is gone, nothing is restored.
+    def _update_row(self, list_row: Gtk.ListBoxRow, row: model.Row) -> None:
+        """Refresh one existing row's widgets in place -- no teardown, so its
+        entry text, focus, selection and revealed state all survive untouched."""
+        list_row.ccnav_row = row
+        list_row.ccnav_sig = _row_signature(row)
+
+        new_kind = dot_state(row)
+        if (new_kind == "working") != (list_row.ccnav_kind == "working"):
+            # working-ness flipped: swap the widget (rotating arrow <-> dot).
+            list_row.ccnav_header.remove(list_row.ccnav_indicator)
+            indicator = _build_indicator(new_kind, list_row)
+            list_row.ccnav_header.pack_start(indicator, False, False, 0)
+            list_row.ccnav_header.reorder_child(indicator, 0)
+            indicator.show()
+            list_row.ccnav_indicator = indicator
+        elif new_kind != list_row.ccnav_kind:
+            # still a dot, only the colour changed (reported <-> input).
+            colour = "#2ec27e" if new_kind == "reported" else "#e01b24"
+            list_row.ccnav_indicator.set_markup('<span foreground="%s">●</span>' % colour)
+        list_row.ccnav_kind = new_kind
+
+        list_row.ccnav_title.set_markup(_title_markup(row))
+        list_row.ccnav_secondary.set_markup(_secondary_markup(row))
+        list_row.ccnav_path.set_markup(_path_markup(row))
+        prompt = _oneline(row.last_prompt)
+        list_row.ccnav_prompt.set_markup(_prompt_markup(prompt))
+        list_row.ccnav_prompt.set_visible(bool(prompt))
+        list_row.ccnav_meta.set_markup(_meta_markup(row))
 
     def _build_row(self, row: model.Row) -> Gtk.ListBoxRow:
         list_row = Gtk.ListBoxRow()
@@ -713,33 +777,28 @@ class NavigatorWindow(Gtk.Window):
         # is gone): a rotating arrow while Claude works, a red dot when it needs
         # an answer, a green dot when it has reported and is idle.
         kind = dot_state(row)
-        if kind == "working":
-            indicator = _build_working_arrow(list_row)
-        else:
-            indicator = Gtk.Label()
-            colour = "#2ec27e" if kind == "reported" else "#e01b24"
-            indicator.set_markup('<span foreground="%s">●</span>' % colour)
+        indicator = _build_indicator(kind, list_row)
         header.pack_start(indicator, False, False, 0)
 
         title = Gtk.Label(xalign=0.0)
-        title.set_markup("<b>%s</b>" % GLib.markup_escape_text(_oneline(primary_line(row))))
+        title.set_markup(_title_markup(row))
         title.set_ellipsize(Pango.EllipsizeMode.END)
         header.pack_start(title, True, True, 0)
 
         secondary = Gtk.Label(xalign=0.0)
-        secondary.set_markup(
-            '<small><span foreground="#77767b">%s</span></small>'
-            % GLib.markup_escape_text(_oneline(secondary_line(row)))
-        )
+        secondary.set_markup(_secondary_markup(row))
         secondary.set_ellipsize(Pango.EllipsizeMode.END)
 
         entry = Gtk.Entry()
         entry.set_placeholder_text("입력 후 Enter")
-        entry.connect("activate", self._on_entry_activate, row)
+        # Bind the handlers to the ROW WIDGET, not the Row value: _update_row
+        # swaps list_row.ccnav_row in place, so reading it at click time always
+        # targets the current session (a captured Row would go stale).
+        entry.connect("activate", self._on_entry_activate, list_row)
 
         jump = Gtk.Button(label="해당 세션으로 이동")
         jump.set_sensitive(self._eval_available)
-        jump.connect("clicked", self._on_jump_clicked, row)
+        jump.connect("clicked", self._on_jump_clicked, list_row)
 
         actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         actions.pack_start(entry, True, True, 0)
@@ -747,28 +806,25 @@ class NavigatorWindow(Gtk.Window):
 
         detail = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         path_label = Gtk.Label(xalign=0.0)
-        path_label.set_markup(
-            '<small><span foreground="#77767b">%s</span></small>'
-            % GLib.markup_escape_text(_oneline(row.cwd)))
+        path_label.set_markup(_path_markup(row))
         path_label.set_selectable(True)
         path_label.set_line_wrap(True)
         detail.pack_start(path_label, False, False, 0)
 
+        # Always create the prompt label, shown only when there is a prompt, so
+        # an in-place update can reveal/hide it without adding/removing a widget.
         prompt = _oneline(row.last_prompt)
-        if prompt:
-            prompt_label = Gtk.Label(xalign=0.0)
-            prompt_label.set_markup(
-                "<small>%s</small>" % GLib.markup_escape_text(prompt))
-            prompt_label.set_line_wrap(True)
-            prompt_label.set_lines(3)
-            prompt_label.set_ellipsize(Pango.EllipsizeMode.END)
-            detail.pack_start(prompt_label, False, False, 0)
+        prompt_label = Gtk.Label(xalign=0.0)
+        prompt_label.set_markup(_prompt_markup(prompt))
+        prompt_label.set_line_wrap(True)
+        prompt_label.set_lines(3)
+        prompt_label.set_ellipsize(Pango.EllipsizeMode.END)
+        prompt_label.set_no_show_all(True)
+        prompt_label.set_visible(bool(prompt))
+        detail.pack_start(prompt_label, False, False, 0)
 
         meta = Gtk.Label(xalign=0.0)
-        state_line = _oneline(row.state + (" · " + row.reason if row.reason else ""))
-        meta.set_markup(
-            '<small><span foreground="#77767b">%s</span></small>'
-            % GLib.markup_escape_text(state_line))
+        meta.set_markup(_meta_markup(row))
         detail.pack_start(meta, False, False, 0)
 
         reveal_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
@@ -777,14 +833,22 @@ class NavigatorWindow(Gtk.Window):
 
         revealer = Gtk.Revealer()
         revealer.add(reveal_body)
-        # Stash the widgets set_rows and set_eval_available need so they can find
-        # them without walking the widget tree. ccnav_row was removed as unused in
-        # a pre-flight plan review; it is used now -- set_rows matches on
-        # ccnav_row.session_id to restore the selection across a rebuild.
+        # Refs so set_rows/_update_row/set_eval_available reach a row's widgets
+        # without walking the tree. ccnav_row is the CURRENT Row (swapped in
+        # place by _update_row); ccnav_sig gates whether an update is needed.
         list_row.ccnav_revealer = revealer  # type: ignore[attr-defined]
         list_row.ccnav_row = row  # type: ignore[attr-defined]
         list_row.ccnav_entry = entry  # type: ignore[attr-defined]
         list_row.ccnav_jump = jump  # type: ignore[attr-defined]
+        list_row.ccnav_header = header  # type: ignore[attr-defined]
+        list_row.ccnav_indicator = indicator  # type: ignore[attr-defined]
+        list_row.ccnav_kind = kind  # type: ignore[attr-defined]
+        list_row.ccnav_title = title  # type: ignore[attr-defined]
+        list_row.ccnav_secondary = secondary  # type: ignore[attr-defined]
+        list_row.ccnav_path = path_label  # type: ignore[attr-defined]
+        list_row.ccnav_prompt = prompt_label  # type: ignore[attr-defined]
+        list_row.ccnav_meta = meta  # type: ignore[attr-defined]
+        list_row.ccnav_sig = _row_signature(row)  # type: ignore[attr-defined]
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         body.set_margin_top(6)
@@ -818,12 +882,12 @@ class NavigatorWindow(Gtk.Window):
         if activated is self._pre_press_selected:
             listbox.unselect_row(activated)
 
-    def _on_jump_clicked(self, _button, row: model.Row) -> None:
-        self._on_jump(row)
+    def _on_jump_clicked(self, _button, list_row: Gtk.ListBoxRow) -> None:
+        self._on_jump(list_row.ccnav_row)
 
-    def _on_entry_activate(self, entry: Gtk.Entry, row: model.Row) -> None:
+    def _on_entry_activate(self, entry: Gtk.Entry, list_row: Gtk.ListBoxRow) -> None:
         text = entry.get_text()
         if not text.strip():
             return
         entry.set_text("")
-        self._on_send(row, text)
+        self._on_send(list_row.ccnav_row, text)

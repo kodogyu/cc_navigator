@@ -9,9 +9,9 @@ from gi.repository import Gtk  # noqa: E402
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
-        last_prompt=""):
+        last_prompt="", pane="%1", socket="/tmp/s"):
     return model.Row(
-        session_id=session_id, socket="/tmp/s", pane="%1", tmux_session="demo",
+        session_id=session_id, socket=socket, pane=pane, tmux_session="demo",
         title=title, state=state, reason=reason,
         message=message, cwd=cwd, updated_at=1, last_prompt=last_prompt,
     )
@@ -351,6 +351,76 @@ class NavigatorWindowTest(unittest.TestCase):
             if "●" in lbl.get_label():
                 return lbl.get_label()
         return ""
+
+    def test_changing_one_row_keeps_every_rows_widget(self):
+        # The flicker fix: set_rows reconciles in place, so a change to one
+        # session must NOT destroy/rebuild any row's widgets -- unchanged rows
+        # are untouched and the changed row keeps its widget identity.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a"), row(session_id="b")])
+            a0, b0 = window._listbox.get_children()
+            window.set_rows([row(session_id="a"),
+                             row(session_id="b", state=hookstate.WORKING)])
+            a1, b1 = window._listbox.get_children()
+            self.assertIs(a1, a0)  # unchanged session: same widget, never rebuilt
+            self.assertIs(b1, b0)  # changed session: same widget, updated in place
+        finally:
+            window.destroy()
+
+    def test_dot_recolours_in_place_on_a_reason_change(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
+            child = window._listbox.get_children()[0]
+            self.assertIn("#2ec27e", self._dot_markup(child))  # green
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="permission_prompt")])
+            self.assertIs(window._listbox.get_children()[0], child)  # same widget
+            self.assertIn("#e01b24", self._dot_markup(child))  # recoloured red in place
+        finally:
+            window.destroy()
+
+    def test_state_flip_swaps_dot_for_arrow_in_place(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
+            child = window._listbox.get_children()[0]
+            self.assertIn("●", self._labels_under(child))  # a dot
+            window.set_rows([row(session_id="a", state=hookstate.WORKING)])
+            self.assertIs(window._listbox.get_children()[0], child)  # same row widget
+            arrows = [t for t in self._labels_under(child) if t in ui._WORKING_FRAMES]
+            self.assertEqual(len(arrows), 1)  # dot swapped for a rotating arrow
+        finally:
+            window.destroy()
+
+    def test_gone_session_is_removed_and_new_one_added(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a"), row(session_id="b")])
+            window.set_rows([row(session_id="b"), row(session_id="c")])
+            ids = [c.ccnav_row.session_id for c in window._listbox.get_children()]
+            self.assertEqual(ids, ["b", "c"])  # a removed, c inserted, order kept
+        finally:
+            window.destroy()
+
+    def test_send_targets_the_current_row_after_an_in_place_update(self):
+        # The entry handler must read the row's CURRENT data, not a Row captured
+        # at build time (in-place update swaps ccnav_row).
+        sent = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None,
+            on_send=lambda r, t: sent.append((r.session_id, r.pane, t)))
+        try:
+            window.set_rows([row(session_id="a", pane="%1")])
+            child = window._listbox.get_children()[0]
+            window.set_rows([row(session_id="a", pane="%9")])  # pane changed -> update
+            self.assertIs(window._listbox.get_children()[0], child)
+            child.ccnav_entry.set_text("hello")
+            child.ccnav_entry.emit("activate")
+            self.assertEqual(sent, [("a", "%9", "hello")])  # current pane, not the stale %1
+        finally:
+            window.destroy()
 
     def test_reported_dot_is_green_and_input_dot_is_red(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
