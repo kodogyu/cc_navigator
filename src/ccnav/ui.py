@@ -350,6 +350,9 @@ class NavigatorWindow(Gtk.Window):
         # would otherwise cause.
         self._suppress_collapse_toggle = False
         self._collapse_long_press = Gtk.GestureLongPress.new(collapse)
+        # Require a clearly-long hold so a normal (even slightly slow) click
+        # collapses instead of accidentally opening the attach picker.
+        self._collapse_long_press.set_property("delay-factor", 2.0)
         self._collapse_long_press.connect("pressed", self._on_collapse_long_press)
 
         self.set_titlebar(header)
@@ -576,9 +579,12 @@ class NavigatorWindow(Gtk.Window):
         bar.pack_start(detach, False, False, 0)
         return bar
 
-    def _on_collapse_long_press(self, _gesture, _x, _y) -> None:
+    def _on_collapse_long_press(self, gesture, _x, _y) -> None:
         """A long press on the collapse button opens a direction picker to dock
         the panel to a screen edge."""
+        # Claim the press so the button does NOT also toggle (collapse) -- a long
+        # press means "attach", a short click means "collapse".
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
         self._suppress_collapse_toggle = True
         popover = Gtk.Popover.new(self._collapse_button)
         grid = Gtk.Grid()
@@ -605,6 +611,10 @@ class NavigatorWindow(Gtk.Window):
         # is not leaked per long press.
         def _on_closed(pop):
             self._suppress_collapse_toggle = False
+            # A dismissed attach popover must not leave the button stuck toggled
+            # / the panel collapsed.
+            if self._collapse_button.get_active():
+                self._collapse_button.set_active(False)
             pop.destroy()
         popover.connect("closed", _on_closed)
         popover.popup()
@@ -657,15 +667,21 @@ class NavigatorWindow(Gtk.Window):
         geo = monitor.get_geometry()
         if edge in ("left", "right"):
             w, h = thick, min(geo.height, length)
-            self.resize(w, h)
             y = geo.y + (geo.height - h) // 2
             x = geo.x if edge == "left" else geo.x + geo.width - w
         else:
             w, h = min(geo.width, length), thick
-            self.resize(w, h)
             x = geo.x + (geo.width - w) // 2
             y = geo.y if edge == "top" else geo.y + geo.height - h
-        self.move(x, y)
+        self.resize(w, h)  # keep GTK's requested size in sync
+        # Move+resize the X window atomically: for the right/bottom edges the
+        # position depends on the NEW size, so moving while the window is still
+        # full-size lets the WM clamp it inward (it slid left by the old width).
+        gdk_window = self.get_window()
+        if gdk_window is not None:
+            gdk_window.move_resize(x, y, w, h)
+        else:
+            self.move(x, y)
 
     def _update_dock_count(self) -> None:
         waiting = self._status_counts.get(model.INPUT_NEEDED, 0)
@@ -1160,18 +1176,13 @@ class NavigatorWindow(Gtk.Window):
         self._listbox.invalidate_sort()
 
     def _set_row_draggable(self, list_row: Gtk.ListBoxRow, on: bool) -> None:
-        """Enable drag-to-arrange only in Group mode, so a normal drag elsewhere
-        never starts DnD over the reply entry or the row's buttons."""
-        if on:
-            list_row.drag_source_set(
-                Gdk.ModifierType.BUTTON1_MASK, _DRAG_TARGETS, Gdk.DragAction.MOVE)
-        else:
-            list_row.drag_source_unset()
+        """Show the drag handle only in Group mode (the handle IS the drag
+        source, so hiding it disables dragging)."""
+        list_row.ccnav_grip.set_visible(on)
 
-    def _on_row_drag_get(self, list_row, _context, selection, _info, _time) -> None:
-        if not getattr(list_row, "ccnav_is_header", False):
-            selection.set(selection.get_target(), 8,
-                          list_row.ccnav_row.session_id.encode("utf-8"))
+    def _on_grip_drag_get(self, _grip, _context, selection, _info, _time, list_row) -> None:
+        selection.set(selection.get_target(), 8,
+                      list_row.ccnav_row.session_id.encode("utf-8"))
 
     def _on_row_drag_received(self, list_row, _context, _x, y, selection, _info, _time) -> None:
         """Drop a session on another: it joins that session's group and lands
@@ -1494,6 +1505,20 @@ class NavigatorWindow(Gtk.Window):
         indicator = _build_indicator(kind)
         header.pack_start(indicator, False, False, 0)
 
+        # Drag handle (visible only in group mode). A GtkListBoxRow is activatable
+        # and swallows button drags, so the drag SOURCE is this grip, not the row.
+        grip = Gtk.EventBox()
+        grip_label = Gtk.Label()
+        grip_label.set_markup('<span foreground="#77767b">⠿</span>')
+        grip.add(grip_label)
+        grip.set_tooltip_text("드래그해서 순서 변경 / 그룹 이동")
+        grip.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, _DRAG_TARGETS, Gdk.DragAction.MOVE)
+        grip.connect("drag-data-get", self._on_grip_drag_get, list_row)
+        grip.set_no_show_all(True)
+        grip.set_visible(self._settings.sort_mode == "group")
+        header.pack_start(grip, False, False, 0)
+        list_row.ccnav_grip = grip  # type: ignore[attr-defined]
+
         title = Gtk.Label(xalign=0.0)
         title.set_markup(_title_markup(row))
         title.set_ellipsize(Pango.EllipsizeMode.END)
@@ -1567,9 +1592,7 @@ class NavigatorWindow(Gtk.Window):
         # Manual-mode drag-to-reorder: every row is a drop target; it is a drag
         # SOURCE only while in manual mode (toggled here and on mode change).
         list_row.drag_dest_set(Gtk.DestDefaults.ALL, _DRAG_TARGETS, Gdk.DragAction.MOVE)
-        list_row.connect("drag-data-get", self._on_row_drag_get)
         list_row.connect("drag-data-received", self._on_row_drag_received)
-        self._set_row_draggable(list_row, self._settings.sort_mode == "group")
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         body.set_margin_top(6)

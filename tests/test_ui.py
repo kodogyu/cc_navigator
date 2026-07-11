@@ -668,6 +668,57 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_drag_grip_visible_only_in_group_mode(self):
+        from ccnav import config
+        status_win = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        group_win = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            status_win.set_rows([row(session_id="a")])
+            group_win.set_rows([row(session_id="a")])
+            self.assertFalse(status_win._listbox.get_children()[0].ccnav_grip.get_visible())
+            self.assertTrue(self._row_by_id(group_win, "a").ccnav_grip.get_visible())
+        finally:
+            status_win.destroy()
+            group_win.destroy()
+
+    def test_grip_drag_provides_the_session_id(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="xyz")])
+            child = self._row_by_id(window, "xyz")
+            captured = {}
+
+            class Sel:
+                def get_target(self):
+                    return None
+
+                def set(self, target, fmt, data):
+                    captured["d"] = data
+
+            window._on_grip_drag_get(child.ccnav_grip, None, Sel(), 0, 0, child)
+            self.assertEqual(captured["d"], b"xyz")  # the drag carries the session id
+        finally:
+            window.destroy()
+
+    def test_short_click_collapses_but_a_long_press_does_not(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
+        try:
+            window._collapse_button.set_active(True)  # short click -> collapse
+            self.assertFalse(window._content.get_visible())
+            window._collapse_button.set_active(False)
+            self.assertTrue(window._content.get_visible())
+            window._on_collapse_long_press(window._collapse_long_press, 0, 0)  # long press -> attach
+            self.assertTrue(window._suppress_collapse_toggle)
+            self.assertTrue(window._content.get_visible())  # long press must NOT collapse
+        finally:
+            window.destroy()
+
     def test_status_mode_orders_rows_into_sections(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
