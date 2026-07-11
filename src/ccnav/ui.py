@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import socket
+import threading
 from typing import Callable, List
 
 import gi
@@ -16,7 +17,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, hookstate, model, wiring  # noqa: E402
+from . import config, hookstate, model, updater, wiring  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -231,6 +232,9 @@ class NavigatorWindow(Gtk.Window):
         self._wiring_apps_dir = None      # None -> wiring's default (~/.local/share)
         self._wiring_autostart_dir = None
         self._wiring_settings_path = None  # None -> ~/.claude/settings.json
+        # Seams so tests drive the update button without git or re-exec.
+        self._updater_update = updater.update
+        self._updater_restart = updater.restart
 
         # A HeaderBar so a settings gear can sit next to the window close button,
         # as asked. This makes the titlebar client-side (GTK-drawn) rather than
@@ -427,6 +431,30 @@ class NavigatorWindow(Gtk.Window):
         dialog.run()
         dialog.destroy()
 
+    def _on_update_clicked(self, _button) -> None:
+        """Fetch + fast-forward off the GTK thread (it touches the network and
+        disk), then hand the result back with idle_add. On success the process
+        re-execs into the new code; otherwise the reason lands in the label."""
+        self._update_button.set_sensitive(False)
+        self._update_status.set_text("업데이트 확인 중…")
+
+        def worker() -> None:
+            try:
+                updated, message = self._updater_update()
+            except Exception as exc:  # noqa: BLE001 -- must never crash the panel
+                updated, message = False, "업데이트 확인 실패: %s" % exc
+            GLib.idle_add(self._apply_update_result, updated, message)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_update_result(self, updated: bool, message: str) -> bool:
+        self._update_status.set_text(message)
+        if updated:
+            self._updater_restart()  # replaces the process image; does not return
+        else:
+            self._update_button.set_sensitive(True)
+        return False  # one-shot idle source
+
     def _cc_exec_path(self) -> str:
         # The repo's own launcher, resolved absolutely -- the same basis as
         # _hook_command. The .desktop Exec must point here, NOT at the
@@ -601,11 +629,22 @@ class NavigatorWindow(Gtk.Window):
         row += 1
 
         from . import __version__
-        # Same format as `cc-navigator --version` (app.main), so the CLI and the
-        # dialog never disagree on how the version line reads.
-        footer = Gtk.Label(label="cc-navigator %s" % __version__, xalign=1.0)
-        footer.get_style_context().add_class("dim-label")
+        # Bottom row: an update button + its status on the left, the version on
+        # the right. Same version format as `cc-navigator --version` (app.main),
+        # so the CLI and the dialog never disagree on how the version line reads.
+        footer = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        update_btn = Gtk.Button(label="업데이트 확인")
+        update_status = Gtk.Label(xalign=0.0)
+        update_status.set_line_wrap(True)
+        version_label = Gtk.Label(label="cc-navigator %s" % __version__)
+        version_label.get_style_context().add_class("dim-label")
+        footer.pack_start(update_btn, False, False, 0)
+        footer.pack_start(update_status, True, True, 0)
+        footer.pack_end(version_label, False, False, 0)
         content.add(footer)
+        self._update_button = update_btn
+        self._update_status = update_status
+        update_btn.connect("clicked", self._on_update_clicked)
 
         # Integration: reflect the current on-disk wiring state and let each
         # toggle install/remove it. BOTH the initial state read (is_on) and the

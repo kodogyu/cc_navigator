@@ -782,3 +782,51 @@ class SettingsUiTest(unittest.TestCase):
             self.assertTrue(os.path.exists(exec_path), exec_path)
         finally:
             window.destroy()
+
+    def test_update_result_shows_message_and_does_not_restart_when_not_updated(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, settings=config.Settings())
+        restarted = []
+        window._updater_restart = lambda: restarted.append(True)
+        try:
+            window._build_settings_dialog()
+            window._update_button.set_sensitive(False)
+            window._apply_update_result(False, "이미 최신 버전입니다.")
+            self.assertEqual(window._update_status.get_text(), "이미 최신 버전입니다.")
+            self.assertTrue(window._update_button.get_sensitive())  # re-enabled
+            self.assertEqual(restarted, [])  # nothing updated -> no restart
+        finally:
+            window.destroy()
+
+    def test_update_result_restarts_when_updated(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, settings=config.Settings())
+        restarted = []
+        window._updater_restart = lambda: restarted.append(True)
+        try:
+            window._build_settings_dialog()
+            window._apply_update_result(True, "업데이트했습니다. 재시작합니다…")
+            self.assertEqual(restarted, [True])  # success -> re-exec
+        finally:
+            window.destroy()
+
+    def test_update_button_click_runs_the_injected_updater(self):
+        from gi.repository import GLib
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, settings=config.Settings())
+        window._updater_update = lambda: (False, "이미 최신 버전입니다.")
+        window._updater_restart = lambda: None
+        try:
+            window._build_settings_dialog()
+            window._on_update_clicked(window._update_button)
+            # The worker runs on a daemon thread and posts back via idle_add.
+            loop = GLib.MainLoop()
+            GLib.timeout_add(300, loop.quit)
+            loop.run()
+            self.assertEqual(window._update_status.get_text(), "이미 최신 버전입니다.")
+            self.assertTrue(window._update_button.get_sensitive())
+        finally:
+            window.destroy()
