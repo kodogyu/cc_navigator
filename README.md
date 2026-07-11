@@ -28,7 +28,10 @@ get there**:
 
 - **Status at a glance** — a red dot ● for a session waiting on your input, a
   green dot ● for one that finished its turn, and a spinning arrow ↻ while Claude
-  is working. A badge in the title bar counts how many need input.
+  is working. When a session has spawned subagents, a second spinner sits behind
+  the main icon — so a session blocked on you (red) *while* its helpers keep
+  running shows both at once. Click a green dot to mark it seen (a hollow box). A
+  badge in the title bar counts how many need input.
 - **Two views** — sort by **status** (input-needed / reported / working sections)
   or by **project group** (one folder per working directory).
 - **Jump** — click *"해당 세션으로 이동"* to raise that session's terminal window.
@@ -87,7 +90,7 @@ without it.
 git clone https://github.com/kodogyu/cc_navigator.git
 cd cc_navigator
 
-./run-tests                    # optional: expect "Ran 415 tests / OK"
+./run-tests                    # optional: expect "Ran 445 tests / OK"
 ./bin/cc-navigator-doctor      # checks your machine and prints exactly what to fix
 ```
 
@@ -115,14 +118,14 @@ cc-navigator &          # or ./bin/cc-navigator & if you skipped ./install
 panel's **Settings** (the ⚙ gear button), and under **통합 (Integration)** turn on
 **"Claude Code 훅 설정"**. That merges the hook shim into `~/.claude/settings.json`
 for you (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `SessionEnd`,
-`PreToolUse`, `PostToolUse`, `SubagentStop`). The same panel also offers toggles to
+`PreToolUse`, `PostToolUse`, `SubagentStart`, `SubagentStop`). The same panel also offers toggles to
 register cc_navigator in your app list (**"앱 목록에 등록"**) and start it on login
 (**"로그인 시 자동 실행"**).
 
-> **Upgrading?** If you installed the hooks before and the working indicator gets
-> stuck, re-toggle **"Claude Code 훅 설정"** off and on — a newer version added the
-> `PostToolUse` and `SubagentStop` hooks that keep the spinner lit while Claude
-> works.
+> **Upgrading?** Re-toggle **"Claude Code 훅 설정"** off and on — newer versions
+> added `PostToolUse`, `SubagentStart`, and `SubagentStop`, which keep the spinner
+> lit while Claude works and drive the subagent second icon. New hooks apply to
+> sessions started afterward.
 
 **5. Run one tmux session per project**, each attached in its own terminal window.
 With no sessions registered the panel is inert — it makes **zero** tmux calls until
@@ -163,8 +166,12 @@ selected) its working directory and last prompt.
 
 - 🔴 **red dot** — the session is waiting on you (a permission prompt, a question,
   a plan to approve). The title-bar badge counts these.
-- 🟢 **green dot** — the session finished its turn and is idle.
+- 🟢 **green dot** — the session finished its turn and is idle. Click it to mark it
+  seen (it becomes a hollow box); click again to restore.
 - ↻ **spinning arrow** — Claude is working.
+- **two overlapping icons** — the session has subagents running: the main state in
+  front, a subagent spinner behind. A working main with subagents shows a calm blue
+  dot, so only the helper spins.
 
 **Switch views** with the *"Sort by"* dropdown at the top:
 
@@ -227,7 +234,7 @@ with [`docs/superpowers/sdd/implementation-log.md`](docs/superpowers/sdd/impleme
 
 ## Status
 
-The full feature set is built and the suite is green (**415 tests**). Every task is
+The full feature set is built and the suite is green (**445 tests**). Every task is
 checked with **mutation testing** — the implementation is deliberately broken N ways
 and every break must fail a named test — and the riskiest changes go through an
 adversarial multi-agent review before landing.
