@@ -72,7 +72,11 @@ def update(git: Optional[GitRun] = None, repo: Optional[pathlib.Path] = None) ->
 
     rc, _, _ = git(["merge", "--ff-only", "@{u}"])
     if rc != 0:
-        return (False, "fast-forward가 불가능합니다(로컬 커밋 존재). 수동 업데이트가 필요합니다.")
+        # --ff-only refuses a diverged history AND a fast-forward that would
+        # overwrite an untracked file, so name both causes rather than blaming
+        # only local commits.
+        return (False, "fast-forward가 불가능합니다(로컬 커밋 또는 추적되지 않은 파일 충돌). "
+                       "수동 업데이트가 필요합니다.")
     return (True, "최신 버전으로 업데이트했습니다. 재시작합니다…")
 
 

@@ -791,10 +791,11 @@ class SettingsUiTest(unittest.TestCase):
         window._updater_restart = lambda: restarted.append(True)
         try:
             window._build_settings_dialog()
-            window._update_button.set_sensitive(False)
-            window._apply_update_result(False, "이미 최신 버전입니다.")
-            self.assertEqual(window._update_status.get_text(), "이미 최신 버전입니다.")
-            self.assertTrue(window._update_button.get_sensitive())  # re-enabled
+            btn, status = window._update_button, window._update_status
+            btn.set_sensitive(False)
+            window._apply_update_result(False, "이미 최신 버전입니다.", btn, status)
+            self.assertEqual(status.get_text(), "이미 최신 버전입니다.")
+            self.assertTrue(btn.get_sensitive())  # re-enabled
             self.assertEqual(restarted, [])  # nothing updated -> no restart
         finally:
             window.destroy()
@@ -807,8 +808,31 @@ class SettingsUiTest(unittest.TestCase):
         window._updater_restart = lambda: restarted.append(True)
         try:
             window._build_settings_dialog()
-            window._apply_update_result(True, "업데이트했습니다. 재시작합니다…")
+            window._apply_update_result(True, "업데이트했습니다. 재시작합니다…",
+                                        window._update_button, window._update_status)
             self.assertEqual(restarted, [True])  # success -> re-exec
+        finally:
+            window.destroy()
+
+    def test_update_that_raises_does_not_restart(self):
+        from gi.repository import GLib
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, settings=config.Settings())
+        restarted = []
+        window._updater_restart = lambda: restarted.append(True)
+
+        def boom():
+            raise RuntimeError("git blew up")
+        window._updater_update = boom
+        try:
+            window._build_settings_dialog()
+            window._on_update_clicked(window._update_button)
+            loop = GLib.MainLoop()
+            GLib.timeout_add(300, loop.quit)
+            loop.run()
+            self.assertEqual(restarted, [])  # a failure never re-execs
+            self.assertIn("실패", window._update_status.get_text())
         finally:
             window.destroy()
 

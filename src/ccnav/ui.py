@@ -431,28 +431,34 @@ class NavigatorWindow(Gtk.Window):
         dialog.run()
         dialog.destroy()
 
-    def _on_update_clicked(self, _button) -> None:
+    def _on_update_clicked(self, button) -> None:
         """Fetch + fast-forward off the GTK thread (it touches the network and
         disk), then hand the result back with idle_add. On success the process
-        re-execs into the new code; otherwise the reason lands in the label."""
-        self._update_button.set_sensitive(False)
-        self._update_status.set_text("업데이트 확인 중…")
+        re-execs into the new code; otherwise the reason lands in the label.
+
+        The button and its status label are captured here, not read from self in
+        the callback: reopening the dialog rebuilds those widgets, so a worker
+        started for an old dialog must write its result into that dialog's own
+        widgets (harmless if it was closed), never into the current one."""
+        status = self._update_status
+        button.set_sensitive(False)
+        status.set_text("업데이트 확인 중…")
 
         def worker() -> None:
             try:
                 updated, message = self._updater_update()
             except Exception as exc:  # noqa: BLE001 -- must never crash the panel
                 updated, message = False, "업데이트 확인 실패: %s" % exc
-            GLib.idle_add(self._apply_update_result, updated, message)
+            GLib.idle_add(self._apply_update_result, updated, message, button, status)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _apply_update_result(self, updated: bool, message: str) -> bool:
-        self._update_status.set_text(message)
+    def _apply_update_result(self, updated: bool, message: str, button, status) -> bool:
+        status.set_text(message)
         if updated:
             self._updater_restart()  # replaces the process image; does not return
         else:
-            self._update_button.set_sensitive(True)
+            button.set_sensitive(True)
         return False  # one-shot idle source
 
     def _cc_exec_path(self) -> str:
