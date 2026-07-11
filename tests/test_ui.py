@@ -106,6 +106,28 @@ class OnelineTest(unittest.TestCase):
         self.assertEqual(ui._oneline(""), "")
 
 
+class DotStateTest(unittest.TestCase):
+    def test_working_state_is_working(self):
+        self.assertEqual(ui.dot_state(row(state=hookstate.WORKING)), "working")
+
+    def test_blocking_waiting_reasons_are_input(self):
+        for reason in ("permission_prompt", "question", "plan", "elicitation_dialog"):
+            self.assertEqual(
+                ui.dot_state(row(state=hookstate.WAITING, reason=reason)), "input", reason)
+
+    def test_idle_waiting_is_reported(self):
+        self.assertEqual(
+            ui.dot_state(row(state=hookstate.WAITING, reason="idle")), "reported")
+
+
+class AppIconTest(unittest.TestCase):
+    def test_icon_asset_loads_at_the_requested_size(self):
+        pb = ui._app_icon_pixbuf(18)
+        self.assertIsNotNone(pb)  # icons/window_icon.png is a committed asset
+        self.assertLessEqual(pb.get_width(), 18)
+        self.assertLessEqual(pb.get_height(), 18)
+
+
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
 class NavigatorWindowTest(unittest.TestCase):
     def test_constructs_and_accepts_rows(self):
@@ -287,6 +309,38 @@ class NavigatorWindowTest(unittest.TestCase):
                     walk(c)
         walk(child)
         return texts
+
+    @staticmethod
+    def _widgets_of_type(root, cls):
+        found = []
+        def walk(w):
+            if isinstance(w, cls):
+                found.append(w)
+            if isinstance(w, Gtk.Container):
+                for c in w.get_children():
+                    walk(c)
+        walk(root)
+        return found
+
+    def test_working_row_shows_a_spinner_and_no_waiting_text(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(state=hookstate.WORKING, session_id="a")])
+            child = window._listbox.get_children()[0]
+            self.assertEqual(len(self._widgets_of_type(child, Gtk.Spinner)), 1)
+            for text in self._labels_under(child):
+                self.assertNotIn("Waiting input", text)  # the old badge is gone
+        finally:
+            window.destroy()
+
+    def test_waiting_row_uses_a_dot_not_a_spinner(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(state=hookstate.WAITING, reason="idle", session_id="a")])
+            child = window._listbox.get_children()[0]
+            self.assertEqual(len(self._widgets_of_type(child, Gtk.Spinner)), 0)
+        finally:
+            window.destroy()
 
     @staticmethod
     def _click(window, child):

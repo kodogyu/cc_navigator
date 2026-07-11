@@ -12,8 +12,9 @@ import gi
 # on every run -- noise that trains everyone to ignore warnings.
 gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
+gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
-from gi.repository import Gdk, GLib, Gtk, Pango  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
 from . import config, model, wiring  # noqa: E402
 
@@ -89,6 +90,36 @@ def _oneline(text: str) -> str:
     return " ".join(cleaned.split())
 
 
+def dot_state(row: model.Row) -> str:
+    """Which status indicator a row shows:
+    - 'working'  -- Claude is running a turn (shown as a spinner);
+    - 'input'    -- Claude is blocking on the user, a permission/question/plan
+                    prompt (a red dot);
+    - 'reported' -- Claude finished its turn and is idle, not blocking (green).
+
+    WORKING is the only non-waiting state, and a waiting row always carries a
+    reason -- 'idle' only for a Stop -- so reason 'idle' is the reported case
+    and every other waiting reason means Claude wants an answer now.
+    """
+    if not row.waiting:
+        return "working"
+    if row.reason == "idle":
+        return "reported"
+    return "input"
+
+
+def _app_icon_pixbuf(size):
+    """The app icon (icons/window_icon.png) scaled to `size` px, or None if the
+    asset is missing or unreadable -- a missing icon must never stop the panel
+    from opening, so every failure degrades to no icon."""
+    import pathlib
+    path = pathlib.Path(__file__).resolve().parents[2] / "icons" / "window_icon.png"
+    try:
+        return GdkPixbuf.Pixbuf.new_from_file_at_size(str(path), size, size)
+    except Exception:  # noqa: BLE001 -- GLib.Error on a missing/corrupt asset
+        return None
+
+
 class NavigatorWindow(Gtk.Window):
     def __init__(
         self,
@@ -123,6 +154,21 @@ class NavigatorWindow(Gtk.Window):
         header = Gtk.HeaderBar()
         header.set_show_close_button(True)
         header.set_title("cc_navigator")
+        # Put the app icon to the LEFT of the name via a custom title box (the
+        # default HeaderBar title is centred text with no room for an icon).
+        title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        icon_pixbuf = _app_icon_pixbuf(18)
+        if icon_pixbuf is not None:
+            title_box.pack_start(Gtk.Image.new_from_pixbuf(icon_pixbuf), False, False, 0)
+        title_name = Gtk.Label()
+        title_name.set_markup("<b>cc_navigator</b>")
+        title_box.pack_start(title_name, False, False, 0)
+        title_box.show_all()
+        header.set_custom_title(title_box)
+        # The window icon (alt-tab / task switcher) uses the same asset.
+        window_icon = _app_icon_pixbuf(48)
+        if window_icon is not None:
+            self.set_icon(window_icon)
         gear = Gtk.Button()
         gear.set_relief(Gtk.ReliefStyle.NONE)
         gear.add(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
@@ -627,18 +673,18 @@ class NavigatorWindow(Gtk.Window):
         list_row = Gtk.ListBoxRow()
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        dot = Gtk.Label()
-        dot.set_markup(
-            '<span foreground="#e01b24">●</span>'
-            if row.waiting
-            else '<span foreground="#77767b">○</span>'
-        )
-        header.pack_start(dot, False, False, 0)
-
-        if row.waiting:
-            badge = Gtk.Label()
-            badge.set_markup('<small><b>Waiting input</b></small>')
-            header.pack_start(badge, False, False, 0)
+        # Status at a glance, by colour/shape only (the old "Waiting input" text
+        # is gone): a spinner while Claude works, a red dot when it needs an
+        # answer, a green dot when it has reported and is idle.
+        kind = dot_state(row)
+        if kind == "working":
+            indicator = Gtk.Spinner()
+            indicator.start()
+        else:
+            indicator = Gtk.Label()
+            colour = "#2ec27e" if kind == "reported" else "#e01b24"
+            indicator.set_markup('<span foreground="%s">●</span>' % colour)
+        header.pack_start(indicator, False, False, 0)
 
         title = Gtk.Label(xalign=0.0)
         title.set_markup("<b>%s</b>" % GLib.markup_escape_text(_oneline(primary_line(row))))
