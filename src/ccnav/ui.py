@@ -108,6 +108,41 @@ def dot_state(row: model.Row) -> str:
     return "input"
 
 
+# A rotating arrow for the "working" state: eight compass glyphs cycled on a
+# timer read as an arrow spinning clockwise. (The user asked for a rotating
+# arrow rather than GTK's circular spinner.)
+_WORKING_FRAMES = ["↑", "↗", "→", "↘", "↓", "↙", "←", "↖"]
+_WORKING_COLOUR = "#3584e4"
+_WORKING_PERIOD_MS = 120
+
+
+def _build_working_arrow(row_widget: Gtk.Widget) -> Gtk.Label:
+    """A small arrow that rotates while Claude works. A single self-cleaning
+    GLib timeout drives it: each tick advances one frame, and the source drops
+    itself the moment its row leaves the list (row_widget.get_parent() is None)
+    or the widget is torn down -- so a list rebuild never orphans a timer."""
+    label = Gtk.Label()
+    state = {"i": 0}
+
+    def markup(i: int) -> str:
+        return '<span foreground="%s">%s</span>' % (_WORKING_COLOUR, _WORKING_FRAMES[i])
+
+    label.set_markup(markup(0))
+
+    def tick() -> bool:
+        try:
+            if row_widget.get_parent() is None:
+                return False  # row removed from the list -> stop
+            state["i"] = (state["i"] + 1) % len(_WORKING_FRAMES)
+            label.set_markup(markup(state["i"]))
+            return True
+        except Exception:  # noqa: BLE001 -- widget torn down mid-animation
+            return False
+
+    GLib.timeout_add(_WORKING_PERIOD_MS, tick)
+    return label
+
+
 def _app_icon_pixbuf(size):
     """The app icon (icons/window_icon.png) scaled to `size` px, or None if the
     asset is missing or unreadable -- a missing icon must never stop the panel
@@ -675,12 +710,11 @@ class NavigatorWindow(Gtk.Window):
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         # Status at a glance, by colour/shape only (the old "Waiting input" text
-        # is gone): a spinner while Claude works, a red dot when it needs an
-        # answer, a green dot when it has reported and is idle.
+        # is gone): a rotating arrow while Claude works, a red dot when it needs
+        # an answer, a green dot when it has reported and is idle.
         kind = dot_state(row)
         if kind == "working":
-            indicator = Gtk.Spinner()
-            indicator.start()
+            indicator = _build_working_arrow(list_row)
         else:
             indicator = Gtk.Label()
             colour = "#2ec27e" if kind == "reported" else "#e01b24"

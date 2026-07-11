@@ -322,23 +322,27 @@ class NavigatorWindowTest(unittest.TestCase):
         walk(root)
         return found
 
-    def test_working_row_shows_a_spinner_and_no_waiting_text(self):
+    def test_working_row_shows_a_rotating_arrow_and_no_waiting_text(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(state=hookstate.WORKING, session_id="a")])
             child = window._listbox.get_children()[0]
-            self.assertEqual(len(self._widgets_of_type(child, Gtk.Spinner)), 1)
+            arrows = [t for t in self._labels_under(child) if t in ui._WORKING_FRAMES]
+            self.assertEqual(len(arrows), 1)  # exactly one rotating-arrow indicator
+            self.assertEqual(len(self._widgets_of_type(child, Gtk.Spinner)), 0)  # no spinner
             for text in self._labels_under(child):
                 self.assertNotIn("Waiting input", text)  # the old badge is gone
         finally:
             window.destroy()
 
-    def test_waiting_row_uses_a_dot_not_a_spinner(self):
+    def test_waiting_row_shows_a_dot_not_an_arrow(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(state=hookstate.WAITING, reason="idle", session_id="a")])
             child = window._listbox.get_children()[0]
-            self.assertEqual(len(self._widgets_of_type(child, Gtk.Spinner)), 0)
+            texts = self._labels_under(child)
+            self.assertIn("●", texts)  # a coloured dot
+            self.assertEqual([t for t in texts if t in ui._WORKING_FRAMES], [])  # no arrow
         finally:
             window.destroy()
 
