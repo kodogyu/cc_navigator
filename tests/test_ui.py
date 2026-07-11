@@ -470,7 +470,7 @@ class NavigatorWindowTest(unittest.TestCase):
         from ccnav import config
         window = ui.NavigatorWindow(
             on_jump=lambda r: None, on_send=lambda r, t: None,
-            settings=config.with_updates(config.Settings(), sort_mode="manual"))
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
         try:
             window.set_rows([row(session_id="a"), row(session_id="b"), row(session_id="c")])
             self.assertEqual(self._display_ids(window), ["a", "b", "c"])  # insertion order
@@ -485,7 +485,7 @@ class NavigatorWindowTest(unittest.TestCase):
         from ccnav import config
         window = ui.NavigatorWindow(
             on_jump=lambda r: None, on_send=lambda r, t: None,
-            settings=config.with_updates(config.Settings(), sort_mode="manual"))
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
         try:
             window.set_rows([row(session_id="a"), row(session_id="b")])
             self.assertEqual(window._manual_order, ["a", "b"])
@@ -498,7 +498,7 @@ class NavigatorWindowTest(unittest.TestCase):
         from ccnav import config
         window = ui.NavigatorWindow(
             on_jump=lambda r: None, on_send=lambda r, t: None,
-            settings=config.with_updates(config.Settings(), sort_mode="manual"))
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
         try:
             window.set_rows([row(session_id="a"), row(session_id="b")])
             window._reorder_session("a", "a")  # self -> no-op
@@ -506,6 +506,68 @@ class NavigatorWindowTest(unittest.TestCase):
             self.assertEqual(window._manual_order, ["a", "b"])
         finally:
             window.destroy()
+
+    def test_moving_a_session_to_another_group_regroups_it(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x"), row(session_id="b", cwd="/p/y")])
+            self.assertEqual(window._group_of(self._row_by_id(window, "a").ccnav_row), "/p/x")
+            window._group_override["a"] = "/p/y"  # what a drop on /p/y's header does
+            window._regroup_now()
+            self.assertEqual(window._group_of(self._row_by_id(window, "a").ccnav_row), "/p/y")
+            groups = {c.ccnav_group for c in window._listbox.get_children()
+                      if getattr(c, "ccnav_is_header", False)}
+            self.assertEqual(groups, {"/p/y"})  # /p/x is now empty -> its header removed
+        finally:
+            window.destroy()
+
+    def test_auto_sort_clears_overrides_and_regroups_by_directory(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x"), row(session_id="b", cwd="/p/y")])
+            window._group_override["a"] = "/p/y"
+            window._regroup_now()
+            self.assertEqual(window._group_of(self._row_by_id(window, "a").ccnav_row), "/p/y")
+            window._on_auto_sort_clicked(None)
+            self.assertEqual(window._group_override, {})  # moves cleared
+            self.assertEqual(window._group_of(self._row_by_id(window, "a").ccnav_row), "/p/x")
+        finally:
+            window.destroy()
+
+    def test_group_rename_shows_the_custom_name(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x")])
+            window._group_names["/p/x"] = "My Project"
+            window._regroup_now()
+            self.assertEqual(window._group_display_name("/p/x"), "My Project")
+            header = [c for c in window._listbox.get_children()
+                      if getattr(c, "ccnav_is_header", False)][0]
+            self.assertIn("My Project", header.ccnav_name_label.get_text())
+        finally:
+            window.destroy()
+
+    def test_auto_sort_button_visible_only_in_group_mode(self):
+        from ccnav import config
+        status_win = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        group_win = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            self.assertFalse(status_win._auto_sort_button.get_visible())
+            self.assertTrue(group_win._auto_sort_button.get_visible())
+        finally:
+            status_win.destroy()
+            group_win.destroy()
 
     def test_dock_to_edge_switches_to_the_docked_bar_with_orientation(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)

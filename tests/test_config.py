@@ -89,7 +89,6 @@ class FromDictCoercionTest(unittest.TestCase):
     def test_sort_mode_accepts_only_known_modes(self):
         self.assertEqual(config.from_dict({"sort_mode": "group"}).sort_mode, "group")
         self.assertEqual(config.from_dict({"sort_mode": "status"}).sort_mode, "status")
-        self.assertEqual(config.from_dict({"sort_mode": "manual"}).sort_mode, "manual")
         self.assertEqual(config.from_dict({"sort_mode": "bogus"}).sort_mode, "status")
         self.assertEqual(config.from_dict({"sort_mode": 3}).sort_mode, "status")
 

@@ -20,9 +20,9 @@ from typing import Optional
 CORNERS = ("top-right", "top-left", "bottom-right", "bottom-left")
 
 # How the session list is grouped: "status" (input-needed / reported / working
-# sections), "group" (one section per project directory), or "manual" (the user
-# drags rows into any order).
-SORT_MODES = ("status", "group", "manual")
+# sections) or "group" (project-directory groups the user can rearrange by drag,
+# with an auto-sort button to re-group by directory).
+SORT_MODES = ("status", "group")
 
 # Ranges are clamps, not rejections: an out-of-range number is pulled to the
 # nearest bound rather than dropped, so a fat-fingered edit still does something
@@ -49,7 +49,7 @@ class Settings:
     font_size: int = 0  # 0 = use the system default font size
     opacity: float = 1.0
     bg_color: str = ""  # "" = no override, keep the theme
-    sort_mode: str = "status"  # "status" | "group" | "manual"
+    sort_mode: str = "status"  # "status" | "group"
 
     def to_dict(self) -> dict:
         return {

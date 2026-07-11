@@ -276,6 +276,8 @@ class NavigatorWindow(Gtk.Window):
         self._status_counts = {}  # status section -> count
         self._collapsed_groups = set()  # group keys collapsed in Group mode
         self._manual_order = []         # session_ids in the user's manual order
+        self._group_override = {}       # session_id -> group_key it was dragged into
+        self._group_names = {}          # group_key -> user-chosen display name
         self._eval_available = True
         self._sticky = ""
         self._hint = ""
@@ -403,17 +405,25 @@ class NavigatorWindow(Gtk.Window):
         self._status = Gtk.Label(xalign=0.0)
         self._status.set_line_wrap(True)
 
-        # "Sort by" selector: switches the list between status sections and
-        # per-project groups (the two views in the layout design).
+        # "Sort by" selector: status sections vs project groups. In group mode
+        # the list is arranged manually by drag; the "자동 정렬" button re-groups
+        # everything by directory and restores the automatic order.
         sort_combo = Gtk.ComboBoxText()
         sort_combo.append(config.SORT_MODES[0], "상태별 정렬")   # "status"
         sort_combo.append(config.SORT_MODES[1], "그룹별 정렬")   # "group"
-        sort_combo.append(config.SORT_MODES[2], "수동 정렬")     # "manual"
         sort_combo.set_active_id(self._settings.sort_mode)
         sort_combo.connect("changed", self._on_sort_mode_changed)
         self._sort_combo = sort_combo
+        auto_sort = Gtk.Button(label="자동 정렬")
+        auto_sort.set_relief(Gtk.ReliefStyle.NONE)
+        auto_sort.set_tooltip_text("디렉터리 기준으로 다시 그룹화하고 자동 순서로 정렬")
+        auto_sort.set_no_show_all(True)  # shown only in group mode
+        auto_sort.set_visible(self._settings.sort_mode == "group")
+        auto_sort.connect("clicked", self._on_auto_sort_clicked)
+        self._auto_sort_button = auto_sort
         sort_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         sort_row.pack_start(sort_combo, False, False, 0)
+        sort_row.pack_start(auto_sort, False, False, 0)
 
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.pack_start(sort_row, False, False, 0)
@@ -1058,6 +1068,11 @@ class NavigatorWindow(Gtk.Window):
         else:
             self._count_badge.set_visible(False)
 
+    def _group_of(self, row: model.Row) -> str:
+        """The group a row belongs to: the one it was dragged into, else its
+        project directory (the auto default)."""
+        return self._group_override.get(row.session_id) or model.group_key(row)
+
     def _recompute_sections(self, rows: List[model.Row]) -> None:
         """Tally per-section state from the current rows: counts for the headers
         and a display rank for the groups (most-recently-active group first)."""
@@ -1065,7 +1080,7 @@ class NavigatorWindow(Gtk.Window):
         status_counts = {}  # status section -> count
         recent = {}         # group_key -> newest updated_at in the group
         for row in rows:
-            gk = model.group_key(row)
+            gk = self._group_of(row)
             sk = model.status_key(row)
             counts.setdefault(gk, {model.INPUT_NEEDED: 0, model.REPORTED: 0,
                                    model.WORKING_SECTION: 0})[sk] += 1
@@ -1078,12 +1093,10 @@ class NavigatorWindow(Gtk.Window):
         self._group_rank = {k: i for i, k in enumerate(order)}
 
     def _section_sort_key(self, row: model.Row):
-        mode = self._settings.sort_mode
-        if mode == "manual":
-            return (self._manual_index(row.session_id),)
-        if mode == "group":
-            rank = self._group_rank.get(model.group_key(row), 1 << 30)
-            return (rank,) + tuple(model.sort_key(row))
+        if self._settings.sort_mode == "group":
+            # Group by rank, then the user's manual order within the group.
+            rank = self._group_rank.get(self._group_of(row), 1 << 30)
+            return (rank, self._manual_index(row.session_id))
         rank = model.STATUS_SECTIONS.index(model.status_key(row))
         return (rank,) + tuple(model.sort_key(row))
 
@@ -1124,7 +1137,7 @@ class NavigatorWindow(Gtk.Window):
         self._listbox.invalidate_sort()
 
     def _set_row_draggable(self, list_row: Gtk.ListBoxRow, on: bool) -> None:
-        """Enable drag-to-reorder only in Manual mode, so a normal drag elsewhere
+        """Enable drag-to-arrange only in Group mode, so a normal drag elsewhere
         never starts DnD over the reply entry or the row's buttons."""
         if on:
             list_row.drag_source_set(
@@ -1138,17 +1151,58 @@ class NavigatorWindow(Gtk.Window):
                           list_row.ccnav_row.session_id.encode("utf-8"))
 
     def _on_row_drag_received(self, list_row, _context, _x, y, selection, _info, _time) -> None:
-        if (self._settings.sort_mode != "manual"
-                or getattr(list_row, "ccnav_is_header", False)):
+        """Drop a session on another: it joins that session's group and lands
+        next to it (upper half -> before, lower half -> after)."""
+        if self._settings.sort_mode != "group" or getattr(list_row, "ccnav_is_header", False):
             return
         data = selection.get_data()
         if not data:
             return
-        # Drop on the lower half of the target -> place after it (so the bottom
-        # slot is reachable); upper half -> before it.
+        dragged = data.decode("utf-8", "replace")
+        target = list_row.ccnav_row
+        if dragged == target.session_id:
+            return
+        self._group_override[dragged] = self._group_of(target)  # adopt the group
         after = y > list_row.get_allocated_height() / 2
-        self._reorder_session(
-            data.decode("utf-8", "replace"), list_row.ccnav_row.session_id, after)
+        self._reorder_session(dragged, target.session_id, after)
+        self._regroup_now()
+
+    def _on_group_header_drag_received(self, header_row, _context, _x, _y, selection, _info, _time) -> None:
+        """Drop a session on a group header: it joins that group, at the end."""
+        if self._settings.sort_mode != "group":
+            return
+        data = selection.get_data()
+        if not data:
+            return
+        dragged = data.decode("utf-8", "replace")
+        self._group_override[dragged] = header_row.ccnav_group
+        if dragged in self._manual_order:  # move to the end of the manual order
+            self._manual_order.remove(dragged)
+            self._manual_order.append(dragged)
+        self._regroup_now()
+
+    def _regroup_now(self) -> None:
+        """Recompute groups/counts/headers from the live rows and re-sort/filter.
+        Used after a drag or the auto-sort button, without waiting for a poll."""
+        rows = [c.ccnav_row for c in self._listbox.get_children()
+                if not getattr(c, "ccnav_is_header", False)]
+        self._recompute_sections(rows)
+        self._reconcile_group_headers(rows)
+        self._update_count_badge()
+        self._listbox.invalidate_sort()
+        self._listbox.invalidate_filter()
+        self._listbox.invalidate_headers()
+
+    def _on_auto_sort_clicked(self, _button) -> None:
+        """Re-group everything by directory and restore the automatic order:
+        clear the manual group moves and re-sort the manual order by (group by
+        directory, then priority)."""
+        self._group_override.clear()
+        rows = [c.ccnav_row for c in self._listbox.get_children()
+                if not getattr(c, "ccnav_is_header", False)]
+        ordered = sorted(rows, key=lambda r: (model.group_key(r),) + tuple(model.sort_key(r)))
+        self._manual_order = [r.session_id for r in ordered]
+        self._regroup_now()
 
     def _row_sort_key(self, widget):
         if getattr(widget, "ccnav_is_header", False):
@@ -1170,7 +1224,7 @@ class NavigatorWindow(Gtk.Window):
             return True
         if self._settings.sort_mode != "group":
             return True
-        return model.group_key(widget.ccnav_row) not in self._collapsed_groups
+        return self._group_of(widget.ccnav_row) not in self._collapsed_groups
 
     def _header_func(self, row_widget, before_widget) -> None:
         """Only Status mode draws section titles as GtkListBox headers (on the
@@ -1215,10 +1269,12 @@ class NavigatorWindow(Gtk.Window):
             for child in existing.values():
                 self._listbox.remove(child)
             return
-        wanted = {model.group_key(r) for r in rows}
-        # Forget the collapsed state of groups that no longer exist, so a group
-        # whose sessions all ended does not silently reappear collapsed later.
+        wanted = {self._group_of(r) for r in rows}
+        # Forget the collapsed state / custom name of groups that no longer
+        # exist, so a group whose sessions all ended does not silently reappear
+        # collapsed or renamed later.
         self._collapsed_groups &= wanted
+        self._group_names = {k: v for k, v in self._group_names.items() if k in wanted}
         for group_key, child in list(existing.items()):
             if group_key not in wanted:
                 self._listbox.remove(child)
@@ -1256,10 +1312,7 @@ class NavigatorWindow(Gtk.Window):
             Gtk.Image.new_from_icon_name("folder-symbolic", Gtk.IconSize.MENU), False, False, 0)
 
         names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        name = Gtk.Label(xalign=0.0)
-        # _oneline for the same reason every other free-text label uses it.
-        name.set_markup("<b>%s</b>"
-                        % GLib.markup_escape_text(_oneline(model.group_label(group_key))))
+        name = Gtk.Label(xalign=0.0)  # markup set in _update_group_header_row
         names.pack_start(name, False, False, 0)
         if group_key:  # a blank cwd shows just "~"; no empty path line under it
             path = Gtk.Label(xalign=0.0)
@@ -1269,19 +1322,60 @@ class NavigatorWindow(Gtk.Window):
             names.pack_start(path, False, False, 0)
         box.pack_start(names, True, True, 0)
 
+        rename = Gtk.Button()
+        rename.set_relief(Gtk.ReliefStyle.NONE)
+        rename.add(Gtk.Image.new_from_icon_name("document-edit-symbolic", Gtk.IconSize.MENU))
+        rename.set_tooltip_text("그룹 이름 변경")
+        rename.connect("clicked", self._on_group_rename_clicked, group_key)
+        box.pack_end(rename, False, False, 0)
+
         counts = Gtk.Label()
         box.pack_end(counts, False, False, 0)
         header_row.add(box)
         header_row.ccnav_chevron_img = chevron_img  # type: ignore[attr-defined]
         header_row.ccnav_counts_label = counts       # type: ignore[attr-defined]
+        header_row.ccnav_name_label = name            # type: ignore[attr-defined]
+        # Drop a session on this header to move it into the group.
+        header_row.drag_dest_set(Gtk.DestDefaults.ALL, _DRAG_TARGETS, Gdk.DragAction.MOVE)
+        header_row.connect("drag-data-received", self._on_group_header_drag_received)
         self._update_group_header_row(header_row)
         return header_row
+
+    def _group_display_name(self, group_key: str) -> str:
+        return self._group_names.get(group_key) or model.group_label(group_key)
+
+    def _on_group_rename_clicked(self, button, group_key: str) -> None:
+        popover = Gtk.Popover.new(button)
+        entry = Gtk.Entry()
+        entry.set_text(self._group_display_name(group_key))
+        entry.set_margin_top(6)
+        entry.set_margin_bottom(6)
+        entry.set_margin_start(6)
+        entry.set_margin_end(6)
+
+        def commit(_e):
+            text = _oneline(entry.get_text()).strip()
+            if text and text != model.group_label(group_key):
+                self._group_names[group_key] = text
+            else:
+                self._group_names.pop(group_key, None)  # empty / default -> auto name
+            popover.popdown()
+            self._regroup_now()
+
+        entry.connect("activate", commit)
+        popover.connect("closed", lambda p: p.destroy())
+        popover.add(entry)
+        popover.show_all()
+        popover.popup()
+        entry.grab_focus()
 
     def _update_group_header_row(self, header_row: Gtk.ListBoxRow) -> None:
         group_key = header_row.ccnav_group
         collapsed = group_key in self._collapsed_groups
         header_row.ccnav_chevron_img.set_from_icon_name(
             "pan-end-symbolic" if collapsed else "pan-down-symbolic", Gtk.IconSize.MENU)
+        header_row.ccnav_name_label.set_markup(
+            "<b>%s</b>" % GLib.markup_escape_text(_oneline(self._group_display_name(group_key))))
         counts = self._group_counts.get(
             group_key, {model.INPUT_NEEDED: 0, model.REPORTED: 0, model.WORKING_SECTION: 0})
         header_row.ccnav_counts_label.set_markup(
@@ -1318,11 +1412,13 @@ class NavigatorWindow(Gtk.Window):
         rows = [c.ccnav_row for c in self._listbox.get_children()
                 if not getattr(c, "ccnav_is_header", False)]
         self._reconcile_group_headers(rows)
-        # Rows are drag sources only in manual mode.
-        manual = mode == "manual"
+        # Rows are drag sources only in group mode; the auto-sort button shows
+        # only there too.
+        group = mode == "group"
         for child in self._listbox.get_children():
             if not getattr(child, "ccnav_is_header", False):
-                self._set_row_draggable(child, manual)
+                self._set_row_draggable(child, group)
+        self._auto_sort_button.set_visible(group)
         self._listbox.invalidate_sort()
         self._listbox.invalidate_filter()
         self._listbox.invalidate_headers()
@@ -1442,7 +1538,7 @@ class NavigatorWindow(Gtk.Window):
         list_row.drag_dest_set(Gtk.DestDefaults.ALL, _DRAG_TARGETS, Gdk.DragAction.MOVE)
         list_row.connect("drag-data-get", self._on_row_drag_get)
         list_row.connect("drag-data-received", self._on_row_drag_received)
-        self._set_row_draggable(list_row, self._settings.sort_mode == "manual")
+        self._set_row_draggable(list_row, self._settings.sort_mode == "group")
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         body.set_margin_top(6)
