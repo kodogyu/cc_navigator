@@ -19,6 +19,10 @@ from typing import Optional
 
 CORNERS = ("top-right", "top-left", "bottom-right", "bottom-left")
 
+# How the session list is grouped: "status" (input-needed / reported / working
+# sections) or "group" (one section per project directory).
+SORT_MODES = ("status", "group")
+
 # Ranges are clamps, not rejections: an out-of-range number is pulled to the
 # nearest bound rather than dropped, so a fat-fingered edit still does something
 # sane instead of silently reverting.
@@ -44,6 +48,7 @@ class Settings:
     font_size: int = 0  # 0 = use the system default font size
     opacity: float = 1.0
     bg_color: str = ""  # "" = no override, keep the theme
+    sort_mode: str = "status"  # "status" | "group"
 
     def to_dict(self) -> dict:
         return {
@@ -56,6 +61,7 @@ class Settings:
             "font_size": self.font_size,
             "opacity": self.opacity,
             "bg_color": self.bg_color,
+            "sort_mode": self.sort_mode,
         }
 
 
@@ -98,6 +104,9 @@ def _coerce(raw: dict, base: Settings) -> Settings:
     bg = raw.get("bg_color")
     bg = bg if isinstance(bg, str) and _HEX_RE.match(bg) else base.bg_color
 
+    sort_mode = raw.get("sort_mode")
+    sort_mode = sort_mode if sort_mode in SORT_MODES else base.sort_mode
+
     return Settings(
         poll_seconds=poll,
         corner=corner,
@@ -108,6 +117,7 @@ def _coerce(raw: dict, base: Settings) -> Settings:
         font_size=font,
         opacity=opacity,
         bg_color=bg,
+        sort_mode=sort_mode,
     )
 
 

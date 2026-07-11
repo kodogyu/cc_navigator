@@ -19,7 +19,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, hookstate, model, updater, wiring  # noqa: E402
+from . import config, model, updater, wiring  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -104,11 +104,17 @@ def dot_state(row: model.Row) -> str:
     reason -- 'idle' only for a Stop -- so reason 'idle' is the reported case
     and every other waiting reason means Claude wants an answer now.
     """
-    if not row.waiting:
-        return "working"
-    if row.reason == hookstate.STOP_IDLE:
-        return "reported"
-    return "input"
+    # model.status_key is the single source of truth for the three-way split;
+    # the dot/spinner and the Sort-by-Status sections must agree.
+    return model.status_key(row)
+
+
+# The Sort-by-Status section titles, keyed by model's section constants.
+_STATUS_LABELS = {
+    model.INPUT_NEEDED: "입력이 필요한 세션",
+    model.REPORTED: "보고 완료 (추가 입력 불필요)",
+    model.WORKING_SECTION: "작업 중",
+}
 
 
 # The "working" indicator: two curved arrows (a reload/refresh glyph) that spin.
@@ -258,6 +264,12 @@ class NavigatorWindow(Gtk.Window):
         self._on_settings_changed = on_settings_changed
         self._on_refresh = on_refresh
         self._settings = settings or config.Settings()
+        # Section metadata for the two list views, recomputed on each set_rows
+        # and read by the sort/header funcs. Initialised empty so those funcs are
+        # safe on the very first insert (before the first recompute).
+        self._group_rank = {}     # group_key -> display rank (recent groups first)
+        self._group_counts = {}   # group_key -> {input, reported, working}
+        self._status_counts = {}  # status section -> count
         self._eval_available = True
         self._sticky = ""
         self._hint = ""
@@ -342,6 +354,10 @@ class NavigatorWindow(Gtk.Window):
         # keep waiting sessions on top: after updating rows, invalidate_sort()
         # re-sorts the survivors without a rebuild.
         self._listbox.set_sort_func(self._sort_rows)
+        # Sections/groups are drawn as list headers (set_header_func), so the
+        # in-place reconcile is untouched: rows stay a flat listbox and GTK adds
+        # a section title / group header above each row that starts a new one.
+        self._listbox.set_header_func(self._header_func)
         self._listbox.connect("row-selected", self._on_row_selected)
         self._listbox.connect("row-activated", self._on_row_activated)
         # row-selected fires BEFORE row-activated, so by the time the activation
@@ -359,7 +375,19 @@ class NavigatorWindow(Gtk.Window):
         self._status = Gtk.Label(xalign=0.0)
         self._status.set_line_wrap(True)
 
+        # "Sort by" selector: switches the list between status sections and
+        # per-project groups (the two views in the layout design).
+        sort_combo = Gtk.ComboBoxText()
+        sort_combo.append(config.SORT_MODES[0], "상태별 정렬")   # "status"
+        sort_combo.append(config.SORT_MODES[1], "그룹별 정렬")   # "group"
+        sort_combo.set_active_id(self._settings.sort_mode)
+        sort_combo.connect("changed", self._on_sort_mode_changed)
+        self._sort_combo = sort_combo
+        sort_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        sort_row.pack_start(sort_combo, False, False, 0)
+
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box.pack_start(sort_row, False, False, 0)
         box.pack_start(scroller, True, True, 0)
         box.pack_start(self._status, False, False, 4)
         self._content = box
@@ -831,15 +859,118 @@ class NavigatorWindow(Gtk.Window):
             elif child.ccnav_sig != _row_signature(row):
                 self._update_row(child, row)
 
+        self._recompute_sections(rows)
         self._listbox.invalidate_sort()
+        self._listbox.invalidate_headers()
         self._hint = "" if rows else EMPTY_HINT
         self._render_status()
 
+    def _recompute_sections(self, rows: List[model.Row]) -> None:
+        """Tally per-section state from the current rows: counts for the headers
+        and a display rank for the groups (most-recently-active group first)."""
+        counts = {}         # group_key -> {input, reported, working}
+        status_counts = {}  # status section -> count
+        recent = {}         # group_key -> newest updated_at in the group
+        for row in rows:
+            gk = model.group_key(row)
+            sk = model.status_key(row)
+            counts.setdefault(gk, {model.INPUT_NEEDED: 0, model.REPORTED: 0,
+                                   model.WORKING_SECTION: 0})[sk] += 1
+            status_counts[sk] = status_counts.get(sk, 0) + 1
+            recent[gk] = max(recent.get(gk, row.updated_at), row.updated_at)
+        self._group_counts = counts
+        self._status_counts = status_counts
+        # Ties broken by key so the order is stable across ticks with equal times.
+        order = sorted(recent, key=lambda k: (-recent[k], k))
+        self._group_rank = {k: i for i, k in enumerate(order)}
+
+    def _section_sort_key(self, row: model.Row):
+        if self._settings.sort_mode == "group":
+            rank = self._group_rank.get(model.group_key(row), 1 << 30)
+            return (rank,) + tuple(model.sort_key(row))
+        rank = model.STATUS_SECTIONS.index(model.status_key(row))
+        return (rank,) + tuple(model.sort_key(row))
+
     def _sort_rows(self, a: Gtk.ListBoxRow, b: Gtk.ListBoxRow) -> int:
-        """Order rows by model.sort_key -- the same key build_rows uses -- so the
-        live panel and a fresh build agree. Waiting sessions first, then newest."""
-        ka, kb = model.sort_key(a.ccnav_row), model.sort_key(b.ccnav_row)
+        """Order rows by section, then by model.sort_key within the section, so
+        the sections/groups stay contiguous and waiting sessions lead each one."""
+        ka, kb = self._section_sort_key(a.ccnav_row), self._section_sort_key(b.ccnav_row)
         return -1 if ka < kb else (1 if ka > kb else 0)
+
+    def _section_id(self, row: model.Row) -> str:
+        return (model.group_key(row) if self._settings.sort_mode == "group"
+                else model.status_key(row))
+
+    def _header_func(self, row_widget, before_widget) -> None:
+        """Give a row a section header iff it starts a new section (its section
+        differs from the row above it). GTK reuses headers until invalidated."""
+        this = self._section_id(row_widget.ccnav_row)
+        prev = self._section_id(before_widget.ccnav_row) if before_widget else None
+        if this == prev:
+            row_widget.set_header(None)
+        else:
+            row_widget.set_header(self._make_section_header(row_widget.ccnav_row))
+
+    def _make_section_header(self, row: model.Row) -> Gtk.Widget:
+        if self._settings.sort_mode == "group":
+            return self._make_group_header(model.group_key(row))
+        return self._make_status_header(model.status_key(row))
+
+    def _make_status_header(self, section: str) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_top(8)
+        box.set_margin_start(4)
+        box.set_margin_bottom(2)
+        title = Gtk.Label(xalign=0.0)
+        title.set_markup("<b>%s</b>" % GLib.markup_escape_text(
+            _STATUS_LABELS.get(section, section)))
+        badge = Gtk.Label()
+        badge.set_markup('<small><span foreground="#77767b">%d</span></small>'
+                         % self._status_counts.get(section, 0))
+        box.pack_start(title, False, False, 0)
+        box.pack_start(badge, False, False, 0)
+        box.show_all()
+        return box
+
+    def _make_group_header(self, group_key: str) -> Gtk.Widget:
+        counts = self._group_counts.get(
+            group_key, {model.INPUT_NEEDED: 0, model.REPORTED: 0, model.WORKING_SECTION: 0})
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_top(8)
+        box.set_margin_start(4)
+        box.set_margin_end(4)
+        box.set_margin_bottom(2)
+        box.pack_start(
+            Gtk.Image.new_from_icon_name("folder-symbolic", Gtk.IconSize.MENU), False, False, 0)
+        names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        name = Gtk.Label(xalign=0.0)
+        name.set_markup("<b>%s</b>" % GLib.markup_escape_text(model.group_label(group_key)))
+        path = Gtk.Label(xalign=0.0)
+        path.set_markup('<small><span foreground="#77767b">%s</span></small>'
+                        % GLib.markup_escape_text(_oneline(group_key)))
+        path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        names.pack_start(name, False, False, 0)
+        names.pack_start(path, False, False, 0)
+        box.pack_start(names, True, True, 0)
+        badges = Gtk.Label()
+        badges.set_markup(
+            '<small><span foreground="#e01b24">●</span> %d  '
+            '<span foreground="#2ec27e">●</span> %d  '
+            '<span foreground="#3584e4">↻</span> %d</small>'
+            % (counts[model.INPUT_NEEDED], counts[model.REPORTED],
+               counts[model.WORKING_SECTION]))
+        box.pack_end(badges, False, False, 0)
+        box.show_all()
+        return box
+
+    def _on_sort_mode_changed(self, combo: Gtk.ComboBoxText) -> None:
+        mode = combo.get_active_id()
+        if not mode or mode == self._settings.sort_mode:
+            return
+        self._commit_settings(config.with_updates(self._settings, sort_mode=mode))
+        # The sort/header funcs read the new mode; re-sort and re-header the rows.
+        self._listbox.invalidate_sort()
+        self._listbox.invalidate_headers()
 
     def _update_row(self, list_row: Gtk.ListBoxRow, row: model.Row) -> None:
         """Refresh one existing row's widgets in place -- no teardown, so its

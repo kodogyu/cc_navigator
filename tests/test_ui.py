@@ -366,6 +366,12 @@ class NavigatorWindowTest(unittest.TestCase):
                 return lbl.get_label()
         return ""
 
+    def _row_by_id(self, window, session_id):
+        for c in window._listbox.get_children():
+            if c.ccnav_row.session_id == session_id:
+                return c
+        return None
+
     def test_changing_one_row_keeps_every_rows_widget(self):
         # The flicker fix: set_rows reconciles in place, so a change to one
         # session must NOT destroy/rebuild any row's widgets -- unchanged rows
@@ -373,12 +379,12 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a"), row(session_id="b")])
-            a0, b0 = window._listbox.get_children()
+            a0 = self._row_by_id(window, "a")
+            b0 = self._row_by_id(window, "b")
             window.set_rows([row(session_id="a"),
                              row(session_id="b", state=hookstate.WORKING)])
-            a1, b1 = window._listbox.get_children()
-            self.assertIs(a1, a0)  # unchanged session: same widget, never rebuilt
-            self.assertIs(b1, b0)  # changed session: same widget, updated in place
+            self.assertIs(self._row_by_id(window, "a"), a0)  # unchanged: same widget, never rebuilt
+            self.assertIs(self._row_by_id(window, "b"), b0)  # changed: same widget, updated in place
         finally:
             window.destroy()
 
@@ -413,8 +419,8 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a"), row(session_id="b")])
             window.set_rows([row(session_id="b"), row(session_id="c")])
-            ids = [c.ccnav_row.session_id for c in window._listbox.get_children()]
-            self.assertEqual(ids, ["b", "c"])  # a removed, c inserted, order kept
+            ids = {c.ccnav_row.session_id for c in window._listbox.get_children()}
+            self.assertEqual(ids, {"b", "c"})  # a removed, c inserted
         finally:
             window.destroy()
 
@@ -435,6 +441,86 @@ class NavigatorWindowTest(unittest.TestCase):
                 row(session_id="b", state=hookstate.WORKING, updated_at=100)])
             self.assertEqual(self._display_ids(window), ["a", "b"])  # a now waiting -> top
         finally:
+            window.destroy()
+
+    def test_status_mode_orders_rows_into_sections(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([
+                row(session_id="w", state=hookstate.WORKING, updated_at=50),
+                row(session_id="i", state=hookstate.WAITING, reason="permission_prompt", updated_at=40),
+                row(session_id="r", state=hookstate.WAITING, reason="idle", updated_at=30)])
+            # input -> reported -> working (the Sort-by-Status section order)
+            self.assertEqual(self._display_ids(window), ["i", "r", "w"])
+        finally:
+            window.destroy()
+
+    def test_group_mode_orders_rows_by_project_group(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha", reason="permission_prompt", updated_at=100),
+                row(session_id="b1", cwd="/p/beta", reason="permission_prompt", updated_at=90),
+                row(session_id="a2", cwd="/p/alpha", reason="permission_prompt", updated_at=80)])
+            # alpha group first (its newest 100 beats beta's 90); alpha rows contiguous
+            self.assertEqual(self._display_ids(window), ["a1", "a2", "b1"])
+        finally:
+            window.destroy()
+
+    def test_group_header_shows_project_name_path_and_counts(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha",
+                    state=hookstate.WAITING, reason="permission_prompt"),
+                row(session_id="a2", cwd="/p/alpha", state=hookstate.WORKING)])
+            header = window._make_group_header("/p/alpha")
+            texts = " ".join(l.get_text() for l in self._widgets_of_type(header, Gtk.Label))
+            self.assertIn("alpha", texts)     # project name (last path segment)
+            self.assertIn("/p/alpha", texts)  # project path
+            markup = " ".join(l.get_label() for l in self._widgets_of_type(header, Gtk.Label))
+            self.assertIn("1", markup)  # 1 input + 1 working in this group
+        finally:
+            window.destroy()
+
+    def test_status_header_shows_the_section_title_and_count(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="i", state=hookstate.WAITING,
+                                 reason="permission_prompt")])
+            header = window._make_status_header(model.INPUT_NEEDED)
+            texts = " ".join(l.get_text() for l in self._widgets_of_type(header, Gtk.Label))
+            self.assertIn("입력이 필요한 세션", texts)
+            self.assertIn("1", texts)  # the section count
+        finally:
+            window.destroy()
+
+    def test_switching_sort_mode_via_the_combo_regroups(self):
+        import tempfile, pathlib
+        from ccnav import config
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        orig = config.config_path
+        config.config_path = lambda: pathlib.Path(tmp.name) / "c.json"
+        try:
+            window.set_rows([
+                row(session_id="w", state=hookstate.WORKING, cwd="/p/x", updated_at=50),
+                row(session_id="i", state=hookstate.WAITING, reason="permission_prompt",
+                    cwd="/p/y", updated_at=40)])
+            self.assertEqual(self._display_ids(window), ["i", "w"])  # status: input before working
+            window._sort_combo.set_active_id("group")  # fires _on_sort_mode_changed
+            self.assertEqual(window._settings.sort_mode, "group")
+            # group mode: x group (newest 50) before y group (40) -> w before i
+            self.assertEqual(self._display_ids(window), ["w", "i"])
+        finally:
+            config.config_path = orig
             window.destroy()
 
     def test_swapping_spinner_for_dot_detaches_it_so_its_timer_stops(self):
@@ -476,9 +562,8 @@ class NavigatorWindowTest(unittest.TestCase):
             window.set_rows([
                 row(state=hookstate.WAITING, reason="idle", session_id="a"),
                 row(state=hookstate.WAITING, reason="permission_prompt", session_id="b")])
-            a, b = window._listbox.get_children()
-            self.assertIn("#2ec27e", self._dot_markup(a))  # reported/idle -> green
-            self.assertIn("#e01b24", self._dot_markup(b))  # blocking -> red
+            self.assertIn("#2ec27e", self._dot_markup(self._row_by_id(window, "a")))  # idle -> green
+            self.assertIn("#e01b24", self._dot_markup(self._row_by_id(window, "b")))  # input -> red
         finally:
             window.destroy()
 

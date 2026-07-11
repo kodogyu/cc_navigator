@@ -107,3 +107,33 @@ def sort_key(row: "Row"):
     every change, not assume a fixed order. Shared with the UI's list sort func
     so build_rows and the live panel can never order rows differently."""
     return (0 if row.waiting else 1, -row.updated_at)
+
+
+# --- sectioning for the two list views (Sort by Status / Sort by Group) -------
+
+INPUT_NEEDED = "input"
+REPORTED = "reported"
+WORKING_SECTION = "working"
+# The Sort-by-Status sections, in display order (matches the layout design).
+STATUS_SECTIONS = (INPUT_NEEDED, REPORTED, WORKING_SECTION)
+
+
+def status_key(row: "Row") -> str:
+    """Which Sort-by-Status section a row belongs to: 'input' (Claude is
+    blocking on the user), 'reported' (a finished Stop turn, idle), or
+    'working'. Same three-way split the status dot/spinner uses."""
+    if not row.waiting:
+        return WORKING_SECTION
+    return REPORTED if row.reason == hookstate.STOP_IDLE else INPUT_NEEDED
+
+
+def group_key(row: "Row") -> str:
+    """Which Sort-by-Group section a row belongs to: its project directory."""
+    return row.cwd or ""
+
+
+def group_label(cwd: str) -> str:
+    """The short project name for a group header -- the cwd's last path
+    segment (e.g. '/home/u/projects/cc_navigator' -> 'cc_navigator')."""
+    trimmed = (cwd or "").rstrip("/")
+    return trimmed.rsplit("/", 1)[-1] or "~"

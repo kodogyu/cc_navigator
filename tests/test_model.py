@@ -136,3 +136,34 @@ class LivePaneKeysTest(unittest.TestCase):
 
     def test_empty(self):
         self.assertEqual(model.live_pane_keys({}), set())
+
+
+class SectioningTest(unittest.TestCase):
+    def _row(self, **kw):
+        base = dict(session_id="s", socket="/x", pane="%1", tmux_session="d",
+                    title="t", state=hookstate.WAITING, reason="permission_prompt",
+                    message="", cwd="/home/u/projects/cc_navigator", updated_at=1,
+                    last_prompt="")
+        base.update(kw)
+        return model.Row(**base)
+
+    def test_status_key_maps_the_three_sections(self):
+        self.assertEqual(
+            model.status_key(self._row(state=hookstate.WORKING)), model.WORKING_SECTION)
+        self.assertEqual(
+            model.status_key(self._row(state=hookstate.WAITING, reason="idle")),
+            model.REPORTED)
+        self.assertEqual(
+            model.status_key(self._row(state=hookstate.WAITING, reason="permission_prompt")),
+            model.INPUT_NEEDED)
+
+    def test_group_key_is_the_cwd(self):
+        self.assertEqual(model.group_key(self._row(cwd="/a/b")), "/a/b")
+        self.assertEqual(model.group_key(self._row(cwd="")), "")
+
+    def test_group_label_is_the_last_path_segment(self):
+        self.assertEqual(model.group_label("/home/u/projects/cc_navigator"), "cc_navigator")
+        self.assertEqual(model.group_label("/home/u/projects/cc_navigator/"), "cc_navigator")
+        self.assertEqual(model.group_label("proj"), "proj")
+        self.assertEqual(model.group_label("/"), "~")
+        self.assertEqual(model.group_label(""), "~")

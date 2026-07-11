@@ -27,6 +27,7 @@ class FromDictCoercionTest(unittest.TestCase):
             "poll_seconds": 2.5, "corner": "bottom-left", "width": 500,
             "height": 600, "keep_above": False, "all_workspaces": False,
             "font_size": 14, "opacity": 0.8, "bg_color": "#101010",
+            "sort_mode": "group",
         }
         self.assertEqual(config.from_dict(raw).to_dict(), raw)
 
@@ -84,6 +85,12 @@ class FromDictCoercionTest(unittest.TestCase):
         self.assertEqual(config.from_dict({"bg_color": "#fff"}).bg_color, "")
         self.assertEqual(config.from_dict({"bg_color": "#12345g"}).bg_color, "")
         self.assertEqual(config.from_dict({"bg_color": 123}).bg_color, "")
+
+    def test_sort_mode_accepts_only_known_modes(self):
+        self.assertEqual(config.from_dict({"sort_mode": "group"}).sort_mode, "group")
+        self.assertEqual(config.from_dict({"sort_mode": "status"}).sort_mode, "status")
+        self.assertEqual(config.from_dict({"sort_mode": "bogus"}).sort_mode, "status")
+        self.assertEqual(config.from_dict({"sort_mode": 3}).sort_mode, "status")
 
     def test_bg_color_rejects_a_trailing_newline(self):
         self.assertEqual(config.from_dict({"bg_color": "#101010\n"}).bg_color, "")
