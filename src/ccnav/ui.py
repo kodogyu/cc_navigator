@@ -984,6 +984,9 @@ class NavigatorWindow(Gtk.Window):
                 self._listbox.remove(child)
             return
         wanted = {model.group_key(r) for r in rows}
+        # Forget the collapsed state of groups that no longer exist, so a group
+        # whose sessions all ended does not silently reappear collapsed later.
+        self._collapsed_groups &= wanted
         for group_key, child in list(existing.items()):
             if group_key not in wanted:
                 self._listbox.remove(child)
@@ -1061,6 +1064,12 @@ class NavigatorWindow(Gtk.Window):
             self._collapsed_groups.discard(group_key)
         else:
             self._collapsed_groups.add(group_key)
+            # Don't leave the selection stranded on a row we're about to hide.
+            selected = self._listbox.get_selected_row()
+            if (selected is not None
+                    and not getattr(selected, "ccnav_is_header", False)
+                    and model.group_key(selected.ccnav_row) == group_key):
+                self._listbox.unselect_row(selected)
         self._listbox.invalidate_filter()
         for child in self._listbox.get_children():
             if getattr(child, "ccnav_is_header", False) and child.ccnav_group == group_key:

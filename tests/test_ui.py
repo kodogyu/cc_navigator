@@ -568,6 +568,36 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_collapse_deselects_only_a_session_in_the_collapsed_group(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x"), row(session_id="b", cwd="/p/y")])
+            a = self._row_by_id(window, "a")
+            window._listbox.select_row(a)
+            window._on_group_toggle(None, "/p/y")   # collapse the OTHER group
+            self.assertIs(window._listbox.get_selected_row(), a)  # a's selection kept
+            window._on_group_toggle(None, "/p/x")   # collapse a's group
+            self.assertIsNone(window._listbox.get_selected_row())  # a deselected, not hidden-selected
+        finally:
+            window.destroy()
+
+    def test_collapsed_state_is_forgotten_when_a_group_disappears(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x")])
+            window._on_group_toggle(None, "/p/x")
+            self.assertIn("/p/x", window._collapsed_groups)
+            window.set_rows([row(session_id="b", cwd="/p/y")])  # /p/x group is gone
+            self.assertNotIn("/p/x", window._collapsed_groups)  # its collapse state pruned
+        finally:
+            window.destroy()
+
     def test_switching_to_status_mode_removes_group_header_rows(self):
         import tempfile, pathlib
         from ccnav import config
