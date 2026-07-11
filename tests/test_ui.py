@@ -556,6 +556,48 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_move_into_the_blank_cwd_group_takes_effect(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x"), row(session_id="b", cwd="")])
+            window._set_group_override("a", "")  # move a into the "" ("~") group
+            window._regroup_now()
+            self.assertEqual(window._group_of(self._row_by_id(window, "a").ccnav_row), "")
+        finally:
+            window.destroy()
+
+    def test_collapse_deselect_uses_the_effective_group_not_the_directory(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x"), row(session_id="b", cwd="/p/y")])
+            window._set_group_override("a", "/p/y")  # a moved into /p/y
+            window._regroup_now()
+            window._listbox.select_row(self._row_by_id(window, "a"))
+            window._on_group_toggle(None, "/p/x")  # a's ORIGINAL dir, not its group now
+            self.assertIsNotNone(window._listbox.get_selected_row())  # a stays selected
+            window._on_group_toggle(None, "/p/y")  # a's EFFECTIVE group -> deselect
+            self.assertIsNone(window._listbox.get_selected_row())
+        finally:
+            window.destroy()
+
+    def test_a_redundant_self_override_is_not_stored(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x")])
+            window._set_group_override("a", "/p/x")  # its own directory
+            self.assertNotIn("a", window._group_override)  # not pinned redundantly
+        finally:
+            window.destroy()
+
     def test_auto_sort_button_visible_only_in_group_mode(self):
         from ccnav import config
         status_win = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)

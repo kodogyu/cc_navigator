@@ -1070,8 +1070,29 @@ class NavigatorWindow(Gtk.Window):
 
     def _group_of(self, row: model.Row) -> str:
         """The group a row belongs to: the one it was dragged into, else its
-        project directory (the auto default)."""
-        return self._group_override.get(row.session_id) or model.group_key(row)
+        project directory (the auto default). Presence, not truthiness -- a move
+        INTO the blank-cwd "" group is a real override, not "no override"."""
+        sid = row.session_id
+        if sid in self._group_override:
+            return self._group_override[sid]
+        return model.group_key(row)
+
+    def _dragged_row(self, session_id: str):
+        for child in self._listbox.get_children():
+            if (not getattr(child, "ccnav_is_header", False)
+                    and child.ccnav_row.session_id == session_id):
+                return child.ccnav_row
+        return None
+
+    def _set_group_override(self, session_id: str, group_key: str) -> None:
+        """Record a move into `group_key`, but keep an override only when it
+        actually differs from the session's own directory (so a self/redundant
+        drop doesn't pin a session to a directory it may later leave)."""
+        row = self._dragged_row(session_id)
+        if row is not None and group_key == model.group_key(row):
+            self._group_override.pop(session_id, None)
+        else:
+            self._group_override[session_id] = group_key
 
     def _recompute_sections(self, rows: List[model.Row]) -> None:
         """Tally per-section state from the current rows: counts for the headers
@@ -1164,7 +1185,7 @@ class NavigatorWindow(Gtk.Window):
         target = list_row.ccnav_row
         if dragged == target.session_id:
             return
-        self._group_override[dragged] = self._group_of(target)  # adopt the group
+        self._set_group_override(dragged, self._group_of(target))  # adopt the group
         after = y > list_row.get_allocated_height() / 2
         self._reorder_session(dragged, target.session_id, after)
         self._regroup_now()
@@ -1177,7 +1198,7 @@ class NavigatorWindow(Gtk.Window):
         if not data:
             return
         dragged = data.decode("utf-8", "replace")
-        self._group_override[dragged] = header_row.ccnav_group
+        self._set_group_override(dragged, header_row.ccnav_group)
         if dragged in self._manual_order:  # move to the end of the manual order
             self._manual_order.remove(dragged)
             self._manual_order.append(dragged)
@@ -1355,17 +1376,24 @@ class NavigatorWindow(Gtk.Window):
         entry.set_margin_start(6)
         entry.set_margin_end(6)
 
-        def commit(_e):
+        def commit():
             text = _oneline(entry.get_text()).strip()
             if text and text != model.group_label(group_key):
                 self._group_names[group_key] = text
             else:
                 self._group_names.pop(group_key, None)  # empty / default -> auto name
-            popover.popdown()
             self._regroup_now()
 
-        entry.connect("activate", commit)
-        popover.connect("closed", lambda p: p.destroy())
+        # Commit on Enter AND on click-away, so a typed name is not lost; closing
+        # then destroys the popover. (activate -> popdown -> closed -> commit again,
+        # which is idempotent.)
+        entry.connect("activate", lambda _e: popover.popdown())
+
+        def on_closed(pop):
+            commit()
+            pop.destroy()
+
+        popover.connect("closed", on_closed)
         popover.add(entry)
         popover.show_all()
         popover.popup()
@@ -1393,10 +1421,11 @@ class NavigatorWindow(Gtk.Window):
         else:
             self._collapsed_groups.add(group_key)
             # Don't leave the selection stranded on a row we're about to hide.
+            # Test the row's EFFECTIVE group (override-aware), matching the filter.
             selected = self._listbox.get_selected_row()
             if (selected is not None
                     and not getattr(selected, "ccnav_is_header", False)
-                    and model.group_key(selected.ccnav_row) == group_key):
+                    and self._group_of(selected.ccnav_row) == group_key):
                 self._listbox.unselect_row(selected)
         self._listbox.invalidate_filter()
         for child in self._listbox.get_children():
