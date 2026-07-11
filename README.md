@@ -39,7 +39,7 @@ get there**:
   your input, or finishes its turn — a desktop notification names that session,
   its status (🔴/🟢), and a one-line summary, so you need not watch the panel.
   On by default; toggle it off in Settings.
-- **Jump** — click *"해당 세션으로 이동"* to raise that session's terminal window.
+- **Jump** — click *"세션으로 이동"* to raise that session's terminal window.
 - **Reply** — type one line into the row and press Enter to send it straight to
   the session's tmux pane.
 - **Collapse & attach** — shrink the panel to its title bar, or dock it as a thin
@@ -194,7 +194,7 @@ selected) its working directory and last prompt.
 **Act on a session.** Click a row to expand it:
 
 - Type into the reply box and press **Enter** to send a line to that session.
-- Click **"해당 세션으로 이동"** to raise its terminal window (needs GNOME `Eval`).
+- Click **"세션으로 이동"** to raise its terminal window (needs GNOME `Eval`).
 
 **Arrange groups** (in group view): drag a **group header's ⠿ handle** (on the
 left) to reorder whole groups; drag a row's **⠿ handle** (on the right) to reorder

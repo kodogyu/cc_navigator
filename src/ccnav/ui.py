@@ -2189,7 +2189,7 @@ class NavigatorWindow(Gtk.Window):
         # targets the current session (a captured Row would go stale).
         entry.connect("activate", self._on_entry_activate, list_row)
 
-        jump = Gtk.Button(label="해당 세션으로 이동")
+        jump = Gtk.Button(label="세션으로 이동")
         jump.set_sensitive(self._eval_available)
         jump.connect("clicked", self._on_jump_clicked, list_row)
 
