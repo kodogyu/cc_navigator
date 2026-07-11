@@ -90,6 +90,22 @@ class ComposeStatusTest(unittest.TestCase):
         self.assertEqual(ui.compose_status("", "", ""), "")
 
 
+class OnelineTest(unittest.TestCase):
+    def test_collapses_newlines_and_tabs_to_single_spaces(self):
+        self.assertEqual(ui._oneline("a\n\nb\tc  d"), "a b c d")
+
+    def test_drops_non_whitespace_control_chars(self):
+        # A NUL would otherwise truncate a Pango label at the byte; ESC garbles.
+        self.assertEqual(ui._oneline("hello\x00world"), "helloworld")
+        self.assertEqual(ui._oneline("\x1b[31mred\x1b[0m"), "[31mred[0m")
+
+    def test_keeps_hangul_and_ordinary_text(self):
+        self.assertEqual(ui._oneline("작업 중\n디렉터리"), "작업 중 디렉터리")
+
+    def test_empty_stays_empty(self):
+        self.assertEqual(ui._oneline(""), "")
+
+
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
 class NavigatorWindowTest(unittest.TestCase):
     def test_constructs_and_accepts_rows(self):
@@ -317,6 +333,37 @@ class NavigatorWindowTest(unittest.TestCase):
             self.assertIs(window._listbox.get_selected_row(), child)
             self._click(window, child)               # re-click: collapses
             self.assertIsNone(window._listbox.get_selected_row())
+        finally:
+            window.destroy()
+
+    def test_detail_prompt_with_embedded_newlines_renders_on_one_line(self):
+        # Defense in depth: even if a Row still carries a multi-line prompt (an
+        # older/hand-edited record, e.g. a raw task-notification blob), no detail
+        # label may render embedded newlines that break the row's layout.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            blob = "<task-notification>\n<task-id>x</task-id>\n<status>done</status>"
+            window.set_rows([row(session_id="a", last_prompt=blob)])
+            child = window._listbox.get_children()[0]
+            self._click(window, child)
+            labels = self._labels_under(child)
+            for text in labels:
+                self.assertNotIn("\n", text)  # nothing rendered multi-line
+            joined = " ".join(labels)
+            self.assertIn("<task-notification> <task-id>x</task-id>", joined)  # flattened, present
+        finally:
+            window.destroy()
+
+    def test_detail_meta_flattens_a_newline_in_reason(self):
+        # reason is a payload-controlled notification_type; a newline in it must
+        # not render the meta/state line multi-line (same bug class as the prompt).
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", reason="perm\nission\nthree")])
+            child = window._listbox.get_children()[0]
+            self._click(window, child)
+            for text in self._labels_under(child):
+                self.assertNotIn("\n", text)  # no detail label rendered multi-line
         finally:
             window.destroy()
 

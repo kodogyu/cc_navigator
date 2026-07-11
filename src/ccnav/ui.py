@@ -74,6 +74,21 @@ def compose_status(sticky: str, hint: str, transient: str) -> str:
     return "  ".join(part for part in (sticky, hint, transient) if part)
 
 
+def _oneline(text: str) -> str:
+    """Flatten a free-text field to a single, control-free line for the panel's
+    one-line-per-field layout. The hook already stores flattened records, but a
+    label built straight from a Row is the last line of defence -- an older or
+    hand-edited record whose prompt/message/reason still holds embedded newlines
+    (a pasted diff, a raw task-notification blob) must not render as many raw
+    lines and break the row. Non-whitespace control chars are dropped too: a NUL
+    would truncate the Pango label at the byte and an ESC would garble it, both
+    silently losing content. Printable text (incl. CJK/Hangul) is kept; every
+    whitespace run then collapses to one space.
+    """
+    cleaned = "".join(ch for ch in text if ch.isprintable() or ch.isspace())
+    return " ".join(cleaned.split())
+
+
 class NavigatorWindow(Gtk.Window):
     def __init__(
         self,
@@ -626,14 +641,14 @@ class NavigatorWindow(Gtk.Window):
             header.pack_start(badge, False, False, 0)
 
         title = Gtk.Label(xalign=0.0)
-        title.set_markup("<b>%s</b>" % GLib.markup_escape_text(primary_line(row)))
+        title.set_markup("<b>%s</b>" % GLib.markup_escape_text(_oneline(primary_line(row))))
         title.set_ellipsize(Pango.EllipsizeMode.END)
         header.pack_start(title, True, True, 0)
 
         secondary = Gtk.Label(xalign=0.0)
         secondary.set_markup(
             '<small><span foreground="#77767b">%s</span></small>'
-            % GLib.markup_escape_text(secondary_line(row))
+            % GLib.markup_escape_text(_oneline(secondary_line(row)))
         )
         secondary.set_ellipsize(Pango.EllipsizeMode.END)
 
@@ -653,22 +668,23 @@ class NavigatorWindow(Gtk.Window):
         path_label = Gtk.Label(xalign=0.0)
         path_label.set_markup(
             '<small><span foreground="#77767b">%s</span></small>'
-            % GLib.markup_escape_text(row.cwd))
+            % GLib.markup_escape_text(_oneline(row.cwd)))
         path_label.set_selectable(True)
         path_label.set_line_wrap(True)
         detail.pack_start(path_label, False, False, 0)
 
-        if row.last_prompt:
+        prompt = _oneline(row.last_prompt)
+        if prompt:
             prompt_label = Gtk.Label(xalign=0.0)
             prompt_label.set_markup(
-                "<small>%s</small>" % GLib.markup_escape_text(row.last_prompt))
+                "<small>%s</small>" % GLib.markup_escape_text(prompt))
             prompt_label.set_line_wrap(True)
             prompt_label.set_lines(3)
             prompt_label.set_ellipsize(Pango.EllipsizeMode.END)
             detail.pack_start(prompt_label, False, False, 0)
 
         meta = Gtk.Label(xalign=0.0)
-        state_line = row.state + (" · " + row.reason if row.reason else "")
+        state_line = _oneline(row.state + (" · " + row.reason if row.reason else ""))
         meta.set_markup(
             '<small><span foreground="#77767b">%s</span></small>'
             % GLib.markup_escape_text(state_line))

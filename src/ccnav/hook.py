@@ -17,6 +17,15 @@ MESSAGE_LIMIT = 200
 PROMPT_LIMIT = 300
 
 
+def _flatten(value: object, limit: int) -> str:
+    """Collapse a free-text field to a single bounded line: every whitespace run
+    (newlines, tabs) becomes one space, then truncate. A prompt or message can
+    be a multi-line blob -- a pasted diff, or a raw task-notification payload
+    submitted as a turn -- and the panel renders one line per field, so a stored
+    record must never carry embedded newlines or it wrecks the layout."""
+    return " ".join(str(value or "").split())[:limit]
+
+
 def tmux_socket_from_env(env: Mapping[str, str]) -> Optional[str]:
     """$TMUX is "<socket path>,<server pid>,<session id>"."""
     raw = env.get("TMUX")
@@ -47,9 +56,9 @@ def build_record(
         prompt = payload.get("user_prompt")
         if not isinstance(prompt, str):
             prompt = payload.get("prompt")
-        last_prompt = str(prompt or "")[:PROMPT_LIMIT]
+        last_prompt = _flatten(prompt, PROMPT_LIMIT)
     else:
-        last_prompt = str((previous or {}).get("last_prompt") or "")[:PROMPT_LIMIT]
+        last_prompt = _flatten((previous or {}).get("last_prompt"), PROMPT_LIMIT)
 
     return {
         "session_id": session_id,
@@ -58,7 +67,7 @@ def build_record(
         "tmux_pane": pane,
         "state": state,
         "reason": reason,
-        "message": str(payload.get("message") or "")[:MESSAGE_LIMIT],
+        "message": _flatten(payload.get("message"), MESSAGE_LIMIT),
         "updated_at": now,
         "last_prompt": last_prompt,
     }

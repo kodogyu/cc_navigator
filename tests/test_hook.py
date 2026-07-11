@@ -77,6 +77,12 @@ class BuildRecordTest(unittest.TestCase):
         result = hook.build_record(payload, ENV, now=1)
         self.assertEqual(len(result["message"]), hook.MESSAGE_LIMIT)
 
+    def test_multiline_message_is_flattened_to_one_line(self):
+        payload = dict(PAYLOAD, message="line one\n\nline two\ttabbed")
+        result = hook.build_record(payload, ENV, now=1)
+        self.assertEqual(result["message"], "line one line two tabbed")
+        self.assertNotIn("\n", result["message"])
+
 
 class MainTest(unittest.TestCase):
     """Covers hook.main()'s hardest invariant: it always returns 0.
@@ -187,6 +193,19 @@ class LastPromptTest(unittest.TestCase):
         rec = hook.build_record(
             {"session_id": "s", "hook_event_name": "Stop"}, self.ENV, 1)
         self.assertEqual(rec["last_prompt"], "")
+
+    def test_multiline_prompt_is_flattened_to_one_line(self):
+        # A task-notification / pasted diff submitted as a turn arrives with
+        # embedded newlines; it must be stored as a single line (see the
+        # 'broken content' report where a raw <task-notification> blob rendered
+        # as many raw lines and wrecked the panel row).
+        rec = hook.build_record(
+            {"session_id": "s", "hook_event_name": "UserPromptSubmit",
+             "user_prompt": "<task-notification>\n<id>x</id>\n<status>done</status>"},
+            self.ENV, 1)
+        self.assertEqual(
+            rec["last_prompt"], "<task-notification> <id>x</id> <status>done</status>")
+        self.assertNotIn("\n", rec["last_prompt"])
 
 
 class SessionEndTest(unittest.TestCase):
