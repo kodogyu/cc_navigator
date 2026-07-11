@@ -476,6 +476,8 @@ class NavigatorWindowTest(unittest.TestCase):
             self.assertEqual(self._display_ids(window), ["a", "b", "c"])  # insertion order
             window._reorder_session("c", "a")  # drag c to just before a
             self.assertEqual(self._display_ids(window), ["c", "a", "b"])
+            window._reorder_session("c", "b", after=True)  # drop c below b (reaches bottom)
+            self.assertEqual(self._display_ids(window), ["a", "b", "c"])
         finally:
             window.destroy()
 

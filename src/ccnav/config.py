@@ -49,7 +49,7 @@ class Settings:
     font_size: int = 0  # 0 = use the system default font size
     opacity: float = 1.0
     bg_color: str = ""  # "" = no override, keep the theme
-    sort_mode: str = "status"  # "status" | "group"
+    sort_mode: str = "status"  # "status" | "group" | "manual"
 
     def to_dict(self) -> dict:
         return {

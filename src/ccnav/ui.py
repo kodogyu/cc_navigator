@@ -1106,15 +1106,20 @@ class NavigatorWindow(Gtk.Window):
         except ValueError:
             return 1 << 30
 
-    def _reorder_session(self, dragged_id: str, target_id: str) -> None:
-        """Move `dragged_id` to just before `target_id` in the manual order."""
+    def _reorder_session(self, dragged_id: str, target_id: str, after: bool = False) -> None:
+        """Move `dragged_id` next to `target_id` in the manual order -- before it,
+        or after it when `after` (a drop on the lower half of the target row), so
+        the very bottom slot is reachable in one drag."""
         if dragged_id == target_id or dragged_id not in self._manual_order:
             return
         self._manual_order.remove(dragged_id)
         try:
             index = self._manual_order.index(target_id)
         except ValueError:
-            index = len(self._manual_order)
+            index = len(self._manual_order)  # target gone: land at the end
+        else:
+            if after:
+                index += 1
         self._manual_order.insert(index, dragged_id)
         self._listbox.invalidate_sort()
 
@@ -1132,14 +1137,18 @@ class NavigatorWindow(Gtk.Window):
             selection.set(selection.get_target(), 8,
                           list_row.ccnav_row.session_id.encode("utf-8"))
 
-    def _on_row_drag_received(self, list_row, _context, _x, _y, selection, _info, _time) -> None:
+    def _on_row_drag_received(self, list_row, _context, _x, y, selection, _info, _time) -> None:
         if (self._settings.sort_mode != "manual"
                 or getattr(list_row, "ccnav_is_header", False)):
             return
         data = selection.get_data()
         if not data:
             return
-        self._reorder_session(data.decode("utf-8", "replace"), list_row.ccnav_row.session_id)
+        # Drop on the lower half of the target -> place after it (so the bottom
+        # slot is reachable); upper half -> before it.
+        after = y > list_row.get_allocated_height() / 2
+        self._reorder_session(
+            data.decode("utf-8", "replace"), list_row.ccnav_row.session_id, after)
 
     def _row_sort_key(self, widget):
         if getattr(widget, "ccnav_is_header", False):
