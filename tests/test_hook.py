@@ -65,6 +65,29 @@ class BuildRecordTest(unittest.TestCase):
         payload = dict(PAYLOAD, hook_event_name="PreCompact")
         self.assertIsNone(hook.build_record(payload, ENV, now=1))
 
+    def test_a_late_resume_event_keeps_an_idle_session_idle(self):
+        # After Stop (WAITING/idle -> green), a late PostToolUse or SubagentStop
+        # from the just-ended turn must NOT re-light the working spinner.
+        idle = {"state": hookstate.WAITING, "reason": hookstate.STOP_IDLE, "last_prompt": "hi"}
+        for event in ("PostToolUse", "SubagentStop"):
+            payload = dict(PAYLOAD, hook_event_name=event, tool_name="Bash")
+            self.assertIsNone(
+                hook.build_record(payload, ENV, now=2, previous=idle),
+                "%s must not override an idle session" % event)
+
+    def test_a_resume_event_still_clears_a_red_wait(self):
+        # The un-stick fix is preserved: a resume event clears a red input wait
+        # (any reason that is NOT Stop's reserved idle).
+        red = {"state": hookstate.WAITING, "reason": "permission_prompt"}
+        payload = dict(PAYLOAD, hook_event_name="PostToolUse", tool_name="Bash")
+        rec = hook.build_record(payload, ENV, now=2, previous=red)
+        self.assertEqual(rec["state"], hookstate.WORKING)
+
+    def test_a_resume_event_with_no_previous_is_working(self):
+        payload = dict(PAYLOAD, hook_event_name="SubagentStop")
+        rec = hook.build_record(payload, ENV, now=2, previous=None)
+        self.assertEqual(rec["state"], hookstate.WORKING)
+
     def test_missing_session_id_returns_none(self):
         payload = dict(PAYLOAD)
         del payload["session_id"]

@@ -159,6 +159,32 @@ class DockRectTest(unittest.TestCase):
         self.assertEqual(ui._dock_rect("left", g, 9999), (0, 1080 - 220, 44, 220))
 
 
+class RoundedRegionTest(unittest.TestCase):
+    """The docked-bar corner clip is a pure geometry, testable without a window."""
+
+    def test_only_the_flagged_corners_are_cut(self):
+        reg = ui._rounded_region(20, 20, 6, (True, False, False, False))  # top-left only
+        self.assertFalse(reg.contains_point(0, 0))    # top-left cut
+        self.assertTrue(reg.contains_point(19, 0))    # top-right square
+        self.assertTrue(reg.contains_point(0, 19))    # bottom-left square
+        self.assertTrue(reg.contains_point(19, 19))   # bottom-right square
+        self.assertTrue(reg.contains_point(10, 10))   # interior kept
+
+    def test_each_edge_rounds_the_corners_away_from_the_wall(self):
+        # docked right => the two LEFT corners are rounded, the right ones flush.
+        right = ui._rounded_region(44, 220, 12, ui._DOCK_CORNERS["right"])
+        self.assertFalse(right.contains_point(0, 0))
+        self.assertFalse(right.contains_point(0, 219))
+        self.assertTrue(right.contains_point(43, 0))
+        self.assertTrue(right.contains_point(43, 219))
+        # docked bottom => the two TOP corners are rounded, the bottom ones flush.
+        bottom = ui._rounded_region(220, 44, 12, ui._DOCK_CORNERS["bottom"])
+        self.assertFalse(bottom.contains_point(0, 0))
+        self.assertFalse(bottom.contains_point(219, 0))
+        self.assertTrue(bottom.contains_point(0, 43))
+        self.assertTrue(bottom.contains_point(219, 43))
+
+
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
 class NavigatorWindowTest(unittest.TestCase):
     def test_constructs_and_accepts_rows(self):

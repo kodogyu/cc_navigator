@@ -52,6 +52,20 @@ def build_record(
         return None
     state, reason = classified
 
+    # A finished turn (Stop -> WAITING/idle, the green "reported" dot) must STAY
+    # green. PostToolUse/SubagentStop map to WORKING as a resume signal -- that is
+    # what un-sticks a red "input" dot after the user answers -- but one can also
+    # arrive AFTER Stop (a late tool/subagent event from the turn that just ended),
+    # which must not re-light the working spinner on an already-idle session. Only
+    # UserPromptSubmit/SessionStart begin a new working phase. This guards ONLY the
+    # idle-green state, so a red wait (a different reason) is still cleared.
+    if (state == hookstate.WORKING
+            and payload.get("hook_event_name") in ("PostToolUse", "SubagentStop")
+            and isinstance(previous, dict)
+            and previous.get("state") == hookstate.WAITING
+            and previous.get("reason") == hookstate.STOP_IDLE):
+        return None
+
     if payload.get("hook_event_name") == "UserPromptSubmit":
         prompt = payload.get("user_prompt")
         if not isinstance(prompt, str):

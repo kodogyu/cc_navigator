@@ -262,6 +262,49 @@ _DOCK_RESNAP_MS = 60
 _DOCK_EDGES = ("top", "bottom", "left", "right")
 
 
+_DOCK_CORNER_RADIUS = 12
+# Which corners to round per edge: the two AWAY from the screen edge. Order is
+# (top-left, top-right, bottom-left, bottom-right).
+_DOCK_CORNERS = {
+    "right":  (True, False, True, False),   # flush right -> round the left corners
+    "left":   (False, True, False, True),   # flush left  -> round the right corners
+    "top":    (False, False, True, True),   # flush top   -> round the bottom corners
+    "bottom": (True, True, False, False),   # flush bottom-> round the top corners
+}
+
+
+def _arc_inset(r, dv):
+    """Horizontal half-chord of a circle of radius `r` at vertical distance `dv`
+    from its centre -- how far a rounded corner cuts in on a given row."""
+    dv = max(0.0, min(float(r), dv))
+    return int(round((r * r - dv * dv) ** 0.5))
+
+
+def _rounded_region(w, h, radius, corners):
+    """A cairo.Region covering a w×h rectangle with the flagged `corners`
+    (tl, tr, bl, br) rounded to `radius`, built from per-row spans. A window shape
+    is a 1-bit mask, so this rounding is not anti-aliased -- but it clips the
+    docked bar to the exact shape regardless of theme/CSD, which CSS border-radius
+    on a title-bar-less window does not."""
+    tl, tr, bl, br = corners
+    r = max(0, min(radius, w // 2, h // 2))
+    region = cairo.Region()
+    for y in range(h):
+        left, right = 0, w
+        if r:
+            if tl and y < r:
+                left = max(left, r - _arc_inset(r, r - y - 0.5))
+            if bl and y >= h - r:
+                left = max(left, r - _arc_inset(r, y - (h - r) + 0.5))
+            if tr and y < r:
+                right = min(right, w - (r - _arc_inset(r, r - y - 0.5)))
+            if br and y >= h - r:
+                right = min(right, w - (r - _arc_inset(r, y - (h - r) + 0.5)))
+        if right > left:
+            region.union(cairo.RectangleInt(left, y, right - left, 1))
+    return region
+
+
 def _dock_rect(edge, geo, along=None):
     """Geometry of the docked bar for `edge` within monitor rect `geo`.
 
@@ -776,6 +819,9 @@ class NavigatorWindow(Gtk.Window):
         ctx.remove_class("docked")
         for other in _DOCK_EDGES:
             ctx.remove_class("docked-" + other)
+        gdk_window = self.get_window()  # drop the rounded-corner clip -> rectangular again
+        if gdk_window is not None:
+            gdk_window.shape_combine_region(None, 0, 0)
         # Hide the bar before the switch so a later collapse (which hides _content)
         # can't make the stack fall back to showing it.
         self._dock_bar.hide()
@@ -808,6 +854,13 @@ class NavigatorWindow(Gtk.Window):
         gdk_window = self.get_window()
         if gdk_window is not None:
             gdk_window.move_resize(x, y, w, h)
+            # Clip the window to a rounded rectangle so the two corners away from
+            # the edge are rounded (the CSS border-radius does not clip a
+            # title-bar-less docked window). Rebuilt here because it depends on w,h.
+            corners = _DOCK_CORNERS.get(edge)
+            if corners is not None:
+                gdk_window.shape_combine_region(
+                    _rounded_region(w, h, _DOCK_CORNER_RADIUS, corners), 0, 0)
         else:
             self.move(x, y)
 
