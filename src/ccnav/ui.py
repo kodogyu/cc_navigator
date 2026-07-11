@@ -536,6 +536,15 @@ class NavigatorWindow(Gtk.Window):
     def set_collapsed(self, collapsed: bool) -> None:
         """Collapsed hides the body and shrinks the window to its titlebar; the
         panel stays floating and one click brings the list back."""
+        # While docked, the stack child and window size belong to attach mode.
+        # A stray toggle can still arrive here -- e.g. docking FROM a collapsed
+        # panel: the attach popover's animated "closed" fires after _dock_to_edge
+        # and un-presses the (still-active) collapse button, which would otherwise
+        # swap the stack back to "full" and re-grow the window over the dock bar,
+        # leaving no titlebar and the detach button off-screen. Ignore it; _undock
+        # clears _docked_edge before its own reset, so detach is unaffected.
+        if self._docked_edge is not None:
+            return
         image = self._collapse_button.get_child()
         if collapsed:
             self._content.hide()

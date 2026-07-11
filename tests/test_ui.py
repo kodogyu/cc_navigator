@@ -658,6 +658,29 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_a_late_collapse_toggle_while_docked_does_not_corrupt_the_dock(self):
+        # Docking FROM a collapsed panel: the attach popover's animated "closed"
+        # un-presses the still-active collapse button AFTER _dock_to_edge ran, so
+        # set_collapsed(False) arrives while docked. It must not swap the stack
+        # back to "full" or re-grow the window (which would hide the detach button).
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
+        try:
+            window.set_collapsed(True)
+            window._dock_to_edge("left")
+            self.assertEqual(window._stack.get_visible_child_name(), "docked")
+            window._collapse_button.set_active(False)  # the late toggle
+            self.assertEqual(window._docked_edge, "left")
+            self.assertEqual(window._stack.get_visible_child_name(), "docked")
+            self.assertTrue(window._dock_bar.get_visible())
+            self.assertFalse(window._header.get_visible())
+            window._undock()  # detach still recovers cleanly
+            self.assertEqual(window._stack.get_visible_child_name(), "full")
+            self.assertTrue(window._content.get_visible())
+            self.assertFalse(window._dock_bar.get_visible())
+        finally:
+            window.destroy()
+
     def test_show_all_does_not_reveal_the_header_while_docked(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         window.show_all()
