@@ -177,11 +177,11 @@ class HooksMergeTest(unittest.TestCase):
         # an event WE emptied, mirroring the group-level guard.
         self.path.parent.mkdir(parents=True)
         self.path.write_text(json.dumps({"hooks": {
-            "PostToolUse": [],
+            "PreCompact": [],
             "Stop": [{"matcher": "", "hooks": [{"type": "command", "command": self.cmd}]}]}}))
         self.assertTrue(wiring.remove_hooks(self.cmd, self.path))
         data = json.loads(self.path.read_text())
-        self.assertEqual(data["hooks"].get("PostToolUse"), [])  # untouched foreign event kept
+        self.assertEqual(data["hooks"].get("PreCompact"), [])  # untouched foreign event kept
         self.assertNotIn("Stop", data["hooks"])                 # our-only event pruned
 
     def test_reinstalling_an_installed_hook_set_writes_no_new_backup(self):

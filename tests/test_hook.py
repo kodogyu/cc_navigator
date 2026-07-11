@@ -60,7 +60,9 @@ class BuildRecordTest(unittest.TestCase):
         self.assertIsNone(hook.build_record(payload=PAYLOAD, env=env, now=1))
 
     def test_ignored_event_returns_none(self):
-        payload = dict(PAYLOAD, hook_event_name="SubagentStop")
+        # PreCompact carries no state change (classify returns None), so no record
+        # is written. (SubagentStop now maps to WORKING, so it is no longer inert.)
+        payload = dict(PAYLOAD, hook_event_name="PreCompact")
         self.assertIsNone(hook.build_record(payload, ENV, now=1))
 
     def test_missing_session_id_returns_none(self):

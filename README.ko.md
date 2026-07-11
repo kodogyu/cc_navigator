@@ -91,9 +91,11 @@ cd cc_navigator
 
 doctor를 통과하면:
 
-1. 다섯 개의 훅(`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`,
-   `PreToolUse`)을 `~/.claude/settings.json`에 추가하고, 각각을 **절대 경로**로
-   `<저장소>/bin/cc-navigator-hook`을 가리키게 합니다.
+1. 훅(`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`, `SessionEnd`,
+   `PreToolUse`, `PostToolUse`, `SubagentStop` — `wiring.RECOMMENDED_HOOKS`의 집합)을
+   `~/.claude/settings.json`에 추가하고, 각각을 **절대 경로**로
+   `<저장소>/bin/cc-navigator-hook`을 가리키게 합니다. `install` 스크립트와 설정
+   대화상자가 이 작업을 대신 해줍니다.
 2. 프로젝트마다 tmux 세션 하나를, 각각 자기 터미널 창에 붙여 실행합니다.
 3. `./bin/cc-navigator &`
 

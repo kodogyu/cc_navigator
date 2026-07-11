@@ -190,8 +190,9 @@ def check_claude_hooks(settings: Dict[str, object], hook_path: str) -> Check:
         name="claude hooks",
         ok=False,
         detail="sessions started without the hook never appear in the list",
-        fix="point the Notification, Stop, PreToolUse, SessionStart and "
-        "UserPromptSubmit hooks at %s in ~/.claude/settings.json" % hook_path,
+        fix="point the recommended hooks (Notification, Stop, PreToolUse, "
+        "PostToolUse, SubagentStop, SessionStart, SessionEnd, UserPromptSubmit) "
+        "at %s in ~/.claude/settings.json" % hook_path,
     )
 
 

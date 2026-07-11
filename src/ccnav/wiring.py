@@ -115,6 +115,11 @@ RECOMMENDED_HOOKS = {
     "Stop": "",
     "SessionEnd": "",
     "PreToolUse": "AskUserQuestion|ExitPlanMode",
+    # A finished tool / subagent means Claude resumed working -- these un-stick the
+    # red "input" dot after the user answers a prompt and while a subagent runs
+    # (see hookstate.classify).
+    "PostToolUse": "",
+    "SubagentStop": "",
 }
 
 

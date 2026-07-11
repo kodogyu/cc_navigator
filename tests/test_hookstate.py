@@ -46,6 +46,22 @@ class ClassifyTest(unittest.TestCase):
         )
         self.assertIsNone(result)
 
+    def test_post_tool_use_is_working(self):
+        # A finished tool means Claude resumed -- this un-sticks the red "input"
+        # dot after the user answers a permission prompt / question.
+        result = hookstate.classify(
+            {"hook_event_name": "PostToolUse", "tool_name": "Bash"}
+        )
+        self.assertEqual(result, (hookstate.WORKING, ""))
+
+    def test_post_tool_use_for_a_waiting_tool_is_also_working(self):
+        # Answering an AskUserQuestion fires its PostToolUse; that is exactly the
+        # resume signal, so it must read as WORKING, not stay WAITING.
+        result = hookstate.classify(
+            {"hook_event_name": "PostToolUse", "tool_name": "AskUserQuestion"}
+        )
+        self.assertEqual(result, (hookstate.WORKING, ""))
+
     def test_stop_is_idle_waiting(self):
         result = hookstate.classify({"hook_event_name": "Stop"})
         self.assertEqual(result, (hookstate.WAITING, hookstate.STOP_IDLE))
@@ -59,8 +75,12 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(result, (hookstate.WAITING, "notification"))
         self.assertNotEqual(result[1], hookstate.STOP_IDLE)
 
-    def test_subagent_stop_is_ignored(self):
-        self.assertIsNone(hookstate.classify({"hook_event_name": "SubagentStop"}))
+    def test_subagent_stop_is_working(self):
+        # A finished subagent means the main agent resumed; it un-sticks a red dot
+        # that would otherwise persist for the whole subagent run.
+        self.assertEqual(
+            hookstate.classify({"hook_event_name": "SubagentStop"}),
+            (hookstate.WORKING, ""))
 
     def test_unknown_event_is_ignored(self):
         self.assertIsNone(hookstate.classify({"hook_event_name": "Nonsense"}))

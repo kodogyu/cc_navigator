@@ -43,8 +43,25 @@ def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:
             return (WAITING, _WAITING_TOOLS[tool])
         return None
 
+    if event == "PostToolUse":
+        # A tool just finished, so Claude has resumed working. This is the signal
+        # that un-sticks a red "input" dot once the user answers: after they reply
+        # to a permission prompt (Notification) or an AskUserQuestion/ExitPlanMode
+        # (PreToolUse), nothing else flips the session back to WORKING -- the next
+        # thing that happens is a tool completing, right before Claude generates
+        # its "..." response. Without this the dot stays red while Claude works.
+        return (WORKING, "")
+
+    if event == "SubagentStop":
+        # A subagent finished, so the main agent has resumed. While a subagent
+        # runs it is the ONLY event that fires for the session, so treating it as
+        # WORKING is what un-sticks a red "input" dot for the whole subagent run
+        # (the same resume logic as PostToolUse). It can never wrongly override a
+        # real wait: the main agent can't Stop or prompt while a subagent is still
+        # running, so a genuine WAITING event always lands after this one.
+        return (WORKING, "")
+
     if event == "Stop":
         return (WAITING, STOP_IDLE)
 
-    # SubagentStop fires constantly and never means the session wants input.
     return None

@@ -91,9 +91,11 @@ then tells you precisely which lines to add to `~/.tmux.conf` and `~/.claude/set
 
 Once the doctor passes:
 
-1. Add the five hooks (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`,
-   `PreToolUse`) to `~/.claude/settings.json`, each pointing at
-   `<repo>/bin/cc-navigator-hook` by **absolute path**.
+1. Add the hooks (`SessionStart`, `UserPromptSubmit`, `Notification`, `Stop`,
+   `SessionEnd`, `PreToolUse`, `PostToolUse`, `SubagentStop` — the set in
+   `wiring.RECOMMENDED_HOOKS`) to `~/.claude/settings.json`, each pointing at
+   `<repo>/bin/cc-navigator-hook` by **absolute path**. The `install` script and
+   the settings dialog do this for you.
 2. Run one tmux session per project, each attached in its own terminal window.
 3. `./bin/cc-navigator &`
 
