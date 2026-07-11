@@ -116,11 +116,15 @@ _WORKING_COLOUR = "#3584e4"
 _WORKING_PERIOD_MS = 120
 
 
-def _build_working_arrow(row_widget: Gtk.Widget) -> Gtk.Label:
+def _build_working_arrow() -> Gtk.Label:
     """A small arrow that rotates while Claude works. A single self-cleaning
-    GLib timeout drives it: each tick advances one frame, and the source drops
-    itself the moment its row leaves the list (row_widget.get_parent() is None)
-    or the widget is torn down -- so a list rebuild never orphans a timer."""
+    GLib timeout drives it: each tick advances one frame and drops itself the
+    moment the label is no longer inside a list -- which covers BOTH the row
+    being removed AND the indicator being swapped out for a dot in place
+    (label.get_parent() goes None on a swap; get_ancestor covers a row removal
+    where the label stays parented but its row leaves the listbox). Keying the
+    stop on the label's own ancestry, not its row's, is what stops a
+    working->waiting flip from orphaning the timer."""
     label = Gtk.Label()
     state = {"i": 0}
 
@@ -131,8 +135,8 @@ def _build_working_arrow(row_widget: Gtk.Widget) -> Gtk.Label:
 
     def tick() -> bool:
         try:
-            if row_widget.get_parent() is None:
-                return False  # row removed from the list -> stop
+            if label.get_ancestor(Gtk.ListBox) is None:
+                return False  # arrow detached (swap) or its row left the list -> stop
             state["i"] = (state["i"] + 1) % len(_WORKING_FRAMES)
             label.set_markup(markup(state["i"]))
             return True
@@ -182,11 +186,11 @@ def _meta_markup(row: model.Row) -> str:
             % GLib.markup_escape_text(state_line))
 
 
-def _build_indicator(kind: str, row_widget: Gtk.Widget) -> Gtk.Widget:
+def _build_indicator(kind: str) -> Gtk.Widget:
     """The status widget for a row: a rotating arrow while working, else a
     coloured dot (green 'reported', red 'input')."""
     if kind == "working":
-        return _build_working_arrow(row_widget)
+        return _build_working_arrow()
     dot = Gtk.Label()
     colour = "#2ec27e" if kind == "reported" else "#e01b24"
     dot.set_markup('<span foreground="%s">●</span>' % colour)
@@ -291,6 +295,11 @@ class NavigatorWindow(Gtk.Window):
 
         self._listbox = Gtk.ListBox()
         self._listbox.set_selection_mode(Gtk.SelectionMode.SINGLE)
+        # The listbox owns display order via a sort func over model.sort_key, so
+        # set_rows can reconcile in place (never destroying widgets) and still
+        # keep waiting sessions on top: after updating rows, invalidate_sort()
+        # re-sorts the survivors without a rebuild.
+        self._listbox.set_sort_func(self._sort_rows)
         self._listbox.connect("row-selected", self._on_row_selected)
         self._listbox.connect("row-activated", self._on_row_activated)
         # row-selected fires BEFORE row-activated, so by the time the activation
@@ -724,21 +733,30 @@ class NavigatorWindow(Gtk.Window):
                 self._listbox.remove(child)
                 del existing[session_id]
 
-        # Add new rows and update changed ones in place. build_rows yields a
-        # stable per-session order (sorted by state-file name), so existing rows
-        # never need reordering relative to one another: a new row inserted at
-        # its index lands correctly and pushes later rows down.
-        for index, row in enumerate(rows):
+        # Add new rows and update changed ones in place. Display order is owned
+        # by the listbox sort func (model.sort_key), so position on insert does
+        # not matter -- a new row lands in its sorted slot, and invalidate_sort()
+        # below re-sorts the rows whose key just changed (e.g. one that flipped
+        # to waiting must jump to the top). A session's (waiting, -updated_at)
+        # key is volatile, so this re-sort is what keeps the priority order live.
+        for row in rows:
             child = existing.get(row.session_id)
             if child is None:
                 child = self._build_row(row)
-                self._listbox.insert(child, index)
+                self._listbox.insert(child, -1)
                 child.show_all()
             elif child.ccnav_sig != _row_signature(row):
                 self._update_row(child, row)
 
+        self._listbox.invalidate_sort()
         self._hint = "" if rows else EMPTY_HINT
         self._render_status()
+
+    def _sort_rows(self, a: Gtk.ListBoxRow, b: Gtk.ListBoxRow) -> int:
+        """Order rows by model.sort_key -- the same key build_rows uses -- so the
+        live panel and a fresh build agree. Waiting sessions first, then newest."""
+        ka, kb = model.sort_key(a.ccnav_row), model.sort_key(b.ccnav_row)
+        return -1 if ka < kb else (1 if ka > kb else 0)
 
     def _update_row(self, list_row: Gtk.ListBoxRow, row: model.Row) -> None:
         """Refresh one existing row's widgets in place -- no teardown, so its
@@ -750,7 +768,7 @@ class NavigatorWindow(Gtk.Window):
         if (new_kind == "working") != (list_row.ccnav_kind == "working"):
             # working-ness flipped: swap the widget (rotating arrow <-> dot).
             list_row.ccnav_header.remove(list_row.ccnav_indicator)
-            indicator = _build_indicator(new_kind, list_row)
+            indicator = _build_indicator(new_kind)
             list_row.ccnav_header.pack_start(indicator, False, False, 0)
             list_row.ccnav_header.reorder_child(indicator, 0)
             indicator.show()
@@ -777,7 +795,7 @@ class NavigatorWindow(Gtk.Window):
         # is gone): a rotating arrow while Claude works, a red dot when it needs
         # an answer, a green dot when it has reported and is idle.
         kind = dot_state(row)
-        indicator = _build_indicator(kind, list_row)
+        indicator = _build_indicator(kind)
         header.pack_start(indicator, False, False, 0)
 
         title = Gtk.Label(xalign=0.0)

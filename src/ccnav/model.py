@@ -96,5 +96,14 @@ def build_rows(
                 last_prompt=str(rec.get("last_prompt") or ""),
             )
         )
-    rows.sort(key=lambda row: (0 if row.waiting else 1, -row.updated_at))
+    rows.sort(key=sort_key)
     return rows
+
+
+def sort_key(row: "Row"):
+    """Display priority: sessions waiting for input come first (they need the
+    user), then most-recently-updated. Both components are volatile -- a hook
+    event flips `waiting` and bumps `updated_at` -- so the UI must re-sort on
+    every change, not assume a fixed order. Shared with the UI's list sort func
+    so build_rows and the live panel can never order rows differently."""
+    return (0 if row.waiting else 1, -row.updated_at)

@@ -9,11 +9,11 @@ from gi.repository import Gtk  # noqa: E402
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
-        last_prompt="", pane="%1", socket="/tmp/s"):
+        last_prompt="", pane="%1", socket="/tmp/s", updated_at=1):
     return model.Row(
         session_id=session_id, socket=socket, pane=pane, tmux_session="demo",
         title=title, state=state, reason=reason,
-        message=message, cwd=cwd, updated_at=1, last_prompt=last_prompt,
+        message=message, cwd=cwd, updated_at=updated_at, last_prompt=last_prompt,
     )
 
 
@@ -401,6 +401,41 @@ class NavigatorWindowTest(unittest.TestCase):
             window.set_rows([row(session_id="b"), row(session_id="c")])
             ids = [c.ccnav_row.session_id for c in window._listbox.get_children()]
             self.assertEqual(ids, ["b", "c"])  # a removed, c inserted, order kept
+        finally:
+            window.destroy()
+
+    def _display_ids(self, window):
+        n = len(window._listbox.get_children())
+        return [window._listbox.get_row_at_index(i).ccnav_row.session_id for i in range(n)]
+
+    def test_a_row_that_becomes_waiting_jumps_above_working_rows(self):
+        # The reconcile must keep the (waiting, -updated_at) priority sort live:
+        # updating a row in place must re-sort, not leave it where it was.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WORKING, updated_at=90),
+                             row(session_id="b", state=hookstate.WORKING, updated_at=100)])
+            self.assertEqual(self._display_ids(window), ["b", "a"])  # newer working on top
+            window.set_rows([
+                row(session_id="a", state=hookstate.WAITING, reason="idle", updated_at=110),
+                row(session_id="b", state=hookstate.WORKING, updated_at=100)])
+            self.assertEqual(self._display_ids(window), ["a", "b"])  # a now waiting -> top
+        finally:
+            window.destroy()
+
+    def test_swapping_arrow_for_dot_detaches_the_arrow_so_its_timer_stops(self):
+        # The rotating arrow's timer self-stops when the label loses its ListBox
+        # ancestor. After a working->waiting in-place swap the old arrow must be
+        # detached (else the 8Hz timer leaks for the window's life).
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WORKING)])
+            child = window._listbox.get_children()[0]
+            arrow = [l for l in self._widgets_of_type(child, Gtk.Label)
+                     if l.get_text() in ui._WORKING_FRAMES][0]
+            self.assertIsNotNone(arrow.get_ancestor(Gtk.ListBox))  # live -> timer runs
+            window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
+            self.assertIsNone(arrow.get_ancestor(Gtk.ListBox))  # detached -> timer self-stops
         finally:
             window.destroy()
 
