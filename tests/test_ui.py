@@ -443,6 +443,20 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_header_badge_counts_input_needed_sessions(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([
+                row(session_id="i1", state=hookstate.WAITING, reason="permission_prompt"),
+                row(session_id="i2", state=hookstate.WAITING, reason="question"),
+                row(session_id="w", state=hookstate.WORKING)])
+            self.assertTrue(window._count_badge.get_visible())
+            self.assertIn("2", window._count_badge.get_text())  # 2 waiting for input
+            window.set_rows([row(session_id="w", state=hookstate.WORKING)])
+            self.assertFalse(window._count_badge.get_visible())  # none waiting -> hidden
+        finally:
+            window.destroy()
+
     def test_status_mode_orders_rows_into_sections(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:

@@ -308,6 +308,12 @@ class NavigatorWindow(Gtk.Window):
         window_icon = _app_icon_pixbuf(48)
         if window_icon is not None:
             self.set_icon(window_icon)
+        # A red badge showing how many sessions are waiting for the user's input
+        # (hidden when none). Rightmost, next to the window controls.
+        self._count_badge = Gtk.Label()
+        self._count_badge.set_no_show_all(True)  # visibility is driven by the count
+        header.pack_end(self._count_badge)
+
         gear = Gtk.Button()
         gear.set_relief(Gtk.ReliefStyle.NONE)
         gear.add(Gtk.Image.new_from_icon_name("emblem-system-symbolic", Gtk.IconSize.BUTTON))
@@ -860,10 +866,21 @@ class NavigatorWindow(Gtk.Window):
                 self._update_row(child, row)
 
         self._recompute_sections(rows)
+        self._update_count_badge()
         self._listbox.invalidate_sort()
         self._listbox.invalidate_headers()
         self._hint = "" if rows else EMPTY_HINT
         self._render_status()
+
+    def _update_count_badge(self) -> None:
+        """Show the header badge iff some session is waiting for the user."""
+        waiting = self._status_counts.get(model.INPUT_NEEDED, 0)
+        if waiting > 0:
+            self._count_badge.set_markup(
+                '<span background="#e01b24" foreground="#ffffff"><b> %d </b></span>' % waiting)
+            self._count_badge.set_visible(True)
+        else:
+            self._count_badge.set_visible(False)
 
     def _recompute_sections(self, rows: List[model.Row]) -> None:
         """Tally per-section state from the current rows: counts for the headers
