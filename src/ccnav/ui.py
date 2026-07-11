@@ -1107,6 +1107,8 @@ class NavigatorWindow(Gtk.Window):
         append the new at the end. The user's relative order is preserved."""
         present = {r.session_id for r in rows}
         self._manual_order = [s for s in self._manual_order if s in present]
+        # Forget group moves for sessions that have ended.
+        self._group_override = {s: g for s, g in self._group_override.items() if s in present}
         known = set(self._manual_order)
         for row in rows:
             if row.session_id not in known:
