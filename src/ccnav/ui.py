@@ -270,6 +270,7 @@ class NavigatorWindow(Gtk.Window):
         self._group_rank = {}     # group_key -> display rank (recent groups first)
         self._group_counts = {}   # group_key -> {input, reported, working}
         self._status_counts = {}  # status section -> count
+        self._collapsed_groups = set()  # group keys collapsed in Group mode
         self._eval_available = True
         self._sticky = ""
         self._hint = ""
@@ -364,6 +365,9 @@ class NavigatorWindow(Gtk.Window):
         # in-place reconcile is untouched: rows stay a flat listbox and GTK adds
         # a section title / group header above each row that starts a new one.
         self._listbox.set_header_func(self._header_func)
+        # In Group mode the group headers are real (non-selectable) list rows, so
+        # a collapsed group can hide its sessions while its header row stays put.
+        self._listbox.set_filter_func(self._filter_row)
         self._listbox.connect("row-selected", self._on_row_selected)
         self._listbox.connect("row-activated", self._on_row_activated)
         # row-selected fires BEFORE row-activated, so by the time the activation
@@ -798,7 +802,8 @@ class NavigatorWindow(Gtk.Window):
         # would leave every visible jump button live: the user clicks it, nothing
         # happens, and nothing explains why -- the project's signature failure.
         for child in self._listbox.get_children():
-            child.ccnav_jump.set_sensitive(available)
+            if not getattr(child, "ccnav_is_header", False):
+                child.ccnav_jump.set_sensitive(available)
         self._render_status()
 
     def set_status(self, text: str) -> None:
@@ -820,6 +825,8 @@ class NavigatorWindow(Gtk.Window):
         A no-op if the row is gone (e.g. the session ended mid-jump).
         """
         for child in self._listbox.get_children():
+            if getattr(child, "ccnav_is_header", False):
+                continue
             if child.ccnav_row.session_id == session_id:
                 child.ccnav_jump.set_sensitive(sensitive)
                 return
@@ -841,7 +848,8 @@ class NavigatorWindow(Gtk.Window):
             return
         self._signature = signature
 
-        existing = {c.ccnav_row.session_id: c for c in self._listbox.get_children()}
+        existing = {c.ccnav_row.session_id: c for c in self._listbox.get_children()
+                    if not getattr(c, "ccnav_is_header", False)}
         desired_ids = set(r.session_id for r in rows)
 
         # Remove rows whose session is gone.
@@ -866,9 +874,11 @@ class NavigatorWindow(Gtk.Window):
                 self._update_row(child, row)
 
         self._recompute_sections(rows)
+        self._reconcile_group_headers(rows)
         self._update_count_badge()
         self._listbox.invalidate_sort()
         self._listbox.invalidate_headers()
+        self._listbox.invalidate_filter()
         self._hint = "" if rows else EMPTY_HINT
         self._render_status()
 
@@ -908,30 +918,42 @@ class NavigatorWindow(Gtk.Window):
         rank = model.STATUS_SECTIONS.index(model.status_key(row))
         return (rank,) + tuple(model.sort_key(row))
 
+    def _row_sort_key(self, widget):
+        if getattr(widget, "ccnav_is_header", False):
+            # A group header leads its group: same group rank, then ahead of its
+            # sessions (whose second key element is 0 or 1, both > -1).
+            return (self._group_rank.get(widget.ccnav_group, 1 << 30), -1)
+        return self._section_sort_key(widget.ccnav_row)
+
     def _sort_rows(self, a: Gtk.ListBoxRow, b: Gtk.ListBoxRow) -> int:
-        """Order rows by section, then by model.sort_key within the section, so
-        the sections/groups stay contiguous and waiting sessions lead each one."""
-        ka, kb = self._section_sort_key(a.ccnav_row), self._section_sort_key(b.ccnav_row)
+        """Order by section, then by model.sort_key within it, so sections/groups
+        stay contiguous. In Group mode a group's header row leads its sessions."""
+        ka, kb = self._row_sort_key(a), self._row_sort_key(b)
         return -1 if ka < kb else (1 if ka > kb else 0)
 
-    def _section_id(self, row: model.Row) -> str:
-        return (model.group_key(row) if self._settings.sort_mode == "group"
-                else model.status_key(row))
+    def _filter_row(self, widget) -> bool:
+        """Hide a session row iff its group is collapsed (Group mode only). Group
+        header rows are never hidden, so a collapsed group keeps its header."""
+        if getattr(widget, "ccnav_is_header", False):
+            return True
+        if self._settings.sort_mode != "group":
+            return True
+        return model.group_key(widget.ccnav_row) not in self._collapsed_groups
 
     def _header_func(self, row_widget, before_widget) -> None:
-        """Give a row a section header iff it starts a new section (its section
-        differs from the row above it). GTK reuses headers until invalidated."""
-        this = self._section_id(row_widget.ccnav_row)
-        prev = self._section_id(before_widget.ccnav_row) if before_widget else None
-        if this == prev:
+        """Status mode draws section titles as GtkListBox headers on the first
+        session of each section. Group mode uses header ROWS instead, so every
+        row's list-header is cleared there."""
+        if (self._settings.sort_mode == "group"
+                or getattr(row_widget, "ccnav_is_header", False)):
             row_widget.set_header(None)
-        else:
-            row_widget.set_header(self._make_section_header(row_widget.ccnav_row))
-
-    def _make_section_header(self, row: model.Row) -> Gtk.Widget:
-        if self._settings.sort_mode == "group":
-            return self._make_group_header(model.group_key(row))
-        return self._make_status_header(model.status_key(row))
+            return
+        this = model.status_key(row_widget.ccnav_row)
+        prev = (model.status_key(before_widget.ccnav_row)
+                if before_widget is not None
+                and not getattr(before_widget, "ccnav_is_header", False)
+                else None)
+        row_widget.set_header(None if this == prev else self._make_status_header(this))
 
     def _make_status_header(self, section: str) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
@@ -949,20 +971,58 @@ class NavigatorWindow(Gtk.Window):
         box.show_all()
         return box
 
-    def _make_group_header(self, group_key: str) -> Gtk.Widget:
-        counts = self._group_counts.get(
-            group_key, {model.INPUT_NEEDED: 0, model.REPORTED: 0, model.WORKING_SECTION: 0})
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+    # -- group header rows (Group mode) --------------------------------------
+
+    def _reconcile_group_headers(self, rows: List[model.Row]) -> None:
+        """Keep exactly one non-selectable header row per project group in Group
+        mode (and none in Status mode). Reconciled like the session rows, so the
+        listbox is never rebuilt."""
+        existing = {c.ccnav_group: c for c in self._listbox.get_children()
+                    if getattr(c, "ccnav_is_header", False)}
+        if self._settings.sort_mode != "group":
+            for child in existing.values():
+                self._listbox.remove(child)
+            return
+        wanted = {model.group_key(r) for r in rows}
+        for group_key, child in list(existing.items()):
+            if group_key not in wanted:
+                self._listbox.remove(child)
+                del existing[group_key]
+        for group_key in wanted:
+            if group_key in existing:
+                self._update_group_header_row(existing[group_key])
+            else:
+                header_row = self._build_group_header_row(group_key)
+                self._listbox.insert(header_row, -1)
+                header_row.show_all()
+
+    def _build_group_header_row(self, group_key: str) -> Gtk.ListBoxRow:
+        header_row = Gtk.ListBoxRow()
+        header_row.ccnav_is_header = True   # type: ignore[attr-defined]
+        header_row.ccnav_group = group_key  # type: ignore[attr-defined]
+        header_row.set_selectable(False)
+        header_row.set_activatable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.set_margin_top(8)
-        box.set_margin_start(4)
+        box.set_margin_start(2)
         box.set_margin_end(4)
         box.set_margin_bottom(2)
+
+        chevron = Gtk.Button()
+        chevron.set_relief(Gtk.ReliefStyle.NONE)
+        chevron_img = Gtk.Image()
+        chevron.add(chevron_img)
+        chevron.set_tooltip_text("그룹 접기/펼치기")
+        chevron.connect("clicked", self._on_group_toggle, group_key)
+        box.pack_start(chevron, False, False, 0)
+
         box.pack_start(
             Gtk.Image.new_from_icon_name("folder-symbolic", Gtk.IconSize.MENU), False, False, 0)
+
         names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         name = Gtk.Label(xalign=0.0)
-        # _oneline for the same reason every other free-text label uses it: an
-        # older/hand-edited cwd could carry a newline or control char.
+        # _oneline for the same reason every other free-text label uses it.
         name.set_markup("<b>%s</b>"
                         % GLib.markup_escape_text(_oneline(model.group_label(group_key))))
         names.pack_start(name, False, False, 0)
@@ -973,24 +1033,52 @@ class NavigatorWindow(Gtk.Window):
             path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
             names.pack_start(path, False, False, 0)
         box.pack_start(names, True, True, 0)
-        badges = Gtk.Label()
-        badges.set_markup(
+
+        counts = Gtk.Label()
+        box.pack_end(counts, False, False, 0)
+        header_row.add(box)
+        header_row.ccnav_chevron_img = chevron_img  # type: ignore[attr-defined]
+        header_row.ccnav_counts_label = counts       # type: ignore[attr-defined]
+        self._update_group_header_row(header_row)
+        return header_row
+
+    def _update_group_header_row(self, header_row: Gtk.ListBoxRow) -> None:
+        group_key = header_row.ccnav_group
+        collapsed = group_key in self._collapsed_groups
+        header_row.ccnav_chevron_img.set_from_icon_name(
+            "pan-end-symbolic" if collapsed else "pan-down-symbolic", Gtk.IconSize.MENU)
+        counts = self._group_counts.get(
+            group_key, {model.INPUT_NEEDED: 0, model.REPORTED: 0, model.WORKING_SECTION: 0})
+        header_row.ccnav_counts_label.set_markup(
             '<small><span foreground="#e01b24">●</span> %d  '
             '<span foreground="#2ec27e">●</span> %d  '
             '<span foreground="#3584e4">↻</span> %d</small>'
             % (counts[model.INPUT_NEEDED], counts[model.REPORTED],
                counts[model.WORKING_SECTION]))
-        box.pack_end(badges, False, False, 0)
-        box.show_all()
-        return box
+
+    def _on_group_toggle(self, _button, group_key: str) -> None:
+        if group_key in self._collapsed_groups:
+            self._collapsed_groups.discard(group_key)
+        else:
+            self._collapsed_groups.add(group_key)
+        self._listbox.invalidate_filter()
+        for child in self._listbox.get_children():
+            if getattr(child, "ccnav_is_header", False) and child.ccnav_group == group_key:
+                self._update_group_header_row(child)
+                break
 
     def _on_sort_mode_changed(self, combo: Gtk.ComboBoxText) -> None:
         mode = combo.get_active_id()
         if not mode or mode == self._settings.sort_mode:
             return
         self._commit_settings(config.with_updates(self._settings, sort_mode=mode))
-        # The sort/header funcs read the new mode; re-sort and re-header the rows.
+        # Add/remove group header rows for the new mode, then re-sort, filter and
+        # re-header. Derive the current rows from the live session widgets.
+        rows = [c.ccnav_row for c in self._listbox.get_children()
+                if not getattr(c, "ccnav_is_header", False)]
+        self._reconcile_group_headers(rows)
         self._listbox.invalidate_sort()
+        self._listbox.invalidate_filter()
         self._listbox.invalidate_headers()
 
     def _update_row(self, list_row: Gtk.ListBoxRow, row: model.Row) -> None:

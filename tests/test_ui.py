@@ -368,6 +368,8 @@ class NavigatorWindowTest(unittest.TestCase):
 
     def _row_by_id(self, window, session_id):
         for c in window._listbox.get_children():
+            if getattr(c, "ccnav_is_header", False):
+                continue
             if c.ccnav_row.session_id == session_id:
                 return c
         return None
@@ -425,8 +427,15 @@ class NavigatorWindowTest(unittest.TestCase):
             window.destroy()
 
     def _display_ids(self, window):
-        n = len(window._listbox.get_children())
-        return [window._listbox.get_row_at_index(i).ccnav_row.session_id for i in range(n)]
+        out, i = [], 0
+        while True:
+            r = window._listbox.get_row_at_index(i)
+            if r is None:
+                break
+            if not getattr(r, "ccnav_is_header", False):  # skip group header rows
+                out.append(r.ccnav_row.session_id)
+            i += 1
+        return out
 
     def test_a_row_that_becomes_waiting_jumps_above_working_rows(self):
         # The reconcile must keep the (waiting, -updated_at) priority sort live:
@@ -494,7 +503,7 @@ class NavigatorWindowTest(unittest.TestCase):
                 row(session_id="a1", cwd="/p/alpha",
                     state=hookstate.WAITING, reason="permission_prompt"),
                 row(session_id="a2", cwd="/p/alpha", state=hookstate.WORKING)])
-            header = window._make_group_header("/p/alpha")
+            header = window._build_group_header_row("/p/alpha")
             texts = " ".join(l.get_text() for l in self._widgets_of_type(header, Gtk.Label))
             self.assertIn("alpha", texts)     # project name (last path segment)
             self.assertIn("/p/alpha", texts)  # project path
@@ -510,12 +519,74 @@ class NavigatorWindowTest(unittest.TestCase):
             settings=config.with_updates(config.Settings(), sort_mode="group"))
         try:
             window.set_rows([row(session_id="x", cwd="/p/pr\noj")])
-            for lbl in self._widgets_of_type(window._make_group_header("/p/pr\noj"), Gtk.Label):
+            for lbl in self._widgets_of_type(window._build_group_header_row("/p/pr\noj"), Gtk.Label):
                 self.assertNotIn("\n", lbl.get_text())  # name + path both single-line
             window.set_rows([row(session_id="y", cwd="")])
-            blank = self._widgets_of_type(window._make_group_header(""), Gtk.Label)
+            blank = self._widgets_of_type(window._build_group_header_row(""), Gtk.Label)
             self.assertEqual(len(blank), 2)  # "~" name + counts; no empty path line
         finally:
+            window.destroy()
+
+    def test_group_mode_inserts_a_header_row_per_group(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x"), row(session_id="b", cwd="/p/y")])
+            groups = {c.ccnav_group for c in window._listbox.get_children()
+                      if getattr(c, "ccnav_is_header", False)}
+            self.assertEqual(groups, {"/p/x", "/p/y"})
+        finally:
+            window.destroy()
+
+    def test_status_mode_has_no_header_rows(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x")])
+            self.assertFalse(any(getattr(c, "ccnav_is_header", False)
+                                 for c in window._listbox.get_children()))
+        finally:
+            window.destroy()
+
+    def test_collapsing_a_group_filters_its_sessions_but_keeps_the_header(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x"), row(session_id="b", cwd="/p/y")])
+            a = self._row_by_id(window, "a")
+            self.assertTrue(window._filter_row(a))          # visible before collapse
+            window._on_group_toggle(None, "/p/x")           # collapse group /p/x
+            self.assertFalse(window._filter_row(a))         # its session now filtered out
+            groups = {c.ccnav_group for c in window._listbox.get_children()
+                      if getattr(c, "ccnav_is_header", False)}
+            self.assertIn("/p/x", groups)                   # header row survives collapse
+            window._on_group_toggle(None, "/p/x")           # expand again
+            self.assertTrue(window._filter_row(a))
+        finally:
+            window.destroy()
+
+    def test_switching_to_status_mode_removes_group_header_rows(self):
+        import tempfile, pathlib
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        orig = config.config_path
+        config.config_path = lambda: pathlib.Path(tmp.name) / "c.json"
+        try:
+            window.set_rows([row(session_id="a", cwd="/p/x")])
+            self.assertTrue(any(getattr(c, "ccnav_is_header", False)
+                                for c in window._listbox.get_children()))
+            window._sort_combo.set_active_id("status")  # -> group headers removed
+            self.assertFalse(any(getattr(c, "ccnav_is_header", False)
+                                 for c in window._listbox.get_children()))
+        finally:
+            config.config_path = orig
             window.destroy()
 
     def test_status_header_shows_the_section_title_and_count(self):
