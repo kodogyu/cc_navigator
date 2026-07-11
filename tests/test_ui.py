@@ -489,6 +489,21 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_group_header_flattens_name_and_omits_empty_path(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="x", cwd="/p/pr\noj")])
+            for lbl in self._widgets_of_type(window._make_group_header("/p/pr\noj"), Gtk.Label):
+                self.assertNotIn("\n", lbl.get_text())  # name + path both single-line
+            window.set_rows([row(session_id="y", cwd="")])
+            blank = self._widgets_of_type(window._make_group_header(""), Gtk.Label)
+            self.assertEqual(len(blank), 2)  # "~" name + counts; no empty path line
+        finally:
+            window.destroy()
+
     def test_status_header_shows_the_section_title_and_count(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:

@@ -944,13 +944,17 @@ class NavigatorWindow(Gtk.Window):
             Gtk.Image.new_from_icon_name("folder-symbolic", Gtk.IconSize.MENU), False, False, 0)
         names = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         name = Gtk.Label(xalign=0.0)
-        name.set_markup("<b>%s</b>" % GLib.markup_escape_text(model.group_label(group_key)))
-        path = Gtk.Label(xalign=0.0)
-        path.set_markup('<small><span foreground="#77767b">%s</span></small>'
-                        % GLib.markup_escape_text(_oneline(group_key)))
-        path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        # _oneline for the same reason every other free-text label uses it: an
+        # older/hand-edited cwd could carry a newline or control char.
+        name.set_markup("<b>%s</b>"
+                        % GLib.markup_escape_text(_oneline(model.group_label(group_key))))
         names.pack_start(name, False, False, 0)
-        names.pack_start(path, False, False, 0)
+        if group_key:  # a blank cwd shows just "~"; no empty path line under it
+            path = Gtk.Label(xalign=0.0)
+            path.set_markup('<small><span foreground="#77767b">%s</span></small>'
+                            % GLib.markup_escape_text(_oneline(group_key)))
+            path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            names.pack_start(path, False, False, 0)
         box.pack_start(names, True, True, 0)
         badges = Gtk.Label()
         badges.set_markup(
