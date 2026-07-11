@@ -252,6 +252,30 @@ def _row_signature(row: model.Row):
 # Drag target for manual-mode row reordering (within this app only).
 _DRAG_TARGETS = [Gtk.TargetEntry.new("CCNAV_SESSION", Gtk.TargetFlags.SAME_APP, 0)]
 
+# Docked-bar dimensions: a thin strip pinned across one screen edge.
+_DOCK_THICK = 44    # thickness perpendicular to the edge
+_DOCK_LENGTH = 220  # extent along the edge
+
+
+def _dock_rect(edge, geo, along=None):
+    """Geometry of the docked bar for `edge` within monitor rect `geo`.
+
+    Pure so the placement math is testable without a real window. The bar is
+    pinned flush to the edge; `along` is the free coordinate ALONG the edge (x
+    for top/bottom, y for left/right) and is clamped to stay on the monitor.
+    When `along` is None the bar is centred on the edge. Returns (x, y, w, h)."""
+    if edge in ("left", "right"):
+        w, h = _DOCK_THICK, min(geo.height, _DOCK_LENGTH)
+        x = geo.x if edge == "left" else geo.x + geo.width - w
+        lo, hi = geo.y, geo.y + geo.height - h
+        y = geo.y + (geo.height - h) // 2 if along is None else along
+        return x, max(lo, min(hi, y)), w, h
+    w, h = min(geo.width, _DOCK_LENGTH), _DOCK_THICK
+    y = geo.y if edge == "top" else geo.y + geo.height - h
+    lo, hi = geo.x, geo.x + geo.width - w
+    x = geo.x + (geo.width - w) // 2 if along is None else along
+    return max(lo, min(hi, x)), y, w, h
+
 
 class NavigatorWindow(Gtk.Window):
     def __init__(
@@ -362,6 +386,19 @@ class NavigatorWindow(Gtk.Window):
             Gtk.StyleContext.add_provider_for_screen(
                 screen, self._css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
+            # While docked we add the "docked" class; zero the client-side
+            # decoration so the bar sits FLUSH against the screen edge. The CSD
+            # shadow reserves an (asymmetric, bottom/side-heavy) margin around the
+            # window, which is what left it inset from the left/right/bottom edges.
+            dock_css = Gtk.CssProvider()
+            dock_css.load_from_data(
+                b"window.ccnav.docked decoration,"
+                b" window.ccnav.docked.background {"
+                b" margin: 0; padding: 0; box-shadow: none; border-radius: 0;"
+                b" border-width: 0; }")
+            Gtk.StyleContext.add_provider_for_screen(
+                screen, dock_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1
+            )
 
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
@@ -429,6 +466,7 @@ class NavigatorWindow(Gtk.Window):
         # bar pinned to a screen edge; the detach button swaps back.
         self._docked_edge = None
         self._pre_dock_pos = None
+        self._dock_geo = None  # monitor rect of the current dock, for edge-sliding
         self._dock_bar = self._build_dock_bar()
         self._stack = Gtk.Stack()
         self._stack.set_hhomogeneous(False)
@@ -575,14 +613,31 @@ class NavigatorWindow(Gtk.Window):
         self._dock_icon = (Gtk.Image.new_from_pixbuf(icon_pixbuf)
                            if icon_pixbuf is not None else Gtk.Image())
         self._dock_count = Gtk.Label()
+        # The icon+count area doubles as a drag handle: while docked the window has
+        # no titlebar, so grabbing here slides the bar ALONG its edge (a docked bar
+        # can only move on the one free axis). An EventBox gives it an input window.
+        drag_area = Gtk.EventBox()
+        drag_area.set_tooltip_text("드래그해서 가장자리를 따라 이동")
+        drag_inner = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        drag_inner.pack_start(self._dock_icon, False, False, 0)
+        drag_inner.pack_start(self._dock_count, False, False, 0)
+        drag_area.add(drag_inner)
+        drag_area.add_events(Gdk.EventMask.BUTTON_PRESS_MASK
+                             | Gdk.EventMask.BUTTON_RELEASE_MASK
+                             | Gdk.EventMask.POINTER_MOTION_MASK
+                             | Gdk.EventMask.BUTTON1_MOTION_MASK)
+        drag_area.connect("button-press-event", self._on_dock_drag_begin)
+        drag_area.connect("motion-notify-event", self._on_dock_drag_motion)
+        drag_area.connect("button-release-event", self._on_dock_drag_end)
+        self._dock_drag_inner = drag_inner
+        self._dock_drag = None  # (start pointer-root, start along) while dragging
         detach = Gtk.Button()
         detach.set_relief(Gtk.ReliefStyle.NONE)
         detach.add(Gtk.Image.new_from_icon_name("view-restore-symbolic", Gtk.IconSize.BUTTON))
         detach.set_tooltip_text("떼기 (detach)")
         detach.connect("clicked", lambda _b: self._undock())
         self._dock_detach = detach
-        bar.pack_start(self._dock_icon, False, False, 0)
-        bar.pack_start(self._dock_count, False, False, 0)
+        bar.pack_start(drag_area, True, True, 0)
         bar.pack_start(detach, False, False, 0)
         # Show the bar's children now, then hide the bar itself and mark it
         # no-show-all: the children are ready to render the instant _dock_to_edge
@@ -641,9 +696,11 @@ class NavigatorWindow(Gtk.Window):
         if self._docked_edge is None:  # remember where to return on detach
             self._pre_dock_pos = self.get_position()
         self._docked_edge = edge
-        self._dock_bar.set_orientation(
-            Gtk.Orientation.VERTICAL if edge in ("left", "right")
-            else Gtk.Orientation.HORIZONTAL)
+        orientation = (Gtk.Orientation.VERTICAL if edge in ("left", "right")
+                       else Gtk.Orientation.HORIZONTAL)
+        self._dock_bar.set_orientation(orientation)
+        self._dock_drag_inner.set_orientation(orientation)  # icon over count when vertical
+        self.get_style_context().add_class("docked")  # zero the CSD shadow -> flush
         self._update_dock_count()
         # Reveal the bar before switching: GtkStack refuses to switch to a hidden
         # child, and the bar is kept hidden while undocked (see _build_dock_bar).
@@ -660,6 +717,8 @@ class NavigatorWindow(Gtk.Window):
         if self._docked_edge is None:
             return
         self._docked_edge = None
+        self._dock_drag = None
+        self.get_style_context().remove_class("docked")  # restore the normal frame
         # A collapse before docking hid _content, and GtkStack refuses to switch
         # to a HIDDEN child -- so restore the full view's visibility and clear any
         # collapsed state BEFORE the switch, or the stack stays stuck on the bar.
@@ -677,22 +736,14 @@ class NavigatorWindow(Gtk.Window):
         else:
             self._apply_geometry(self._settings)
 
-    def _resize_and_position_dock(self, edge: str) -> None:
-        thick = 44    # the minimal strip thickness
-        length = 220  # extent along the edge
+    def _resize_and_position_dock(self, edge: str, along=None) -> None:
         display = Gdk.Display.get_default()
         monitor = (display.get_primary_monitor() or display.get_monitor(0)) if display else None
         if monitor is None:
             return
         geo = monitor.get_geometry()
-        if edge in ("left", "right"):
-            w, h = thick, min(geo.height, length)
-            y = geo.y + (geo.height - h) // 2
-            x = geo.x if edge == "left" else geo.x + geo.width - w
-        else:
-            w, h = min(geo.width, length), thick
-            x = geo.x + (geo.width - w) // 2
-            y = geo.y if edge == "top" else geo.y + geo.height - h
+        self._dock_geo = geo  # remembered so a drag can re-pin along this edge
+        x, y, w, h = _dock_rect(edge, geo, along)
         self.resize(w, h)  # keep GTK's requested size in sync
         # Move+resize the X window atomically: for the right/bottom edges the
         # position depends on the NEW size, so moving while the window is still
@@ -702,6 +753,49 @@ class NavigatorWindow(Gtk.Window):
             gdk_window.move_resize(x, y, w, h)
         else:
             self.move(x, y)
+
+    # -- sliding a docked bar along its edge ---------------------------------
+
+    def _on_dock_drag_begin(self, _widget, event) -> bool:
+        """Start sliding the docked bar: record where the pointer and the bar
+        began. A pointer grab keeps motion events coming even when the pointer
+        leaves the thin bar mid-drag."""
+        if event.button != 1 or self._docked_edge is None:
+            return False
+        x, y = self.get_position()
+        along = y if self._docked_edge in ("left", "right") else x
+        root = event.y_root if self._docked_edge in ("left", "right") else event.x_root
+        self._dock_drag = (root, along)
+        seat = getattr(event, "get_seat", lambda: None)() or (
+            Gdk.Display.get_default().get_default_seat() if Gdk.Display.get_default() else None)
+        gdk_window = _widget.get_window()
+        if seat is not None and gdk_window is not None:
+            seat.grab(gdk_window, Gdk.SeatCapabilities.ALL_POINTING, False, None, event, None)
+        return False
+
+    def _on_dock_drag_motion(self, _widget, event) -> bool:
+        if self._dock_drag is None or self._docked_edge is None:
+            return False
+        geo = getattr(self, "_dock_geo", None)
+        if geo is None:
+            return False
+        start_root, start_along = self._dock_drag
+        vertical = self._docked_edge in ("left", "right")
+        root = event.y_root if vertical else event.x_root
+        along = int(start_along + (root - start_root))
+        x, y, _w, _h = _dock_rect(self._docked_edge, geo, along)
+        self.move(x, y)
+        return True
+
+    def _on_dock_drag_end(self, _widget, event) -> bool:
+        if self._dock_drag is None:
+            return False
+        self._dock_drag = None
+        seat = getattr(event, "get_seat", lambda: None)() or (
+            Gdk.Display.get_default().get_default_seat() if Gdk.Display.get_default() else None)
+        if seat is not None:
+            seat.ungrab()
+        return True
 
     def _update_dock_count(self) -> None:
         waiting = self._status_counts.get(model.INPUT_NEEDED, 0)
@@ -1521,8 +1615,9 @@ class NavigatorWindow(Gtk.Window):
         indicator = _build_indicator(kind)
         header.pack_start(indicator, False, False, 0)
 
-        # Drag handle (visible only in group mode). A GtkListBoxRow is activatable
-        # and swallows button drags, so the drag SOURCE is this grip, not the row.
+        # Drag handle on the RIGHT (visible only in group mode). A GtkListBoxRow is
+        # activatable and swallows button drags, so the drag SOURCE is this grip,
+        # not the row.
         grip = Gtk.EventBox()
         grip_label = Gtk.Label()
         grip_label.set_markup('<span foreground="#77767b">⠿</span>')
@@ -1536,7 +1631,7 @@ class NavigatorWindow(Gtk.Window):
         grip_label.show()
         grip.set_no_show_all(True)
         grip.set_visible(self._settings.sort_mode == "group")
-        header.pack_start(grip, False, False, 0)
+        header.pack_end(grip, False, False, 0)
         list_row.ccnav_grip = grip  # type: ignore[attr-defined]
 
         title = Gtk.Label(xalign=0.0)

@@ -128,6 +128,37 @@ class AppIconTest(unittest.TestCase):
         self.assertLessEqual(pb.get_height(), 18)
 
 
+class _Geo:
+    def __init__(self, x=0, y=0, width=1920, height=1080):
+        self.x, self.y, self.width, self.height = x, y, width, height
+
+
+class DockRectTest(unittest.TestCase):
+    """The docked-bar geometry is pure, so its flush-to-edge placement and the
+    edge-sliding clamp are testable without a real window."""
+
+    def test_each_edge_sits_flush_and_centred(self):
+        g = _Geo()
+        self.assertEqual(ui._dock_rect("top", g), (850, 0, 220, 44))
+        self.assertEqual(ui._dock_rect("bottom", g), (850, 1080 - 44, 220, 44))
+        self.assertEqual(ui._dock_rect("left", g), (0, 430, 44, 220))
+        self.assertEqual(ui._dock_rect("right", g), (1920 - 44, 430, 44, 220))
+
+    def test_a_monitor_offset_is_respected(self):
+        g = _Geo(x=100, y=50)
+        x, y, w, h = ui._dock_rect("top", g)
+        self.assertEqual(y, 50)             # flush to THIS monitor's top
+        self.assertEqual(x, 100 + (1920 - 220) // 2)
+
+    def test_sliding_along_the_edge_is_clamped_on_screen(self):
+        g = _Geo()
+        # Slide a top bar far right / far left: x clamps, y stays pinned to the top.
+        self.assertEqual(ui._dock_rect("top", g, 5000), (1920 - 220, 0, 220, 44))
+        self.assertEqual(ui._dock_rect("top", g, -100), (0, 0, 220, 44))
+        # A left bar slides on y only, clamped to the bottom.
+        self.assertEqual(ui._dock_rect("left", g, 9999), (0, 1080 - 220, 44, 220))
+
+
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
 class NavigatorWindowTest(unittest.TestCase):
     def test_constructs_and_accepts_rows(self):
@@ -699,6 +730,69 @@ class NavigatorWindowTest(unittest.TestCase):
             window._dock_to_edge("nowhere")
             self.assertIsNone(window._docked_edge)
             self.assertEqual(window._stack.get_visible_child_name(), "full")
+        finally:
+            window.destroy()
+
+    def test_docking_adds_the_flush_style_class_and_undocking_removes_it(self):
+        # The "docked" class zeroes the CSD shadow so the bar sits flush; it must
+        # only be present while docked (else the floating panel loses its frame).
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            self.assertFalse(window.get_style_context().has_class("docked"))
+            window._dock_to_edge("bottom")
+            self.assertTrue(window.get_style_context().has_class("docked"))
+            self.assertIsNotNone(window._dock_geo)
+            window._undock()
+            self.assertFalse(window.get_style_context().has_class("docked"))
+        finally:
+            window.destroy()
+
+    def test_dragging_a_docked_bar_slides_along_the_edge_and_pins_the_other_axis(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window._dock_to_edge("right")
+            moves = []
+            window.move = lambda x, y: moves.append((x, y))  # capture, no real WM move
+            window._dock_geo = _Geo()
+            window._dock_drag = (500, 430)  # pointer y_root started at 500, bar y at 430
+
+            class Ev:  # a drag 60px down
+                button, x_root, y_root = 1, 0, 560
+
+                def get_seat(self):
+                    return None
+
+            self.assertTrue(window._on_dock_drag_motion(window._dock_drag_inner, Ev()))
+            # x stays pinned to the right edge; y slides by the drag delta.
+            self.assertEqual(moves, [(1920 - 44, 490)])
+        finally:
+            window.destroy()
+
+    def test_a_docked_drag_motion_is_a_noop_when_no_drag_is_in_progress(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window._dock_to_edge("top")
+            window._dock_drag = None  # not dragging
+
+            class Ev:
+                button, x_root, y_root = 1, 10, 10
+
+                def get_seat(self):
+                    return None
+
+            self.assertFalse(window._on_dock_drag_motion(window._dock_drag_inner, Ev()))
+        finally:
+            window.destroy()
+
+    def test_the_drag_grip_is_the_last_widget_in_the_row_header(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a")])
+            child = self._row_by_id(window, "a")
+            self.assertIs(child.ccnav_header.get_children()[-1], child.ccnav_grip)
         finally:
             window.destroy()
 
