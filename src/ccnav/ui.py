@@ -16,7 +16,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, model, wiring  # noqa: E402
+from . import config, hookstate, model, wiring  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -103,7 +103,7 @@ def dot_state(row: model.Row) -> str:
     """
     if not row.waiting:
         return "working"
-    if row.reason == "idle":
+    if row.reason == hookstate.STOP_IDLE:
         return "reported"
     return "input"
 
@@ -153,7 +153,8 @@ class NavigatorWindow(Gtk.Window):
         # the WM default, which is the price of putting our own button up there.
         header = Gtk.HeaderBar()
         header.set_show_close_button(True)
-        header.set_title("cc_navigator")
+        # No header.set_title(): the custom title below replaces the built-in
+        # title label. The window/taskbar title comes from super().__init__.
         # Put the app icon to the LEFT of the name via a custom title box (the
         # default HeaderBar title is centred text with no room for an icon).
         title_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)

@@ -48,7 +48,16 @@ class ClassifyTest(unittest.TestCase):
 
     def test_stop_is_idle_waiting(self):
         result = hookstate.classify({"hook_event_name": "Stop"})
-        self.assertEqual(result, (hookstate.WAITING, "idle"))
+        self.assertEqual(result, (hookstate.WAITING, hookstate.STOP_IDLE))
+
+    def test_notification_cannot_shadow_the_stop_idle_reason(self):
+        # A Notification typed "idle" must not read as Stop's reserved reason
+        # (which the UI paints green as "reported, not blocking") -- a
+        # notification always means "wants attention".
+        result = hookstate.classify(
+            {"hook_event_name": "Notification", "notification_type": hookstate.STOP_IDLE})
+        self.assertEqual(result, (hookstate.WAITING, "notification"))
+        self.assertNotEqual(result[1], hookstate.STOP_IDLE)
 
     def test_subagent_stop_is_ignored(self):
         self.assertIsNone(hookstate.classify({"hook_event_name": "SubagentStop"}))

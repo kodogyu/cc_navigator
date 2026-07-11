@@ -342,6 +342,38 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def _dot_markup(self, child):
+        for lbl in self._widgets_of_type(child, Gtk.Label):
+            if "●" in lbl.get_label():
+                return lbl.get_label()
+        return ""
+
+    def test_reported_dot_is_green_and_input_dot_is_red(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([
+                row(state=hookstate.WAITING, reason="idle", session_id="a"),
+                row(state=hookstate.WAITING, reason="permission_prompt", session_id="b")])
+            a, b = window._listbox.get_children()
+            self.assertIn("#2ec27e", self._dot_markup(a))  # reported/idle -> green
+            self.assertIn("#e01b24", self._dot_markup(b))  # blocking -> red
+        finally:
+            window.destroy()
+
+    def test_missing_icon_degrades_to_a_name_only_title(self):
+        # A missing/corrupt asset must not stop the panel opening; the header
+        # builds with just the name, no icon, no crash.
+        from unittest import mock
+        with mock.patch("ccnav.ui._app_icon_pixbuf", return_value=None):
+            window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            title = window.get_titlebar().get_custom_title()
+            kinds = [type(c).__name__ for c in title.get_children()]
+            self.assertNotIn("Image", kinds)  # no icon widget
+            self.assertIn("Label", kinds)      # name still shown
+        finally:
+            window.destroy()
+
     @staticmethod
     def _click(window, child):
         # Reproduce a real single click's signal order: button-press captures the
