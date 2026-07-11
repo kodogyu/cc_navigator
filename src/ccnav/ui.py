@@ -122,12 +122,42 @@ def front_kind(row: model.Row) -> str:
     return base
 
 
-# The Sort-by-Status section titles, keyed by model's section constants.
+# UI-level 4th status bucket. model.status_key stays a pure, ack-free 3-way split
+# (input / reported / working); a 'reported' (green) session the user has clicked to
+# acknowledge reads as 'acked' -- the green check -- and that split lives here, in
+# the UI, where the _acknowledged set does.
+_ACKED_SECTION = "acked"
+
+# The Sort-by-Status section titles, keyed by section constant.
 _STATUS_LABELS = {
     model.INPUT_NEEDED: "입력이 필요한 세션",
-    model.REPORTED: "보고 완료 (추가 입력 불필요)",
     model.WORKING_SECTION: "작업 중",
+    model.REPORTED: "보고 완료 (추가 입력 불필요)",
+    _ACKED_SECTION: "확인 완료",
 }
+
+# Status-mode section display order: input > working > reported (unacked) > acked.
+# (model.STATUS_SECTIONS is the model's ack-free order; the UI owns this 4-way one.)
+_STATUS_SECTION_ORDER = (model.INPUT_NEEDED, model.WORKING_SECTION,
+                         model.REPORTED, _ACKED_SECTION)
+
+
+def _status_rank(bucket: str) -> int:
+    try:
+        return _STATUS_SECTION_ORDER.index(bucket)
+    except ValueError:
+        return len(_STATUS_SECTION_ORDER)
+
+
+# Header rows come in two kinds -- one per project group (Group mode) and one per
+# status section (Status mode). Both carry ccnav_is_header; they are told apart by
+# which key they carry, so each reconcile pass touches only its own kind.
+def _is_group_header(widget) -> bool:
+    return getattr(widget, "ccnav_is_header", False) and hasattr(widget, "ccnav_group")
+
+
+def _is_status_header(widget) -> bool:
+    return getattr(widget, "ccnav_is_header", False) and hasattr(widget, "ccnav_section")
 
 
 # The "working" indicator: two curved arrows (a reload/refresh glyph) that spin.
@@ -304,13 +334,13 @@ def _meta_markup(row: model.Row) -> str:
 
 def _dot_markup(kind: str, acknowledged: bool = False) -> str:
     """Markup for a status dot. The green 'reported' dot can be toggled to a
-    hollow outline once the user has acknowledged (clicked) it -- a filled dot
-    still wants a glance, a hollow box has been seen. Only 'reported' is ever
+    check mark once the user has acknowledged (clicked) it -- a filled dot
+    still wants a glance, a check mark has been seen. Only 'reported' is ever
     acknowledged. 'orchestrating' is the calm blue dot shown for the MAIN agent
     while its subagents run (it is parked/delegating, so it does not spin -- only
     the subagent layer behind it does)."""
     if kind == "reported":
-        return '<span foreground="#2ec27e">%s</span>' % ("▢" if acknowledged else "●")
+        return '<span foreground="#2ec27e">%s</span>' % ("✓" if acknowledged else "●")
     if kind == "orchestrating":
         return '<span foreground="#3584e4">●</span>'
     return '<span foreground="#e01b24">●</span>'
@@ -367,8 +397,13 @@ def _row_signature(row: model.Row):
             row.subagent_ids)
 
 
-# Drag target for manual-mode row reordering (within this app only).
-_DRAG_TARGETS = [Gtk.TargetEntry.new("CCNAV_SESSION", Gtk.TargetFlags.SAME_APP, 0)]
+# Drag targets (within this app only). A dragged SESSION reorders a row / moves it
+# into a group; a dragged GROUP header reorders whole groups. The info id (last
+# arg) is how the drop receiver tells the two kinds of payload apart.
+_DRAG_INFO_SESSION = 0
+_DRAG_INFO_GROUP = 1
+_DRAG_TARGETS = [Gtk.TargetEntry.new("CCNAV_SESSION", Gtk.TargetFlags.SAME_APP, _DRAG_INFO_SESSION)]
+_GROUP_DRAG_TARGETS = [Gtk.TargetEntry.new("CCNAV_GROUP", Gtk.TargetFlags.SAME_APP, _DRAG_INFO_GROUP)]
 
 # Docked-bar dimensions: a thin strip pinned across one screen edge.
 _DOCK_THICK = 44    # thickness perpendicular to the edge
@@ -423,6 +458,18 @@ def _rounded_region(w, h, radius, corners):
     return region
 
 
+def _dock_area(monitor):
+    """The rect to dock within: the monitor's WORK area, which excludes system
+    panels/docks that reserve edge space -- so a docked bar sits BESIDE such a
+    panel rather than under it. Falls back to the full geometry when the work area
+    is unavailable or degenerate (some odd multi-head / compositor setups)."""
+    geo = monitor.get_geometry()
+    workarea = monitor.get_workarea()
+    if workarea is None or workarea.width <= 0 or workarea.height <= 0:
+        return geo
+    return workarea
+
+
 def _dock_rect(edge, geo, along=None):
     """Geometry of the docked bar for `edge` within monitor rect `geo`.
 
@@ -459,11 +506,14 @@ class NavigatorWindow(Gtk.Window):
         # Section metadata for the two list views, recomputed on each set_rows
         # and read by the sort/header funcs. Initialised empty so those funcs are
         # safe on the very first insert (before the first recompute).
-        self._group_rank = {}     # group_key -> display rank (recent groups first)
+        self._group_rank = {}     # group_key -> display rank (index into _group_order)
+        self._group_order = []    # group_keys in display order: STABLE (appearance
+                                  # order, frozen); manual header-drag reorders it
         self._group_counts = {}   # group_key -> {input, reported, working}
         self._status_counts = {}  # status section -> count
         self._collapsed_groups = set()  # group keys collapsed in Group mode
-        self._acknowledged = set()  # session_ids whose green dot is shown hollow
+        self._collapsed_status = set()  # status buckets collapsed in Status mode
+        self._acknowledged = set()  # session_ids whose green dot is shown as a check
         self._manual_order = []         # session_ids in the user's manual order
         self._group_override = {}       # session_id -> group_key it was dragged into
         self._group_names = {}          # group_key -> user-chosen display name
@@ -646,6 +696,7 @@ class NavigatorWindow(Gtk.Window):
         self._pre_dock_pos = None
         self._dock_geo = None  # monitor rect of the current dock, for edge-sliding
         self._dock_resnap_source = 0  # pending one-shot re-snap timeout, if any
+        self._undock_resize_source = 0  # pending one-shot restore-size timeout, if any
         self._dock_bar = self._build_dock_bar()
         self._stack = Gtk.Stack()
         self._stack.set_hhomogeneous(False)
@@ -670,6 +721,11 @@ class NavigatorWindow(Gtk.Window):
         self.connect("size-allocate", self._on_size_allocate)
         # No destroy -> Gtk.main_quit here: app.main() owns the main loop.
 
+        # Gates the one geometry-applying path in apply_settings: it runs on the
+        # first paint and whenever a geometry field (size/corner) changes, but NOT
+        # for a bare sort-mode/opacity/font change -- those must leave the window
+        # wherever the user last dragged it.
+        self._geometry_applied = False
         # Apply the saved settings once everything exists: this sets size,
         # position, keep-above/sticky and font from one place, so the very
         # first paint already reflects the user's config rather than defaults.
@@ -678,6 +734,7 @@ class NavigatorWindow(Gtk.Window):
     def apply_settings(self, settings: "config.Settings") -> None:
         """Make the live window match `settings`. Idempotent, so it serves both
         the first paint and every later change from the settings dialog."""
+        old = self._settings
         self._settings = settings
 
         self.set_keep_above(settings.keep_above)
@@ -693,12 +750,20 @@ class NavigatorWindow(Gtk.Window):
         # While docked the window's size/position belong to attach mode; only a
         # detach may move it. Opacity and the CSS tint still apply either way.
         if self._docked_edge is None:
-            # Honour a live collapse: applying a settings change while collapsed
-            # must not re-grow the frame over the still-hidden body (which would
-            # leave a tall, empty titlebar while the toggle still reads "collapsed").
-            height = 1 if self._collapse_button.get_active() else settings.height
-            self.resize(settings.width, height)
-            self._apply_geometry(settings)
+            # Only resize/reposition when a geometry field (size or corner) actually
+            # changed, or on the first apply. A non-geometry change -- sort mode,
+            # opacity, font, colour, keep-above -- must NOT yank the window back to
+            # its corner: the user may have dragged it elsewhere.
+            geom = (settings.width, settings.height, settings.corner)
+            if (not self._geometry_applied
+                    or (old.width, old.height, old.corner) != geom):
+                # Honour a live collapse: applying a settings change while collapsed
+                # must not re-grow the frame over the still-hidden body (which would
+                # leave a tall, empty titlebar while the toggle still reads "collapsed").
+                height = 1 if self._collapse_button.get_active() else settings.height
+                self.resize(settings.width, height)
+                self._apply_geometry(settings)
+                self._geometry_applied = True
         Gtk.Widget.set_opacity(self, settings.opacity)
         self._apply_css(settings)
 
@@ -906,6 +971,7 @@ class NavigatorWindow(Gtk.Window):
         # flush. One-shot; a prior pending re-snap is cancelled so rapid re-docks
         # don't stack sources.
         self._cancel_dock_resnap()
+        self._cancel_undock_resize()  # a detach's pending restore must not re-grow us
         self._dock_resnap_source = GLib.timeout_add(_DOCK_RESNAP_MS, self._resnap_dock, edge)
 
     def _cancel_dock_resnap(self) -> None:
@@ -954,19 +1020,58 @@ class NavigatorWindow(Gtk.Window):
         # dock-from-collapsed case where the attach popover already un-pressed the
         # button, which would otherwise leave the chevron stuck pointing down.
         # _docked_edge is already None, so set_collapsed's docked-guard lets it run.
-        self.set_collapsed(False)
-        self._header.show()  # restore the titlebar
+        self.set_collapsed(False)  # shows _content + resizes; the titlebar stays
         if self._pre_dock_pos is not None:
             self.move(*self._pre_dock_pos)
         else:
             self._apply_geometry(self._settings)
+        # The titlebar is restored on a delay, NOT here. Two things go wrong if it
+        # is shown now, while the window is still at the narrow dock size:
+        #  - showing the ~112px-min HeaderBar against a 44px-wide (left/right-dock)
+        #    window briefly allocates it a negative width (a size_allocate warning);
+        #  - showing it at all re-negotiates the window to its short natural height,
+        #    silently dropping set_collapsed's resize, so the panel restores ~150px
+        #    tall.
+        # Deferring the reveal until the window has widened back fixes both: the
+        # header lands at full width, and the height is re-asserted after its
+        # re-negotiation settles. (Same one-shot deferral the dock re-snap uses; a
+        # synchronous resize here is absorbed by the very negotiation we fight.)
+        self._cancel_undock_resize()
+        self._undock_resize_source = GLib.timeout_add(
+            _DOCK_RESNAP_MS, self._reveal_header_after_undock)
+
+    def _cancel_undock_resize(self) -> None:
+        if self._undock_resize_source:
+            GLib.source_remove(self._undock_resize_source)
+            self._undock_resize_source = 0
+
+    def _reveal_header_after_undock(self) -> bool:
+        self._undock_resize_source = 0  # this source is firing now
+        if self._docked_edge is not None:
+            return False  # re-docked meanwhile -- docking keeps the titlebar hidden
+        # The window has widened back to full size, so showing the header no longer
+        # allocates it against the narrow dock width (no negative-width frame).
+        self._header.show()
+        # Showing the header re-negotiated the window to its short natural height;
+        # re-assert the configured size once that settles (a later main-loop turn).
+        self._undock_resize_source = GLib.timeout_add(
+            _DOCK_RESNAP_MS, self._restore_size_after_undock)
+        return False  # one-shot
+
+    def _restore_size_after_undock(self) -> bool:
+        self._undock_resize_source = 0  # this source is firing now
+        # Skip if we've since re-docked or collapsed -- either owns the window
+        # size now, and re-growing would fight it.
+        if self._docked_edge is None and not self._collapse_button.get_active():
+            self.resize(self._settings.width, self._settings.height)
+        return False  # one-shot
 
     def _resize_and_position_dock(self, edge: str, along=None) -> None:
         display = Gdk.Display.get_default()
         monitor = (display.get_primary_monitor() or display.get_monitor(0)) if display else None
         if monitor is None:
             return
-        geo = monitor.get_geometry()
+        geo = _dock_area(monitor)  # work area: dock BESIDE system panels, not under
         self._dock_geo = geo  # remembered so a drag can re-pin along this edge
         x, y, w, h = _dock_rect(edge, geo, along)
         self.resize(w, h)  # keep GTK's requested size in sync
@@ -1268,6 +1373,15 @@ class NavigatorWindow(Gtk.Window):
         grid.attach(all_ws, 1, row, 1, 1)
         row += 1
 
+        notifications = Gtk.CheckButton(label="시스템 알림 ('내 차례'가 될 때)")
+        notifications.set_active(s.notifications)
+        notifications.set_tooltip_text(
+            "세션이 입력 대기·보고 완료로 바뀔 때 데스크톱 알림을 띄웁니다")
+        notifications.connect("toggled", lambda w: self._commit_settings(
+            config.with_updates(self._settings, notifications=w.get_active())))
+        grid.attach(notifications, 1, row, 1, 1)
+        row += 1
+
         from . import __version__
         # Bottom row: an update button + its status on the left, the version on
         # the right. Same version format as `cc-navigator --version` (app.main),
@@ -1435,6 +1549,7 @@ class NavigatorWindow(Gtk.Window):
         self._recompute_sections(rows)
         self._sync_manual_order(rows)
         self._reconcile_group_headers(rows)
+        self._reconcile_status_headers(rows)
         self._update_count_badge()
         self._update_dock_count()
         self._listbox.invalidate_sort()
@@ -1479,31 +1594,50 @@ class NavigatorWindow(Gtk.Window):
         else:
             self._group_override[session_id] = group_key
 
+    def _status_bucket(self, row: model.Row) -> str:
+        """The 4-way status split for the group-header count icons (and, in Status
+        mode, the sections): a 'reported' (green) session the user has acknowledged
+        reads as 'acked' (the check), else the row's plain status_key."""
+        key = model.status_key(row)
+        if key == model.REPORTED and row.session_id in self._acknowledged:
+            return _ACKED_SECTION
+        return key
+
     def _recompute_sections(self, rows: List[model.Row]) -> None:
-        """Tally per-section state from the current rows: counts for the headers
-        and a display rank for the groups (most-recently-active group first)."""
-        counts = {}         # group_key -> {input, reported, working}
+        """Tally per-section state from the current rows (counts for the headers)
+        and keep the group display order stable -- see the ordering note below."""
+        counts = {}         # group_key -> {input, working, reported, acked}
         status_counts = {}  # status section -> count
         recent = {}         # group_key -> newest updated_at in the group
         for row in rows:
             gk = self._group_of(row)
-            sk = model.status_key(row)
-            counts.setdefault(gk, {model.INPUT_NEEDED: 0, model.REPORTED: 0,
-                                   model.WORKING_SECTION: 0})[sk] += 1
-            status_counts[sk] = status_counts.get(sk, 0) + 1
+            bucket = self._status_bucket(row)  # 4-way: input/working/reported/acked
+            counts.setdefault(gk, {model.INPUT_NEEDED: 0, model.WORKING_SECTION: 0,
+                                   model.REPORTED: 0, _ACKED_SECTION: 0})[bucket] += 1
+            status_counts[bucket] = status_counts.get(bucket, 0) + 1
             recent[gk] = max(recent.get(gk, row.updated_at), row.updated_at)
         self._group_counts = counts
         self._status_counts = status_counts
-        # Ties broken by key so the order is stable across ticks with equal times.
-        order = sorted(recent, key=lambda k: (-recent[k], k))
-        self._group_rank = {k: i for i, k in enumerate(order)}
+        # Group order is STABLE, not recency-driven: a session's response bumps its
+        # updated_at but must never reshuffle the groups. Keep every still-present
+        # group in the slot it already holds, drop the gone, and append the
+        # newly-seen at the END -- a batch first appearing together is ordered
+        # most-recent-first once (so the initial view still leads with recent work)
+        # then frozen. Manual header-drag edits _group_order directly (_reorder_group).
+        present = set(recent)
+        self._group_order = [g for g in self._group_order if g in present]
+        known = set(self._group_order)
+        newcomers = sorted((g for g in present if g not in known),
+                           key=lambda g: (-recent[g], g))
+        self._group_order.extend(newcomers)
+        self._group_rank = {k: i for i, k in enumerate(self._group_order)}
 
     def _section_sort_key(self, row: model.Row):
         if self._settings.sort_mode == "group":
             # Group by rank, then the user's manual order within the group.
             rank = self._group_rank.get(self._group_of(row), 1 << 30)
             return (rank, self._manual_index(row.session_id))
-        rank = model.STATUS_SECTIONS.index(model.status_key(row))
+        rank = _status_rank(self._status_bucket(row))
         return (rank,) + tuple(model.sort_key(row))
 
     # -- manual order (Manual mode) ------------------------------------------
@@ -1544,6 +1678,26 @@ class NavigatorWindow(Gtk.Window):
         self._manual_order.insert(index, dragged_id)
         self._listbox.invalidate_sort()
 
+    def _reorder_group(self, dragged_key: str, target_key: str, after: bool = False) -> None:
+        """Move a whole group next to `target_key` in the stable group order --
+        before it, or after it when `after` (a drop on the lower half of the target
+        header). Rewrites _group_rank from the new order and re-sorts, so the group
+        and all its sessions move together. A no-op for a self-drop or an unknown
+        dragged key (the header is gone)."""
+        if dragged_key == target_key or dragged_key not in self._group_order:
+            return
+        self._group_order.remove(dragged_key)
+        try:
+            index = self._group_order.index(target_key)
+        except ValueError:
+            index = len(self._group_order)  # target gone: land at the end
+        else:
+            if after:
+                index += 1
+        self._group_order.insert(index, dragged_key)
+        self._group_rank = {k: i for i, k in enumerate(self._group_order)}
+        self._listbox.invalidate_sort()
+
     def _set_row_draggable(self, list_row: Gtk.ListBoxRow, on: bool) -> None:
         """Show the drag handle only in Group mode (the handle IS the drag
         source, so hiding it disables dragging)."""
@@ -1570,11 +1724,26 @@ class NavigatorWindow(Gtk.Window):
         self._reorder_session(dragged, target.session_id, after)
         self._regroup_now()
 
-    def _on_group_header_drag_received(self, header_row, _context, _x, _y, selection, _info, _time) -> None:
-        """Drop a session on a group header: it joins that group, at the end."""
+    def _on_group_grip_drag_get(self, _grip, _context, selection, _info, _time, header_row) -> None:
+        """The dragged payload for a group-header grip is the group's key."""
+        selection.set(selection.get_target(), 8, header_row.ccnav_group.encode("utf-8"))
+
+    def _on_group_header_drag_received(self, header_row, _context, _x, y, selection, info, _time) -> None:
+        """A drop on a group header. Two kinds, told apart by the target info id:
+        a GROUP payload (another header's grip) reorders whole groups; a SESSION
+        payload (a row's grip) moves that session into this group, at the end."""
         if self._settings.sort_mode != "group":
             return
         data = selection.get_data()
+        if info == _DRAG_INFO_GROUP:
+            # A group's key can be "" (the blank-cwd "~" group), so test for None,
+            # not falsiness -- b"" is a real key, not "no drop".
+            if data is None:
+                return
+            after = y > header_row.get_allocated_height() / 2
+            self._reorder_group(data.decode("utf-8", "replace"), header_row.ccnav_group, after)
+            self._regroup_now()
+            return
         if not data:
             return
         dragged = data.decode("utf-8", "replace")
@@ -1591,16 +1760,19 @@ class NavigatorWindow(Gtk.Window):
                 if not getattr(c, "ccnav_is_header", False)]
         self._recompute_sections(rows)
         self._reconcile_group_headers(rows)
+        self._reconcile_status_headers(rows)
         self._update_count_badge()
         self._listbox.invalidate_sort()
         self._listbox.invalidate_filter()
         self._listbox.invalidate_headers()
 
     def _on_auto_sort_clicked(self, _button) -> None:
-        """Re-group everything by directory and restore the automatic order:
-        clear the manual group moves and re-sort the manual order by (group by
-        directory, then priority)."""
+        """Re-group everything by directory and restore the automatic order: clear
+        the manual group moves, drop the manual GROUP order (so _recompute_sections
+        rebuilds it fresh), and re-sort the manual row order by (group by directory,
+        then priority)."""
         self._group_override.clear()
+        self._group_order = []  # forget manual group order -> default (appearance) again
         rows = [c.ccnav_row for c in self._listbox.get_children()
                 if not getattr(c, "ccnav_is_header", False)]
         ordered = sorted(rows, key=lambda r: (model.group_key(r),) + tuple(model.sort_key(r)))
@@ -1609,8 +1781,10 @@ class NavigatorWindow(Gtk.Window):
 
     def _row_sort_key(self, widget):
         if getattr(widget, "ccnav_is_header", False):
-            # A group header leads its group: same group rank, then ahead of its
+            # A header leads its section/group: same rank, then ahead of its
             # sessions (whose second key element is 0 or 1, both > -1).
+            if _is_status_header(widget):
+                return (_status_rank(widget.ccnav_section), -1)
             return (self._group_rank.get(widget.ccnav_group, 1 << 30), -1)
         return self._section_sort_key(widget.ccnav_row)
 
@@ -1621,44 +1795,109 @@ class NavigatorWindow(Gtk.Window):
         return -1 if ka < kb else (1 if ka > kb else 0)
 
     def _filter_row(self, widget) -> bool:
-        """Hide a session row iff its group is collapsed (Group mode only). Group
-        header rows are never hidden, so a collapsed group keeps its header."""
+        """Hide a session row iff its section/group is collapsed. Header rows are
+        never hidden, so a collapsed section/group keeps its header (and its
+        chevron to re-expand)."""
         if getattr(widget, "ccnav_is_header", False):
             return True
-        if self._settings.sort_mode != "group":
-            return True
-        return self._group_of(widget.ccnav_row) not in self._collapsed_groups
+        if self._settings.sort_mode == "group":
+            return self._group_of(widget.ccnav_row) not in self._collapsed_groups
+        return self._status_bucket(widget.ccnav_row) not in self._collapsed_status
 
-    def _header_func(self, row_widget, before_widget) -> None:
-        """Only Status mode draws section titles as GtkListBox headers (on the
-        first session of each section). Group mode uses header ROWS and Manual
-        mode has no sections, so every row's list-header is cleared there."""
-        if (self._settings.sort_mode != "status"
-                or getattr(row_widget, "ccnav_is_header", False)):
-            row_widget.set_header(None)
+    def _header_func(self, row_widget, _before_widget) -> None:
+        """Both modes draw their sections/groups as header ROWS now (so a fully
+        collapsed section keeps its chevron), so no GtkListBox list-headers are
+        used -- clear every row's list-header."""
+        row_widget.set_header(None)
+
+    # -- status section header rows (Status mode) ----------------------------
+
+    def _reconcile_status_headers(self, rows: List[model.Row]) -> None:
+        """Keep exactly one non-selectable header row per present status bucket in
+        Status mode (and none otherwise). Reconciled in place like the sessions, so
+        the listbox is never rebuilt."""
+        existing = {c.ccnav_section: c for c in self._listbox.get_children()
+                    if _is_status_header(c)}
+        if self._settings.sort_mode != "status":
+            for child in existing.values():
+                self._listbox.remove(child)
             return
-        this = model.status_key(row_widget.ccnav_row)
-        prev = (model.status_key(before_widget.ccnav_row)
-                if before_widget is not None
-                and not getattr(before_widget, "ccnav_is_header", False)
-                else None)
-        row_widget.set_header(None if this == prev else self._make_status_header(this))
+        wanted = {self._status_bucket(r) for r in rows}
+        # Forget the collapsed state of a section that no longer has any sessions,
+        # so it does not silently reappear collapsed later.
+        self._collapsed_status &= wanted
+        for bucket, child in list(existing.items()):
+            if bucket not in wanted:
+                self._listbox.remove(child)
+                del existing[bucket]
+        for bucket in wanted:
+            if bucket in existing:
+                self._update_status_header_row(existing[bucket])
+            else:
+                header_row = self._build_status_header_row(bucket)
+                self._listbox.insert(header_row, -1)
+                header_row.show_all()
 
-    def _make_status_header(self, section: str) -> Gtk.Widget:
-        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+    def _build_status_header_row(self, bucket: str) -> Gtk.ListBoxRow:
+        header_row = Gtk.ListBoxRow()
+        header_row.ccnav_is_header = True   # type: ignore[attr-defined]
+        header_row.ccnav_section = bucket   # type: ignore[attr-defined]
+        header_row.set_selectable(False)
+        header_row.set_activatable(False)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
         box.set_margin_top(8)
-        box.set_margin_start(4)
+        box.set_margin_start(2)
+        box.set_margin_end(4)
         box.set_margin_bottom(2)
-        title = Gtk.Label(xalign=0.0)
-        title.set_markup("<b>%s</b>" % GLib.markup_escape_text(
-            _STATUS_LABELS.get(section, section)))
-        badge = Gtk.Label()
-        badge.set_markup('<small><span foreground="#77767b">%d</span></small>'
-                         % self._status_counts.get(section, 0))
-        box.pack_start(title, False, False, 0)
-        box.pack_start(badge, False, False, 0)
-        box.show_all()
-        return box
+
+        chevron = Gtk.Button()
+        chevron.set_relief(Gtk.ReliefStyle.NONE)
+        chevron_img = Gtk.Image()
+        chevron.add(chevron_img)
+        chevron.set_tooltip_text("섹션 접기/펼치기")
+        chevron.connect("clicked", self._on_status_toggle, bucket)
+        box.pack_start(chevron, False, False, 0)
+
+        title = Gtk.Label(xalign=0.0)  # markup set in _update_status_header_row
+        box.pack_start(title, True, True, 0)
+
+        count = Gtk.Label()
+        box.pack_end(count, False, False, 0)
+        header_row.add(box)
+        header_row.ccnav_chevron_img = chevron_img  # type: ignore[attr-defined]
+        header_row.ccnav_title_label = title        # type: ignore[attr-defined]
+        header_row.ccnav_count_label = count        # type: ignore[attr-defined]
+        self._update_status_header_row(header_row)
+        return header_row
+
+    def _update_status_header_row(self, header_row: Gtk.ListBoxRow) -> None:
+        bucket = header_row.ccnav_section
+        collapsed = bucket in self._collapsed_status
+        header_row.ccnav_chevron_img.set_from_icon_name(
+            "pan-end-symbolic" if collapsed else "pan-down-symbolic", Gtk.IconSize.MENU)
+        header_row.ccnav_title_label.set_markup(
+            "<b>%s</b>" % GLib.markup_escape_text(_STATUS_LABELS.get(bucket, bucket)))
+        header_row.ccnav_count_label.set_markup(
+            '<small><span foreground="#77767b">%d</span></small>'
+            % self._status_counts.get(bucket, 0))
+
+    def _on_status_toggle(self, _button, bucket: str) -> None:
+        if bucket in self._collapsed_status:
+            self._collapsed_status.discard(bucket)
+        else:
+            self._collapsed_status.add(bucket)
+            # Don't leave the selection stranded on a row we're about to hide.
+            selected = self._listbox.get_selected_row()
+            if (selected is not None
+                    and not getattr(selected, "ccnav_is_header", False)
+                    and self._status_bucket(selected.ccnav_row) == bucket):
+                self._listbox.unselect_row(selected)
+        self._listbox.invalidate_filter()
+        for child in self._listbox.get_children():
+            if _is_status_header(child) and child.ccnav_section == bucket:
+                self._update_status_header_row(child)
+                break
 
     # -- group header rows (Group mode) --------------------------------------
 
@@ -1667,7 +1906,7 @@ class NavigatorWindow(Gtk.Window):
         mode (and none in Status mode). Reconciled like the session rows, so the
         listbox is never rebuilt."""
         existing = {c.ccnav_group: c for c in self._listbox.get_children()
-                    if getattr(c, "ccnav_is_header", False)}
+                    if _is_group_header(c)}
         if self._settings.sort_mode != "group":
             for child in existing.values():
                 self._listbox.remove(child)
@@ -1702,6 +1941,18 @@ class NavigatorWindow(Gtk.Window):
         box.set_margin_start(2)
         box.set_margin_end(4)
         box.set_margin_bottom(2)
+
+        # A grip on the far left is the drag SOURCE for reordering whole groups:
+        # drop it on another header (the header is a drag DEST for group payloads
+        # too). An EventBox gives the label an input window to start the drag from.
+        grip = Gtk.EventBox()
+        grip_label = Gtk.Label()
+        grip_label.set_markup('<span foreground="#77767b">⠿</span>')
+        grip.add(grip_label)
+        grip.set_tooltip_text("드래그해서 그룹 순서 변경")
+        grip.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, _GROUP_DRAG_TARGETS, Gdk.DragAction.MOVE)
+        grip.connect("drag-data-get", self._on_group_grip_drag_get, header_row)
+        box.pack_start(grip, False, False, 0)
 
         chevron = Gtk.Button()
         chevron.set_relief(Gtk.ReliefStyle.NONE)
@@ -1738,8 +1989,11 @@ class NavigatorWindow(Gtk.Window):
         header_row.ccnav_chevron_img = chevron_img  # type: ignore[attr-defined]
         header_row.ccnav_counts_label = counts       # type: ignore[attr-defined]
         header_row.ccnav_name_label = name            # type: ignore[attr-defined]
-        # Drop a session on this header to move it into the group.
-        header_row.drag_dest_set(Gtk.DestDefaults.ALL, _DRAG_TARGETS, Gdk.DragAction.MOVE)
+        # Drop a session here to move it into the group, or another group's grip
+        # here to reorder whole groups. Both drag targets; the receiver tells them
+        # apart by the info id.
+        header_row.drag_dest_set(
+            Gtk.DestDefaults.ALL, _DRAG_TARGETS + _GROUP_DRAG_TARGETS, Gdk.DragAction.MOVE)
         header_row.connect("drag-data-received", self._on_group_header_drag_received)
         self._update_group_header_row(header_row)
         return header_row
@@ -1787,13 +2041,17 @@ class NavigatorWindow(Gtk.Window):
         header_row.ccnav_name_label.set_markup(
             "<b>%s</b>" % GLib.markup_escape_text(_oneline(self._group_display_name(group_key))))
         counts = self._group_counts.get(
-            group_key, {model.INPUT_NEEDED: 0, model.REPORTED: 0, model.WORKING_SECTION: 0})
+            group_key, {model.INPUT_NEEDED: 0, model.WORKING_SECTION: 0,
+                        model.REPORTED: 0, _ACKED_SECTION: 0})
+        # Icon order: red ● input > blue ↻ working > green ● reported (unacked) >
+        # green ✓ acked -- same priority the Status-mode sections use.
         header_row.ccnav_counts_label.set_markup(
             '<small><span foreground="#e01b24">●</span> %d  '
+            '<span foreground="#3584e4">↻</span> %d  '
             '<span foreground="#2ec27e">●</span> %d  '
-            '<span foreground="#3584e4">↻</span> %d</small>'
-            % (counts[model.INPUT_NEEDED], counts[model.REPORTED],
-               counts[model.WORKING_SECTION]))
+            '<span foreground="#2ec27e">✓</span> %d</small>'
+            % (counts[model.INPUT_NEEDED], counts[model.WORKING_SECTION],
+               counts[model.REPORTED], counts[_ACKED_SECTION]))
 
     def _on_group_toggle(self, _button, group_key: str) -> None:
         if group_key in self._collapsed_groups:
@@ -1823,6 +2081,7 @@ class NavigatorWindow(Gtk.Window):
         rows = [c.ccnav_row for c in self._listbox.get_children()
                 if not getattr(c, "ccnav_is_header", False)]
         self._reconcile_group_headers(rows)
+        self._reconcile_status_headers(rows)
         # Rows are drag sources only in group mode; the auto-sort button shows
         # only there too.
         group = mode == "group"
@@ -1845,7 +2104,7 @@ class NavigatorWindow(Gtk.Window):
         overlay = list_row.ccnav_indicator
         front = overlay.ccnav_front
         back = overlay.ccnav_back
-        # The hollow "acknowledged" mark is meaningful only while green; drop it
+        # The "acknowledged" check mark is meaningful only while green; drop it
         # the moment the session leaves 'reported', so a later return to green
         # starts filled (attention-seeking) again.
         if new_kind != "reported":
@@ -2039,7 +2298,7 @@ class NavigatorWindow(Gtk.Window):
             front.connect("button-press-event", self._on_indicator_clicked, list_row)
 
     def _on_indicator_clicked(self, _front, _event, list_row: Gtk.ListBoxRow) -> bool:
-        """Toggle the green 'reported' dot between filled and a hollow outline.
+        """Toggle the green 'reported' dot between filled and a check mark.
         Only the green dot toggles; a red 'input' dot ignores the click (and lets
         it fall through to the row). Swallowing the green click keeps it from also
         selecting/expanding the row -- the dot is its own little control."""
@@ -2054,4 +2313,8 @@ class NavigatorWindow(Gtk.Window):
         label = getattr(front, "ccnav_dot_label", None) if front is not None else None
         if label is not None:
             label.set_markup(_dot_markup("reported", sid in self._acknowledged))
+        # Acknowledging moves the session between the reported/acked buckets, so
+        # re-section now: the group-header ● / ✓ counts and, in Status mode, the
+        # section it sits in both follow the ack immediately (not at the next poll).
+        self._regroup_now()
         return True

@@ -20,6 +20,19 @@ class DefaultsTest(unittest.TestCase):
         self.assertEqual(s.opacity, 1.0)
         self.assertEqual(s.bg_color, "")
 
+    def test_notifications_default_on(self):
+        self.assertTrue(config.Settings().notifications)
+
+
+class NotificationsSettingTest(unittest.TestCase):
+    def test_notifications_round_trips(self):
+        self.assertFalse(config.from_dict({"notifications": False}).notifications)
+        self.assertIn("notifications", config.Settings().to_dict())
+
+    def test_only_a_real_bool_changes_notifications(self):
+        self.assertTrue(config.from_dict({"notifications": "false"}).notifications)  # default kept
+        self.assertFalse(config.from_dict({"notifications": False}).notifications)  # real bool wins
+
 
 class FromDictCoercionTest(unittest.TestCase):
     def test_a_full_valid_dict_round_trips(self):
@@ -27,7 +40,7 @@ class FromDictCoercionTest(unittest.TestCase):
             "poll_seconds": 2.5, "corner": "bottom-left", "width": 500,
             "height": 600, "keep_above": False, "all_workspaces": False,
             "font_size": 14, "opacity": 0.8, "bg_color": "#101010",
-            "sort_mode": "group",
+            "sort_mode": "group", "notifications": False,
         }
         self.assertEqual(config.from_dict(raw).to_dict(), raw)
 

@@ -1,2 +1,12 @@
 - window창에 항상 떠있으면서 모든 claude code session을 관리할 수 있는 기능 갖고 있음.
 - 'claude code needs your attention' 처럼 사용자 입력이 필요한 세션이 있을 때 강조 표시가 되면서 해당 세션을 클릭하면 입력을 줄 수 있는 창이 나옴. 혹은 '해당 세션으로 이동'을 누르면 그 워크스페이스로 이동하고 세션이 있는 터미널 탭으로 바로 이동.
+
+---
+성능 개선
+[.] "(app.py:190249): Gtk-WARNING **: 02:20:28.275: gtk_widget_size_allocate(): attempt to allocate widget with width -131 and height 18" 이런 출력이 나오면서 attach한 뒤 detach할 때 창이 작게 복원되는 경우가 있음.
+[ ] '해당 세션으로 이동' -> '세션으로 이동'으로 수정
+
+---
+기능 추가
+[.] 시스템 알림 기능 추가. 세션 상태 (상태 아이콘, 상태 명칭, 답변 요약)를 간단하게 출력.
+

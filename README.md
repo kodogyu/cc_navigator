@@ -30,10 +30,15 @@ get there**:
   green dot ● for one that finished its turn, and a spinning arrow ↻ while Claude
   is working. When a session has spawned subagents, a second spinner sits behind
   the main icon — so a session blocked on you (red) *while* its helpers keep
-  running shows both at once. Click a green dot to mark it seen (a hollow box). A
+  running shows both at once. Click a green dot to mark it seen (a green check ✓). A
   badge in the title bar counts how many need input.
-- **Two views** — sort by **status** (input-needed / reported / working sections)
-  or by **project group** (one folder per working directory).
+- **Two views** — sort by **status** (four collapsible sections: needs-input →
+  working → reported → acknowledged) or by **project group** (one folder per
+  working directory, with groups you can reorder).
+- **Desktop nudge** — when a session becomes *your turn* — it starts waiting on
+  your input, or finishes its turn — a desktop notification names that session,
+  its status (🔴/🟢), and a one-line summary, so you need not watch the panel.
+  On by default; toggle it off in Settings.
 - **Jump** — click *"해당 세션으로 이동"* to raise that session's terminal window.
 - **Reply** — type one line into the row and press Enter to send it straight to
   the session's tmux pane.
@@ -76,7 +81,7 @@ dependencies — the standard library plus the system `gi` bindings only.
 | Desktop | **GNOME Shell with `Eval` unlocked** — blocked from GNOME 41 onward; developed on 3.36.9 |
 | Terminal multiplexer | **tmux ≥ 3.0** — sessions are addressed by tmux pane |
 | Interpreter | **`/usr/bin/python3` ≥ 3.8 with PyGObject** (`apt install python3-gi gir1.2-gtk-3.0`) |
-| Also needed | `gdbus`, `xprop` |
+| Also needed | `gdbus`, `xprop`, and `notify-send` (libnotify) for desktop notifications |
 
 If GNOME `Eval` is unavailable **the app still runs** — the jump buttons are
 disabled and the status bar explains why. Listing sessions and typing replies work
@@ -90,7 +95,7 @@ without it.
 git clone https://github.com/kodogyu/cc_navigator.git
 cd cc_navigator
 
-./run-tests                    # optional: expect "Ran 445 tests / OK"
+./run-tests                    # optional: expect "Ran 481 tests / OK"
 ./bin/cc-navigator-doctor      # checks your machine and prints exactly what to fix
 ```
 
@@ -167,7 +172,7 @@ selected) its working directory and last prompt.
 - 🔴 **red dot** — the session is waiting on you (a permission prompt, a question,
   a plan to approve). The title-bar badge counts these.
 - 🟢 **green dot** — the session finished its turn and is idle. Click it to mark it
-  seen (it becomes a hollow box); click again to restore.
+  seen (it becomes a green check ✓); click again to restore.
 - ↻ **spinning arrow** — Claude is working.
 - **two overlapping icons** — the session has subagents running: the main state in
   front, a subagent spinner behind. A working main with subagents shows a calm blue
@@ -175,10 +180,12 @@ selected) its working directory and last prompt.
 
 **Switch views** with the *"Sort by"* dropdown at the top:
 
-- **상태별 정렬 (by status)** — three sections: *입력이 필요한 세션* (needs input),
-  *보고 완료* (reported / idle), *작업 중* (working).
+- **상태별 정렬 (by status)** — four **collapsible** sections, in priority order:
+  *입력이 필요한 세션* (needs input) → *작업 중* (working) → *보고 완료* (reported /
+  idle) → *확인 완료* (acknowledged — the ones you clicked to a ✓). Collapse any
+  section with its chevron.
 - **그룹별 정렬 (by group)** — one folder per project directory, each with its own
-  status counts.
+  status counts (red ● → ↻ → green ● → ✓).
 
 <p align="center">
   <img src="docs/images/screenshot-groups.png" alt="cc_navigator grouped by project" width="360">
@@ -189,20 +196,24 @@ selected) its working directory and last prompt.
 - Type into the reply box and press **Enter** to send a line to that session.
 - Click **"해당 세션으로 이동"** to raise its terminal window (needs GNOME `Eval`).
 
-**Arrange groups** (in group view): drag a row's **⠿ handle** (on the right) to
-reorder it or drop it onto another group; click the **pencil** to rename a group;
-collapse a group with its chevron; or press **"자동 정렬"** to re-group everything by
-directory.
+**Arrange groups** (in group view): drag a **group header's ⠿ handle** (on the
+left) to reorder whole groups; drag a row's **⠿ handle** (on the right) to reorder
+it or drop it onto another group; click the **pencil** to rename a group; collapse
+a group with its chevron; or press **"자동 정렬"** to re-group by directory and
+restore the default order. Group order stays put as sessions come and go, and
+switching sort views no longer moves the panel.
 
 **Collapse & attach.** The chevron button (top-left) collapses the panel to its
 title bar. **Long-press** it to open the attach picker — dock the panel as a thin
 bar flush against any screen edge, showing just the icon, the input-needed count,
-and a detach button. While docked you can **drag the bar along its edge**; the
-detach button restores the full panel.
+and a detach button. Docking uses the monitor's **work area**, so the bar sits
+*beside* a system panel/dock that reserves edge space, not under it. While docked
+you can **drag the bar along its edge**; the detach button restores the full panel.
 
 **Settings** (the ⚙ gear) cover opacity, background colour, font size, screen
-corner, keep-above / all-workspaces, a one-click self-update, and the **통합
-(Integration)** toggles from the installation steps above.
+corner, keep-above / all-workspaces, **desktop notifications** (on by default),
+a one-click self-update, and the **통합 (Integration)** toggles from the
+installation steps above.
 
 ---
 
@@ -234,7 +245,7 @@ with [`docs/superpowers/sdd/implementation-log.md`](docs/superpowers/sdd/impleme
 
 ## Status
 
-The full feature set is built and the suite is green (**445 tests**). Every task is
+The full feature set is built and the suite is green (**481 tests**). Every task is
 checked with **mutation testing** — the implementation is deliberately broken N ways
 and every break must fail a named test — and the riskiest changes go through an
 adversarial multi-agent review before landing.

@@ -50,6 +50,7 @@ class Settings:
     opacity: float = 1.0
     bg_color: str = ""  # "" = no override, keep the theme
     sort_mode: str = "status"  # "status" | "group"
+    notifications: bool = True  # desktop notify when a session becomes "your turn"
 
     def to_dict(self) -> dict:
         return {
@@ -63,6 +64,7 @@ class Settings:
             "opacity": self.opacity,
             "bg_color": self.bg_color,
             "sort_mode": self.sort_mode,
+            "notifications": self.notifications,
         }
 
 
@@ -96,6 +98,8 @@ def _coerce(raw: dict, base: Settings) -> Settings:
     keep_above = keep_above if isinstance(keep_above, bool) else base.keep_above
     all_ws = raw.get("all_workspaces")
     all_ws = all_ws if isinstance(all_ws, bool) else base.all_workspaces
+    notifications = raw.get("notifications")
+    notifications = notifications if isinstance(notifications, bool) else base.notifications
 
     font_raw = _as_number(raw.get("font_size"), base.font_size)
     font = 0 if font_raw <= 0 else int(_clamp(font_raw, FONT_MIN, FONT_MAX))
@@ -119,6 +123,7 @@ def _coerce(raw: dict, base: Settings) -> Settings:
         opacity=opacity,
         bg_color=bg,
         sort_mode=sort_mode,
+        notifications=notifications,
     )
 
 

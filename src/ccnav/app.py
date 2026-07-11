@@ -21,7 +21,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 from gi.repository import Gio, GLib, Gtk  # noqa: E402
 
-from . import config, gnome, model, paths, proc, statestore, tmuxctl, ui  # noqa: E402
+from . import config, gnome, model, notify, paths, proc, statestore, tmuxctl, ui  # noqa: E402
 
 # Fallback only: the live interval comes from self._settings.poll_seconds. Kept
 # so a bare Application built in a test (which does not load config) still polls
@@ -152,6 +152,13 @@ class Application:
 
         self._jumping = set()  # type: Set[str]  # session ids with a jump in flight
 
+        # Desktop-notification state: the last-seen status per session id, and a
+        # first-tick guard so startup does not burst one notification per already-
+        # waiting session. _notify_send is injectable for tests.
+        self._prev_status = {}  # type: Dict[str, str]
+        self._notif_seeded = False
+        self._notify_send = notify.send
+
         monitor = Gio.File.new_for_path(str(self.state_dir)).monitor_directory(
             Gio.FileMonitorFlags.NONE, None
         )
@@ -205,7 +212,34 @@ class Application:
         # Surface an unreachable-tmux hint in its own status slot, so a wedged
         # socket is not silently indistinguishable from every session ending.
         self.window.set_unreachable(collected.unreachable)
+        self._maybe_notify(collected.rows)
         return False  # one-shot idle source; True would re-run it forever
+
+    def _maybe_notify(self, rows: List[model.Row]) -> None:
+        """Fire a desktop notification for each session that just became 'your
+        turn' (transitioned into input-needed or reported). Runs on the GTK main
+        thread; the actual notify-send is dispatched to a worker thread."""
+        fires, new_status = notify.changed_rows(self._prev_status, rows)
+        self._prev_status = new_status
+        # The first tick has no prior statuses, so every waiting session would
+        # look 'new'. Seed the baseline silently and only notify from the second
+        # tick on. The baseline is updated above even when notifications are off,
+        # so toggling them back on does not replay a backlog.
+        if not self._notif_seeded:
+            self._notif_seeded = True
+            return
+        if not self._settings.notifications:
+            return
+        for row, status in fires:
+            self._send_notification_async(row, status)
+
+    def _send_notification_async(self, row: model.Row, status: str) -> None:
+        # notify-send is a subprocess; never run it on the GTK main thread (the
+        # freeze this whole app is built to avoid). Same daemon-thread hand-off
+        # as jump/send.
+        threading.Thread(
+            target=lambda: self._notify_send(row, status), daemon=True
+        ).start()
 
     def _apply_poll_error(self, message: str) -> bool:
         self.window.set_status("세션 목록을 새로 고치지 못했습니다: " + message)

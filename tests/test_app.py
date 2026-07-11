@@ -8,7 +8,7 @@ from unittest import mock
 
 from gi.repository import Gio, GLib
 
-from ccnav import app, gnome, hookstate, model, paths, tmuxctl
+from ccnav import app, config, gnome, hookstate, model, notify, paths, tmuxctl
 
 SOCK = "/tmp/tmux-1000/default"
 
@@ -633,3 +633,67 @@ class EvalProbeTest(unittest.TestCase):
 
         with mock.patch.object(app.proc, "run_command", timed_out):
             self.assertFalse(app.probe_eval_available())
+
+
+class MaybeNotifyTest(unittest.TestCase):
+    """The poll tick's per-session state transitions must drive at most one
+    desktop notification, and only when a session becomes 'your turn'. The
+    _send_notification_async seam is overridden so the transition/seed/toggle
+    logic is asserted synchronously, without threads."""
+
+    def _row(self, session_id="a", state=hookstate.WAITING, reason="permission_prompt"):
+        return model.Row(
+            session_id=session_id, socket=SOCK, pane="%1", tmux_session="demo",
+            title="t", state=state, reason=reason, message="m", cwd="/proj", updated_at=5,
+        )
+
+    def _app(self, notifications=True, seeded=True, prev=None):
+        instance = app.Application.__new__(app.Application)
+        instance.window = _FakeWindow()
+        instance._settings = config.with_updates(config.Settings(), notifications=notifications)
+        instance._prev_status = dict(prev or {})
+        instance._notif_seeded = seeded
+        self.captured = []
+        instance._send_notification_async = lambda r, s: self.captured.append((r.session_id, s))
+        return instance
+
+    def test_the_first_tick_seeds_the_baseline_without_notifying(self):
+        instance = self._app(seeded=False, prev={})
+        app.Application._maybe_notify(instance, [self._row()])
+        self.assertEqual(self.captured, [])
+        self.assertTrue(instance._notif_seeded)
+        self.assertEqual(instance._prev_status, {"a": model.INPUT_NEEDED})
+
+    def test_a_working_to_input_transition_fires_once(self):
+        instance = self._app(prev={"a": model.WORKING_SECTION})
+        app.Application._maybe_notify(instance, [self._row(reason="permission_prompt")])
+        self.assertEqual(self.captured, [("a", model.INPUT_NEEDED)])
+
+    def test_an_unchanged_status_fires_nothing(self):
+        instance = self._app(prev={"a": model.INPUT_NEEDED})
+        app.Application._maybe_notify(instance, [self._row(reason="permission_prompt")])
+        self.assertEqual(self.captured, [])
+
+    def test_notifications_off_fires_nothing_but_updates_the_baseline(self):
+        instance = self._app(notifications=False, prev={"a": model.WORKING_SECTION})
+        app.Application._maybe_notify(instance, [self._row(reason="permission_prompt")])
+        self.assertEqual(self.captured, [])
+        self.assertEqual(instance._prev_status, {"a": model.INPUT_NEEDED})
+
+    def test_apply_rows_feeds_the_rows_to_maybe_notify(self):
+        instance = app.Application.__new__(app.Application)
+        instance.window = _FakeWindow()
+        seen = []
+        instance._maybe_notify = lambda rows: seen.append(rows)
+        rows = [self._row()]
+        app.Application._apply_rows(instance, app.Collected(rows, 0))
+        self.assertEqual(seen, [rows])
+
+    def test_send_notification_async_calls_notify_send_off_the_gtk_thread(self):
+        instance = app.Application.__new__(app.Application)
+        done = threading.Event()
+        calls = []
+        instance._notify_send = lambda r, s: (calls.append((r.session_id, s)), done.set())
+        app.Application._send_notification_async(instance, self._row(), model.INPUT_NEEDED)
+        self.assertTrue(done.wait(2.0), "notify_send was never called")
+        self.assertEqual(calls, [("a", model.INPUT_NEEDED)])

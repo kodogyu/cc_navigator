@@ -4,7 +4,7 @@ import unittest
 from ccnav import hookstate, model, ui
 
 # ui pins the Gtk version on import above, so this bare import is safe here.
-from gi.repository import Gtk  # noqa: E402
+from gi.repository import GLib, Gtk  # noqa: E402
 
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
@@ -160,6 +160,39 @@ class DockRectTest(unittest.TestCase):
         self.assertEqual(ui._dock_rect("left", g, 9999), (0, 1080 - 220, 44, 220))
 
 
+class _FakeMonitor:
+    def __init__(self, geo, workarea):
+        self._geo, self._workarea = geo, workarea
+
+    def get_geometry(self):
+        return self._geo
+
+    def get_workarea(self):
+        return self._workarea
+
+
+class DockAreaTest(unittest.TestCase):
+    """Docking targets the monitor's WORK area (which excludes system panels/docks
+    that reserve space), so a docked bar sits beside such a panel, not under it."""
+
+    def test_prefers_the_work_area_over_the_full_geometry(self):
+        geo = _Geo()                    # full 1920x1080
+        wa = _Geo(width=1840)           # a dock reserves 80px on the right
+        self.assertIs(ui._dock_area(_FakeMonitor(geo, wa)), wa)
+
+    def test_falls_back_to_geometry_when_the_work_area_is_degenerate(self):
+        geo = _Geo()
+        for bad in (None, _Geo(width=0), _Geo(height=0)):
+            self.assertIs(ui._dock_area(_FakeMonitor(geo, bad)), geo)
+
+    def test_a_right_dock_lands_beside_a_right_side_panel_not_under_it(self):
+        # With 80px reserved on the right, a right-docked bar's right edge is the
+        # work area's right edge (1840), not the screen edge (1920).
+        wa = _Geo(width=1840)
+        x, _y, w, _h = ui._dock_rect("right", wa)
+        self.assertEqual(x + w, 1840)
+
+
 class RoundedRegionTest(unittest.TestCase):
     """The docked-bar corner clip is a pure geometry, testable without a window."""
 
@@ -219,7 +252,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(), row(state=hookstate.WORKING), row()])
-            self.assertEqual(len(window._listbox.get_children()), 3)
+            self.assertEqual(len(self._session_children(window)), 3)
         finally:
             window.destroy()
 
@@ -230,12 +263,12 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row()])
-            entry_before = window._listbox.get_children()[0].ccnav_entry
+            entry_before = self._first_row(window).ccnav_entry
             entry_before.set_text("please approve this")
 
             window.set_rows([row()])  # identical signature -> no rebuild
 
-            entry_after = window._listbox.get_children()[0].ccnav_entry
+            entry_after = self._first_row(window).ccnav_entry
             self.assertIs(entry_after, entry_before)
             self.assertEqual(entry_after.get_text(), "please approve this")
         finally:
@@ -248,7 +281,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a"), row(session_id="b")])
-            target = window._listbox.get_children()[0]
+            target = self._first_row(window)
             self.assertEqual(target.ccnav_row.session_id, "a")
             window._listbox.select_row(target)
             target.ccnav_entry.set_text("please approve this")
@@ -260,7 +293,7 @@ class NavigatorWindowTest(unittest.TestCase):
             )
 
             survivors = [
-                c for c in window._listbox.get_children()
+                c for c in self._session_children(window)
                 if c.ccnav_row.session_id == "a"
             ]
             self.assertEqual(len(survivors), 1)
@@ -275,14 +308,14 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a")])
-            target = window._listbox.get_children()[0]
+            target = self._first_row(window)
             window._listbox.select_row(target)
             target.ccnav_entry.set_text("please approve this")
 
             # Session a is gone, replaced by b.
             window.set_rows([row(session_id="b")])
 
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self.assertEqual(child.ccnav_row.session_id, "b")
             self.assertEqual(child.ccnav_entry.get_text(), "")
             self.assertIsNone(window._listbox.get_selected_row())
@@ -297,12 +330,12 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a"), row(state=hookstate.WORKING,
                                                        session_id="b")])
-            for child in window._listbox.get_children():
+            for child in self._session_children(window):
                 self.assertTrue(child.ccnav_jump.get_sensitive())
 
             window.set_eval_available(False)
 
-            for child in window._listbox.get_children():
+            for child in self._session_children(window):
                 self.assertFalse(child.ccnav_jump.get_sensitive())
         finally:
             window.destroy()
@@ -313,7 +346,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a"), row(session_id="b")])
-            children = {c.ccnav_row.session_id: c for c in window._listbox.get_children()}
+            children = {c.ccnav_row.session_id: c for c in self._session_children(window)}
 
             window.set_row_jump_sensitive("a", False)
             self.assertFalse(children["a"].ccnav_jump.get_sensitive())
@@ -329,7 +362,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a")])
             window.set_row_jump_sensitive("gone", False)  # must not raise
-            self.assertTrue(window._listbox.get_children()[0].ccnav_jump.get_sensitive())
+            self.assertTrue(self._first_row(window).ccnav_jump.get_sensitive())
         finally:
             window.destroy()
 
@@ -395,7 +428,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(state=hookstate.WORKING, session_id="a")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             # the working front is the cairo reload spinner (a DrawingArea)
             self.assertTrue(self._front_is_spinner(child))
             self.assertFalse(self._back(child).ccnav_subagent)  # no subagent layer
@@ -408,7 +441,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(state=hookstate.WAITING, reason="idle", session_id="a")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self.assertIn("●", self._labels_under(child))  # a coloured dot
             self.assertFalse(self._front_is_spinner(child))  # front is a dot, not a spinner
         finally:
@@ -420,7 +453,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window.show_all()
         try:
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
-            spinner = self._front(window._listbox.get_children()[0])
+            spinner = self._front(self._first_row(window))
             before = spinner.ccnav_angle
             loop = GLib.MainLoop()
             GLib.timeout_add(300, loop.quit)
@@ -474,11 +507,11 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self.assertIn("#2ec27e", self._dot_markup(child))  # green
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt")])
-            self.assertIs(window._listbox.get_children()[0], child)  # same widget
+            self.assertIs(self._first_row(window), child)  # same widget
             self.assertIn("#e01b24", self._dot_markup(child))  # recoloured red in place
         finally:
             window.destroy()
@@ -487,27 +520,27 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self.assertIn("●", self._labels_under(child))  # a dot
             self.assertFalse(self._front_is_spinner(child))
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
-            self.assertIs(window._listbox.get_children()[0], child)  # same row widget
+            self.assertIs(self._first_row(window), child)  # same row widget
             self.assertTrue(self._front_is_spinner(child))  # dot -> spinner in place
         finally:
             window.destroy()
 
-    def test_clicking_a_green_dot_toggles_it_hollow_and_back(self):
+    def test_clicking_a_green_dot_toggles_it_to_a_check_and_back(self):
         from gi.repository import Gdk
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
-            dot = window._listbox.get_children()[0].ccnav_indicator.ccnav_front
+            dot = self._first_row(window).ccnav_indicator.ccnav_front
             self.assertIn("●", dot.ccnav_dot_label.get_label())  # filled to start
             ev = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
             handled = dot.emit("button-press-event", ev)
             self.assertTrue(handled)  # swallowed, so the row is not also expanded
             self.assertIn("a", window._acknowledged)
-            self.assertIn("▢", dot.ccnav_dot_label.get_label())  # hollow outline now
+            self.assertIn("✓", dot.ccnav_dot_label.get_label())  # check mark now
             dot.emit("button-press-event", ev)
             self.assertNotIn("a", window._acknowledged)
             self.assertIn("●", dot.ccnav_dot_label.get_label())  # filled again
@@ -520,7 +553,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt")])
-            dot = window._listbox.get_children()[0].ccnav_indicator.ccnav_front
+            dot = self._first_row(window).ccnav_indicator.ccnav_front
             before = dot.ccnav_dot_label.get_label()
             handled = dot.emit("button-press-event", Gdk.Event.new(Gdk.EventType.BUTTON_PRESS))
             self.assertFalse(handled)  # falls through to the row (no toggle on red)
@@ -533,31 +566,31 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             window._on_indicator_clicked(child.ccnav_indicator, None, child)  # acknowledge
             self.assertIn("a", window._acknowledged)
-            # It resumes working -- leaving green must drop the hollow mark...
+            # It resumes working -- leaving green must drop the check mark...
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
             self.assertNotIn("a", window._acknowledged)
             # ...so when it reports again the dot is filled, seeking a fresh glance.
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
-            self.assertIn("●", self._dot_markup(window._listbox.get_children()[0]))
+            self.assertIn("●", self._dot_markup(self._first_row(window)))
         finally:
             window.destroy()
 
-    def test_acknowledged_hollow_survives_an_update_that_stays_green(self):
+    def test_acknowledged_check_survives_an_update_that_stays_green(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="idle", message="m1")])
-            child = window._listbox.get_children()[0]
-            window._on_indicator_clicked(child.ccnav_indicator, None, child)  # -> hollow
-            self.assertIn("▢", child.ccnav_indicator.ccnav_front.ccnav_dot_label.get_label())
+            child = self._first_row(window)
+            window._on_indicator_clicked(child.ccnav_indicator, None, child)  # -> check
+            self.assertIn("✓", child.ccnav_indicator.ccnav_front.ccnav_dot_label.get_label())
             # A non-status field changes; the row stays green and same widget.
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="idle", message="m2")])
-            self.assertIs(window._listbox.get_children()[0], child)
-            self.assertIn("▢", child.ccnav_indicator.ccnav_front.ccnav_dot_label.get_label())
+            self.assertIs(self._first_row(window), child)
+            self.assertIn("✓", child.ccnav_indicator.ccnav_front.ccnav_dot_label.get_label())
             self.assertIn("a", window._acknowledged)
         finally:
             window.destroy()
@@ -595,7 +628,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a", state=hookstate.WORKING,
                                  subagent_ids=("s1",))])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             # front is the calm blue 'orchestrating' dot, NOT a spinner
             self.assertFalse(self._front_is_spinner(child))
             self.assertIn("#3584e4", self._dot_markup(child))
@@ -610,7 +643,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt", subagent_ids=("s1",))])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self.assertIn("#e01b24", self._dot_markup(child))     # front stays red
             self.assertTrue(self._back(child).ccnav_subagent)     # back spinner shown
         finally:
@@ -621,11 +654,11 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self.assertFalse(self._back(child).ccnav_subagent)
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt", subagent_ids=("s1",))])
-            self.assertIs(window._listbox.get_children()[0], child)  # same widget
+            self.assertIs(self._first_row(window), child)  # same widget
             self.assertTrue(self._back(child).ccnav_subagent)
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt")])
@@ -640,7 +673,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self.assertFalse(self._back(child).ccnav_spinning)  # idle: no timer
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt", subagent_ids=("s1",))])
@@ -658,7 +691,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a"), row(session_id="b")])
             window.set_rows([row(session_id="b"), row(session_id="c")])
-            ids = {c.ccnav_row.session_id for c in window._listbox.get_children()}
+            ids = {c.ccnav_row.session_id for c in self._session_children(window)}
             self.assertEqual(ids, {"b", "c"})  # a removed, c inserted
         finally:
             window.destroy()
@@ -674,18 +707,67 @@ class NavigatorWindowTest(unittest.TestCase):
             i += 1
         return out
 
-    def test_a_row_that_becomes_waiting_jumps_above_working_rows(self):
-        # The reconcile must keep the (waiting, -updated_at) priority sort live:
-        # updating a row in place must re-sort, not leave it where it was.
+    def _display_groups(self, window):
+        """The group keys in on-screen (sorted) order -- read from the group header
+        rows, which lead their groups, so this IS the group display order."""
+        out, i = [], 0
+        while True:
+            r = window._listbox.get_row_at_index(i)
+            if r is None:
+                break
+            if getattr(r, "ccnav_is_header", False) and hasattr(r, "ccnav_group"):
+                out.append(r.ccnav_group)
+            i += 1
+        return out
+
+    def _display_sections(self, window):
+        """The status-section keys in on-screen (sorted) order -- read from the
+        status header rows, which lead their sections."""
+        out, i = [], 0
+        while True:
+            r = window._listbox.get_row_at_index(i)
+            if r is None:
+                break
+            if getattr(r, "ccnav_is_header", False) and hasattr(r, "ccnav_section"):
+                out.append(r.ccnav_section)
+            i += 1
+        return out
+
+    def _first_row(self, window):
+        """The first SESSION row in display order, skipping the section/group
+        header rows both modes now interleave. (Was window._listbox.get_children()
+        [0] before Status mode grew header rows.)"""
+        for c in window._listbox.get_children():
+            if not getattr(c, "ccnav_is_header", False):
+                return c
+        return None
+
+    def _session_children(self, window):
+        """All non-header child rows (the sessions), in display order."""
+        return [c for c in window._listbox.get_children()
+                if not getattr(c, "ccnav_is_header", False)]
+
+    def _pump(self, ms):
+        """Run the GTK main loop for ms, so deferred timeouts fire and the WM
+        settles pending resizes -- window-size assertions need this to be real."""
+        loop = GLib.MainLoop()
+        GLib.timeout_add(ms, lambda: (loop.quit(), False)[1])
+        loop.run()
+
+    def test_a_row_that_needs_input_jumps_above_working_rows(self):
+        # The reconcile must keep the section priority sort live: updating a row in
+        # place must re-sort, not leave it where it was. Input-needed is the top
+        # section, above working (whereas a finished 'reported' row sorts BELOW
+        # working now -- see test_status_mode_orders_rows_into_sections).
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WORKING, updated_at=90),
                              row(session_id="b", state=hookstate.WORKING, updated_at=100)])
             self.assertEqual(self._display_ids(window), ["b", "a"])  # newer working on top
             window.set_rows([
-                row(session_id="a", state=hookstate.WAITING, reason="idle", updated_at=110),
+                row(session_id="a", state=hookstate.WAITING, reason="permission_prompt", updated_at=110),
                 row(session_id="b", state=hookstate.WORKING, updated_at=100)])
-            self.assertEqual(self._display_ids(window), ["a", "b"])  # a now waiting -> top
+            self.assertEqual(self._display_ids(window), ["a", "b"])  # a needs input -> top section
         finally:
             window.destroy()
 
@@ -881,6 +963,26 @@ class NavigatorWindowTest(unittest.TestCase):
             self.assertEqual(window._stack.get_visible_child_name(), "full")
             self.assertTrue(window._content.get_visible())
             self.assertFalse(window._collapse_button.get_active())  # collapse cleared
+        finally:
+            window.destroy()
+
+    def test_detach_restores_the_configured_window_height(self):
+        # Regression: docking hides the titlebar to shrink to the bar. Detaching
+        # shows it again, which re-negotiates the window to its natural (short)
+        # height and silently drops set_collapsed's resize -- so the panel used to
+        # restore only ~150px tall. A deferred re-assert (after the frame settles)
+        # must bring the full configured height back.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a"), row(session_id="b")])
+            window.show_all()
+            self._pump(300)
+            window._dock_to_edge("left")
+            self._pump(300)
+            window._undock()
+            self._pump(300)  # let the deferred restore (a short timeout) fire + settle
+            _w, height = window.get_size()
+            self.assertGreaterEqual(height, window._settings.height - 40)
         finally:
             window.destroy()
 
@@ -1084,7 +1186,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             status_win.set_rows([row(session_id="a")])
             group_win.set_rows([row(session_id="a")])
-            self.assertFalse(status_win._listbox.get_children()[0].ccnav_grip.get_visible())
+            self.assertFalse(self._first_row(status_win).ccnav_grip.get_visible())
             grip = self._row_by_id(group_win, "a").ccnav_grip
             self.assertTrue(grip.get_visible())
             # The '⠿' glyph must be shown too: no_show_all on the grip stops
@@ -1137,8 +1239,24 @@ class NavigatorWindowTest(unittest.TestCase):
                 row(session_id="w", state=hookstate.WORKING, updated_at=50),
                 row(session_id="i", state=hookstate.WAITING, reason="permission_prompt", updated_at=40),
                 row(session_id="r", state=hookstate.WAITING, reason="idle", updated_at=30)])
-            # input -> reported -> working (the Sort-by-Status section order)
-            self.assertEqual(self._display_ids(window), ["i", "r", "w"])
+            # input -> working -> reported (the Sort-by-Status section order)
+            self.assertEqual(self._display_ids(window), ["i", "w", "r"])
+        finally:
+            window.destroy()
+
+    def test_acked_reported_session_moves_to_the_acked_section(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([
+                row(session_id="r1", state=hookstate.WAITING, reason="idle", updated_at=10),
+                row(session_id="r2", state=hookstate.WAITING, reason="idle", updated_at=20)])
+            self.assertEqual(self._display_ids(window), ["r2", "r1"])  # both reported, r2 newer on top
+            self.assertEqual(self._display_sections(window), ["reported"])
+            window._acknowledged.add("r2")  # mark r2 seen -> a check
+            window._regroup_now()
+            # r2 acknowledged -> the '확인 완료' (acked) section, which sits BELOW reported
+            self.assertEqual(self._display_sections(window), ["reported", "acked"])
+            self.assertEqual(self._display_ids(window), ["r1", "r2"])  # r1 reported, then r2 acked
         finally:
             window.destroy()
 
@@ -1154,6 +1272,159 @@ class NavigatorWindowTest(unittest.TestCase):
                 row(session_id="a2", cwd="/p/alpha", reason="permission_prompt", updated_at=80)])
             # alpha group first (its newest 100 beats beta's 90); alpha rows contiguous
             self.assertEqual(self._display_ids(window), ["a1", "a2", "b1"])
+        finally:
+            window.destroy()
+
+    def test_group_order_is_stable_when_a_response_bumps_recency(self):
+        # The whole point of #2: once groups are placed, a later response in a
+        # lower group must NOT lift it above the others. Group order is by
+        # appearance and frozen, not by recency.
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            # alpha's session is idle (100); beta's is still working (90).
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha",
+                    state=hookstate.WAITING, reason="idle", updated_at=100),
+                row(session_id="b1", cwd="/p/beta", state=hookstate.WORKING, updated_at=90)])
+            self.assertEqual(self._display_groups(window), ["/p/alpha", "/p/beta"])
+            # beta's session finishes its turn -- a real response (state + reason
+            # change, so the row signature changes and the panel re-sections), and
+            # its recency now beats alpha's. Group order must NOT follow.
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha",
+                    state=hookstate.WAITING, reason="idle", updated_at=100),
+                row(session_id="b1", cwd="/p/beta",
+                    state=hookstate.WAITING, reason="idle", updated_at=200)])
+            self.assertEqual(self._display_groups(window), ["/p/alpha", "/p/beta"])  # unchanged
+            self.assertEqual(self._display_ids(window), ["a1", "b1"])
+        finally:
+            window.destroy()
+
+    def test_a_new_group_appears_at_the_end_regardless_of_recency(self):
+        # A group first seen later keeps to the bottom even if its recency is the
+        # highest -- appearance order, not recency.
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([row(session_id="a1", cwd="/p/alpha", updated_at=100)])
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha", updated_at=100),
+                row(session_id="b1", cwd="/p/beta", updated_at=500)])  # newer, but new
+            self.assertEqual(self._display_groups(window), ["/p/alpha", "/p/beta"])
+        finally:
+            window.destroy()
+
+    def test_reorder_group_moves_a_whole_group(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha", updated_at=100),
+                row(session_id="b1", cwd="/p/beta", updated_at=90)])
+            self.assertEqual(self._display_groups(window), ["/p/alpha", "/p/beta"])
+            window._reorder_group("/p/beta", "/p/alpha")  # drag beta above alpha
+            self.assertEqual(self._display_groups(window), ["/p/beta", "/p/alpha"])
+            self.assertEqual(self._display_ids(window), ["b1", "a1"])  # sessions follow
+            window._reorder_group("/p/beta", "/p/alpha", after=True)  # drop beta below alpha
+            self.assertEqual(self._display_groups(window), ["/p/alpha", "/p/beta"])
+        finally:
+            window.destroy()
+
+    def test_reorder_group_ignores_self_and_unknown_keys(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha", updated_at=100),
+                row(session_id="b1", cwd="/p/beta", updated_at=90)])
+            window._reorder_group("/p/alpha", "/p/alpha")  # self -> no-op
+            window._reorder_group("/p/zzz", "/p/alpha")    # unknown dragged -> no-op
+            self.assertEqual(self._display_groups(window), ["/p/alpha", "/p/beta"])
+        finally:
+            window.destroy()
+
+    def test_dropping_a_group_header_on_another_reorders_via_the_receiver(self):
+        # The drop receiver must tell a GROUP drop (reorder groups) from a SESSION
+        # drop (join group) by the target info id.
+        from ccnav import config
+
+        class _Sel:
+            def __init__(self, data):
+                self._data = data
+
+            def get_data(self):
+                return self._data
+
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha", updated_at=100),
+                row(session_id="b1", cwd="/p/beta", updated_at=90)])
+            alpha_header = next(c for c in window._listbox.get_children()
+                                if getattr(c, "ccnav_is_header", False)
+                                and c.ccnav_group == "/p/alpha")
+            # Drop beta's header on alpha's (upper half) -> beta lands before alpha.
+            window._on_group_header_drag_received(
+                alpha_header, None, 0, 0, _Sel(b"/p/beta"), ui._DRAG_INFO_GROUP, 0)
+            self.assertEqual(self._display_groups(window), ["/p/beta", "/p/alpha"])
+        finally:
+            window.destroy()
+
+    def test_auto_sort_resets_the_manual_group_order(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([
+                row(session_id="a1", cwd="/p/alpha", updated_at=100),
+                row(session_id="b1", cwd="/p/beta", updated_at=90)])
+            window._reorder_group("/p/beta", "/p/alpha")  # beta now first
+            self.assertEqual(self._display_groups(window), ["/p/beta", "/p/alpha"])
+            window._on_auto_sort_clicked(None)
+            self.assertEqual(self._display_groups(window), ["/p/alpha", "/p/beta"])  # default restored
+        finally:
+            window.destroy()
+
+    def test_group_header_count_icons_order_and_check_count(self):
+        # #1: the header count icons read red(input) > blue(working) > green ●
+        # (reported, unacked) > green ✓ (acked), and the ✓ count follows the
+        # acknowledged set (a seen reported session moves from ● to ✓).
+        import re
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="group"))
+        try:
+            window.set_rows([
+                row(session_id="i1", cwd="/p/x", state=hookstate.WAITING, reason="permission_prompt"),
+                row(session_id="i2", cwd="/p/x", state=hookstate.WAITING, reason="permission_prompt"),
+                row(session_id="w1", cwd="/p/x", state=hookstate.WORKING),
+                row(session_id="r1", cwd="/p/x", state=hookstate.WAITING, reason="idle"),
+                row(session_id="r2", cwd="/p/x", state=hookstate.WAITING, reason="idle")])
+            window._acknowledged.add("r2")  # one reported session marked seen -> a check
+            window._regroup_now()
+            header = next(c for c in window._listbox.get_children()
+                          if getattr(c, "ccnav_is_header", False) and c.ccnav_group == "/p/x")
+            m = header.ccnav_counts_label.get_label()
+            pairs = re.findall(r'foreground="(#[0-9a-fA-F]{6})">(\S)</span>\s*(\d+)', m)
+            self.assertEqual(pairs, [
+                ("#e01b24", "●", "2"),   # red input
+                ("#3584e4", "↻", "1"),   # blue working
+                ("#2ec27e", "●", "1"),   # green reported, unacked (r1)
+                ("#2ec27e", "✓", "1"),   # green check, acked (r2)
+            ])
         finally:
             window.destroy()
 
@@ -1187,7 +1458,11 @@ class NavigatorWindowTest(unittest.TestCase):
                 self.assertNotIn("\n", lbl.get_text())  # name + path both single-line
             window.set_rows([row(session_id="y", cwd="")])
             blank = self._widgets_of_type(window._build_group_header_row(""), Gtk.Label)
-            self.assertEqual(len(blank), 2)  # "~" name + counts; no empty path line
+            populated = self._widgets_of_type(window._build_group_header_row("/p/proj"), Gtk.Label)
+            # The blank ("~") group omits the empty path line, so it carries exactly
+            # one fewer label than a populated group (both have the grip + name +
+            # counts; only the populated one adds a path line).
+            self.assertEqual(len(populated) - len(blank), 1)
         finally:
             window.destroy()
 
@@ -1204,12 +1479,15 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
-    def test_status_mode_has_no_header_rows(self):
+    def test_status_mode_uses_status_section_headers_not_group_headers(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", cwd="/p/x")])
-            self.assertFalse(any(getattr(c, "ccnav_is_header", False)
-                                 for c in window._listbox.get_children()))
+            headers = [c for c in window._listbox.get_children()
+                       if getattr(c, "ccnav_is_header", False)]
+            self.assertTrue(headers)  # Status mode now has section header rows
+            self.assertTrue(all(hasattr(h, "ccnav_section") for h in headers))  # status headers
+            self.assertFalse(any(hasattr(h, "ccnav_group") for h in headers))   # not group headers
         finally:
             window.destroy()
 
@@ -1229,6 +1507,24 @@ class NavigatorWindowTest(unittest.TestCase):
             self.assertIn("/p/x", groups)                   # header row survives collapse
             window._on_group_toggle(None, "/p/x")           # expand again
             self.assertTrue(window._filter_row(a))
+        finally:
+            window.destroy()
+
+    def test_collapsing_a_status_section_filters_its_sessions_but_keeps_the_header(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)  # status mode
+        try:
+            window.set_rows([
+                row(session_id="i", state=hookstate.WAITING, reason="permission_prompt"),
+                row(session_id="w", state=hookstate.WORKING)])
+            i = self._row_by_id(window, "i")
+            self.assertTrue(window._filter_row(i))            # visible before collapse
+            window._on_status_toggle(None, model.INPUT_NEEDED)  # collapse the input section
+            self.assertFalse(window._filter_row(i))           # its session now filtered out
+            self.assertIn(model.INPUT_NEEDED, self._display_sections(window))  # header row survives
+            self.assertIn(model.INPUT_NEEDED, window._collapsed_status)
+            self.assertTrue(window._filter_row(self._row_by_id(window, "w")))  # other section unaffected
+            window._on_status_toggle(None, model.INPUT_NEEDED)  # expand again
+            self.assertTrue(window._filter_row(i))
         finally:
             window.destroy()
 
@@ -1274,21 +1570,37 @@ class NavigatorWindowTest(unittest.TestCase):
         config.config_path = lambda: pathlib.Path(tmp.name) / "c.json"
         try:
             window.set_rows([row(session_id="a", cwd="/p/x")])
-            self.assertTrue(any(getattr(c, "ccnav_is_header", False)
-                                for c in window._listbox.get_children()))
+            self.assertTrue(any(hasattr(c, "ccnav_group")
+                                for c in window._listbox.get_children()))  # group headers present
             window._sort_combo.set_active_id("status")  # -> group headers removed
-            self.assertFalse(any(getattr(c, "ccnav_is_header", False)
-                                 for c in window._listbox.get_children()))
+            self.assertFalse(any(hasattr(c, "ccnav_group")
+                                 for c in window._listbox.get_children()))  # no group headers left
         finally:
             config.config_path = orig
             window.destroy()
 
-    def test_status_header_shows_the_section_title_and_count(self):
+    def test_changing_only_sort_mode_does_not_reposition_the_window(self):
+        # #3: switching sort mode goes through apply_settings, which must NOT yank
+        # the window back to its configured corner -- the user may have dragged it.
+        # A real geometry change (corner/size) still repositions.
+        from ccnav import config
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            calls = []
+            window._apply_geometry = lambda s: calls.append(s)  # spy on repositioning
+            window.apply_settings(config.with_updates(window._settings, sort_mode="group"))
+            self.assertEqual(calls, [])  # sort-mode-only change: window stays put
+            window.apply_settings(config.with_updates(window._settings, corner="bottom-left"))
+            self.assertEqual(len(calls), 1)  # a corner change DOES reposition
+        finally:
+            window.destroy()
+
+    def test_status_header_row_shows_the_section_title_and_count(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="i", state=hookstate.WAITING,
                                  reason="permission_prompt")])
-            header = window._make_status_header(model.INPUT_NEEDED)
+            header = window._build_status_header_row(model.INPUT_NEEDED)
             texts = " ".join(l.get_text() for l in self._widgets_of_type(header, Gtk.Label))
             self.assertIn("입력이 필요한 세션", texts)
             self.assertIn("1", texts)  # the section count
@@ -1324,7 +1636,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             spinner = self._front(child)  # the working front spinner (not the back layer)
             self.assertIsNotNone(spinner.get_ancestor(Gtk.ListBox))  # live -> timer runs
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
@@ -1341,9 +1653,9 @@ class NavigatorWindowTest(unittest.TestCase):
             on_send=lambda r, t: sent.append((r.session_id, r.pane, t)))
         try:
             window.set_rows([row(session_id="a", pane="%1")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             window.set_rows([row(session_id="a", pane="%9")])  # pane changed -> update
-            self.assertIs(window._listbox.get_children()[0], child)
+            self.assertIs(self._first_row(window), child)
             child.ccnav_entry.set_text("hello")
             child.ccnav_entry.emit("activate")
             self.assertEqual(sent, [("a", "%9", "hello")])  # current pane, not the stale %1
@@ -1389,7 +1701,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(cwd="/data/projects/demo", session_id="a",
                                  last_prompt="fix the parser bug")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self._click(window, child)
             joined = " ".join(self._labels_under(child))
             self.assertIn("/data/projects/demo", joined)
@@ -1404,7 +1716,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a"), row(session_id="b")])
-            _a, b = window._listbox.get_children()
+            _a, b = self._session_children(window)
             window._listbox.unselect_all()
             self._click(window, b)
             self.assertIs(window._listbox.get_selected_row(), b)  # stays expanded
@@ -1415,7 +1727,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self._click(window, child)               # first click: expands
             self.assertIs(window._listbox.get_selected_row(), child)
             self._click(window, child)               # re-click: collapses
@@ -1431,7 +1743,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             blob = "<task-notification>\n<task-id>x</task-id>\n<status>done</status>"
             window.set_rows([row(session_id="a", last_prompt=blob)])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self._click(window, child)
             labels = self._labels_under(child)
             for text in labels:
@@ -1447,7 +1759,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", reason="perm\nission\nthree")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self._click(window, child)
             for text in self._labels_under(child):
                 self.assertNotIn("\n", text)  # no detail label rendered multi-line
@@ -1462,7 +1774,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(cwd="/a & b/<x>", session_id="a",
                                  last_prompt="grep 'a & b' <file>")])
-            child = window._listbox.get_children()[0]
+            child = self._first_row(window)
             self._click(window, child)
             joined = " ".join(self._labels_under(child))
             self.assertIn("/a & b/<x>", joined)
@@ -1551,6 +1863,38 @@ class SettingsUiTest(unittest.TestCase):
             dialog = window._build_settings_dialog()
             try:
                 self.assertIsInstance(dialog, Gtk.Dialog)
+            finally:
+                dialog.destroy()
+        finally:
+            window.destroy()
+
+    def test_settings_dialog_has_a_notifications_toggle_wired_to_the_setting(self):
+        from ccnav import config
+
+        def checks(root):
+            out = []
+            stack = [root]
+            while stack:
+                w = stack.pop()
+                if isinstance(w, Gtk.CheckButton):
+                    out.append(w)
+                if isinstance(w, Gtk.Container):
+                    stack.extend(w.get_children())
+            return out
+
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), notifications=False),
+        )
+        try:
+            dialog = window._build_settings_dialog()
+            try:
+                found = [c for c in checks(dialog) if "시스템 알림" in (c.get_label() or "")]
+                self.assertEqual(len(found), 1, "exactly one 시스템 알림 toggle")
+                toggle = found[0]
+                self.assertFalse(toggle.get_active(), "reflects notifications=False")
+                toggle.set_active(True)  # emits 'toggled' -> commit
+                self.assertTrue(window._settings.notifications)
             finally:
                 dialog.destroy()
         finally:
