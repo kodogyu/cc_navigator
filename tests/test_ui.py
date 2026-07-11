@@ -488,6 +488,32 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_detach_recovers_full_view_even_after_a_pre_dock_collapse(self):
+        # GtkStack won't switch to a hidden child; a collapse before docking hid
+        # _content, so detach must re-show it or the window stays stuck on the bar.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_collapsed(True)
+            window._dock_to_edge("left")
+            window._dock_detach.emit("clicked")
+            self.assertEqual(window._stack.get_visible_child_name(), "full")
+            self.assertTrue(window._content.get_visible())
+            self.assertFalse(window._collapse_button.get_active())  # collapse cleared
+        finally:
+            window.destroy()
+
+    def test_show_all_does_not_reveal_the_header_while_docked(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
+        try:
+            window._dock_to_edge("top")
+            self.assertFalse(window._header.get_visible())
+            window.show_all()  # must NOT re-reveal the titlebar while docked
+            self.assertFalse(window._header.get_visible())
+        finally:
+            window._undock()
+            window.destroy()
+
     def test_dock_ignores_an_unknown_edge(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:

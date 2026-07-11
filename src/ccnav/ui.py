@@ -347,6 +347,11 @@ class NavigatorWindow(Gtk.Window):
 
         self.set_titlebar(header)
         self._header = header  # kept so attach mode can drop/restore the titlebar
+        # Show the header now and mark it no-show-all, so a later window.show_all()
+        # (app.main calls it once at startup) can't re-reveal the titlebar while
+        # the panel is docked (attach mode hides it).
+        header.show_all()
+        header.set_no_show_all(True)
 
         # Font override lives in a CSS provider scoped to this window by a class,
         # so changing the panel's font size never touches any other application.
@@ -414,7 +419,6 @@ class NavigatorWindow(Gtk.Window):
         # (long-press the collapse button, then pick an edge) swaps to the docked
         # bar pinned to a screen edge; the detach button swaps back.
         self._docked_edge = None
-        self._pre_dock_size = None
         self._pre_dock_pos = None
         self._dock_bar = self._build_dock_bar()
         self._stack = Gtk.Stack()
@@ -453,12 +457,15 @@ class NavigatorWindow(Gtk.Window):
         else:
             self.unstick()
 
-        # Honour a live collapse: applying a settings change while collapsed
-        # must not re-grow the frame over the still-hidden body (which would
-        # leave a tall, empty titlebar while the toggle still reads "collapsed").
-        height = 1 if self._collapse_button.get_active() else settings.height
-        self.resize(settings.width, height)
-        self._apply_geometry(settings)
+        # While docked the window's size/position belong to attach mode; only a
+        # detach may move it. Opacity and the CSS tint still apply either way.
+        if self._docked_edge is None:
+            # Honour a live collapse: applying a settings change while collapsed
+            # must not re-grow the frame over the still-hidden body (which would
+            # leave a tall, empty titlebar while the toggle still reads "collapsed").
+            height = 1 if self._collapse_button.get_active() else settings.height
+            self.resize(settings.width, height)
+            self._apply_geometry(settings)
         Gtk.Widget.set_opacity(self, settings.opacity)
         self._apply_css(settings)
 
@@ -575,6 +582,15 @@ class NavigatorWindow(Gtk.Window):
         edge_button("go-down-symbolic", "bottom", 1, 2)
         grid.show_all()
         popover.add(grid)
+
+        # Clear the suppress flag when the popover closes (a long press whose
+        # release the popover grab swallowed would otherwise leave it stuck True
+        # and eat the next real collapse click), and destroy the popover so one
+        # is not leaked per long press.
+        def _on_closed(pop):
+            self._suppress_collapse_toggle = False
+            pop.destroy()
+        popover.connect("closed", _on_closed)
         popover.popup()
 
     def _dock_to_edge(self, edge: str) -> None:
@@ -583,7 +599,6 @@ class NavigatorWindow(Gtk.Window):
         if edge not in ("top", "bottom", "left", "right"):
             return
         if self._docked_edge is None:  # remember where to return on detach
-            self._pre_dock_size = (self._settings.width, self._settings.height)
             self._pre_dock_pos = self.get_position()
         self._docked_edge = edge
         self._dock_bar.set_orientation(
@@ -602,10 +617,15 @@ class NavigatorWindow(Gtk.Window):
         if self._docked_edge is None:
             return
         self._docked_edge = None
+        # A collapse before docking hid _content, and GtkStack refuses to switch
+        # to a HIDDEN child -- so restore the full view's visibility and clear any
+        # collapsed state BEFORE the switch, or the stack stays stuck on the bar.
+        if self._collapse_button.get_active():
+            self._collapse_button.set_active(False)  # set_collapsed(False) shows _content
+        self._content.show()
         self._stack.set_visible_child_name("full")
         self._header.show()  # restore the titlebar
-        width, height = self._pre_dock_size or (self._settings.width, self._settings.height)
-        self.resize(width, height)
+        self.resize(self._settings.width, self._settings.height)
         if self._pre_dock_pos is not None:
             self.move(*self._pre_dock_pos)
         else:
