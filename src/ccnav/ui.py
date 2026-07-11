@@ -716,21 +716,26 @@ class NavigatorWindow(Gtk.Window):
     def _undock(self) -> None:
         if self._docked_edge is None:
             return
+        if self._dock_drag is not None:
+            self._dock_drag = None  # defensively release a live slide grab
+            display = Gdk.Display.get_default()
+            seat = display.get_default_seat() if display is not None else None
+            if seat is not None:
+                seat.ungrab()
         self._docked_edge = None
-        self._dock_drag = None
         self.get_style_context().remove_class("docked")  # restore the normal frame
-        # A collapse before docking hid _content, and GtkStack refuses to switch
-        # to a HIDDEN child -- so restore the full view's visibility and clear any
-        # collapsed state BEFORE the switch, or the stack stays stuck on the bar.
-        if self._collapse_button.get_active():
-            self._collapse_button.set_active(False)  # set_collapsed(False) shows _content
-        self._content.show()
-        self._stack.set_visible_child_name("full")
-        # Hide the bar again so a later collapse (which hides _content) can't make
-        # the stack fall back to showing it.
+        # Hide the bar before the switch so a later collapse (which hides _content)
+        # can't make the stack fall back to showing it.
         self._dock_bar.hide()
+        # Fully restore the expanded view via set_collapsed(False): it shows
+        # _content, re-selects the "full" stack child, resizes, and -- crucially --
+        # resets the chevron icon to pan-up and un-presses the collapse button.
+        # Calling it directly (not gated on the button being active) fixes the
+        # dock-from-collapsed case where the attach popover already un-pressed the
+        # button, which would otherwise leave the chevron stuck pointing down.
+        # _docked_edge is already None, so set_collapsed's docked-guard lets it run.
+        self.set_collapsed(False)
         self._header.show()  # restore the titlebar
-        self.resize(self._settings.width, self._settings.height)
         if self._pre_dock_pos is not None:
             self.move(*self._pre_dock_pos)
         else:
@@ -788,6 +793,11 @@ class NavigatorWindow(Gtk.Window):
         return True
 
     def _on_dock_drag_end(self, _widget, event) -> bool:
+        # Only the button that started the slide ends it: while button 1 is held,
+        # the seat grab also delivers stray button 2/3 clicks here, which must not
+        # abort the drag mid-gesture.
+        if getattr(event, "button", 1) != 1:
+            return False
         if self._dock_drag is None:
             return False
         self._dock_drag = None

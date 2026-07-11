@@ -709,6 +709,32 @@ class NavigatorWindowTest(unittest.TestCase):
             self.assertEqual(window._stack.get_visible_child_name(), "full")
             self.assertTrue(window._content.get_visible())
             self.assertFalse(window._dock_bar.get_visible())
+            # The chevron must point up (expanded) again: the popover already
+            # un-pressed the button, so undock can't rely on it being active.
+            name, _size = window._collapse_button.get_child().get_icon_name()
+            self.assertEqual(name, "pan-up-symbolic")
+        finally:
+            window.destroy()
+
+    def test_a_stray_button_does_not_end_a_docked_slide(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window._dock_to_edge("top")
+            window._dock_drag = (10, 850)  # a button-1 slide is in progress
+
+            class Ev:
+                def __init__(self, b):
+                    self.button = b
+
+                def get_seat(self):
+                    return None
+
+            # A stray button-3 release (delivered by the grab) must NOT end it.
+            self.assertFalse(window._on_dock_drag_end(window._dock_drag_inner, Ev(3)))
+            self.assertIsNotNone(window._dock_drag)
+            # The button-1 release ends the slide.
+            self.assertTrue(window._on_dock_drag_end(window._dock_drag_inner, Ev(1)))
+            self.assertIsNone(window._dock_drag)
         finally:
             window.destroy()
 
