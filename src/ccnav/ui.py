@@ -546,6 +546,9 @@ class NavigatorWindow(Gtk.Window):
         # already shown its children, so _dock_to_edge only needs to show the bar.
         self._content.show()
         self._stack.show()
+        # Re-clip the docked bar to its rounded shape on every allocation while
+        # docked (keeps the corners matched to the real, WM-settled size).
+        self.connect("size-allocate", self._on_size_allocate)
         # No destroy -> Gtk.main_quit here: app.main() owns the main loop.
 
         # Apply the saved settings once everything exists: this sets size,
@@ -854,15 +857,36 @@ class NavigatorWindow(Gtk.Window):
         gdk_window = self.get_window()
         if gdk_window is not None:
             gdk_window.move_resize(x, y, w, h)
-            # Clip the window to a rounded rectangle so the two corners away from
-            # the edge are rounded (the CSS border-radius does not clip a
-            # title-bar-less docked window). Rebuilt here because it depends on w,h.
-            corners = _DOCK_CORNERS.get(edge)
-            if corners is not None:
-                gdk_window.shape_combine_region(
-                    _rounded_region(w, h, _DOCK_CORNER_RADIUS, corners), 0, 0)
         else:
             self.move(x, y)
+        # The rounded-corner clip is applied from _on_size_allocate, keyed off the
+        # window's ACTUAL size -- not the requested (w,h) here, which the WM may
+        # settle to a different size (leaving a far corner unclipped/square) or grow
+        # later (e.g. a font change while docked). Nudge one now for immediacy.
+        self._apply_dock_shape(edge)
+
+    def _apply_dock_shape(self, edge: str) -> None:
+        """Clip the docked window to a rounded rectangle (two corners away from the
+        edge rounded), sized to the window's real current geometry. CSS
+        border-radius does not clip a title-bar-less docked window, so this is what
+        actually rounds the corners."""
+        gdk_window = self.get_window()
+        corners = _DOCK_CORNERS.get(edge)
+        if gdk_window is None or corners is None:
+            return
+        w, h = gdk_window.get_width(), gdk_window.get_height()
+        if w > 0 and h > 0:
+            gdk_window.shape_combine_region(
+                _rounded_region(w, h, _DOCK_CORNER_RADIUS, corners), 0, 0)
+
+    def _on_size_allocate(self, _widget, _alloc) -> None:
+        # Keep the rounded clip matched to the ACTUAL size while docked: the WM may
+        # settle the docked window at a size different from what we requested, and a
+        # live font change can grow the bar past it -- either would leave the shape
+        # stale (a far corner square). Re-applying on every allocation fixes it. A
+        # no-op when not docked.
+        if self._docked_edge is not None:
+            self._apply_dock_shape(self._docked_edge)
 
     # -- sliding a docked bar along its edge ---------------------------------
 

@@ -836,6 +836,27 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_the_rounded_shape_is_reapplied_on_allocation_while_docked_only(self):
+        # The clip must track the window's REAL size, so it is re-applied on every
+        # size-allocate while docked (a WM-settled or font-grown size differs from
+        # the requested one) -- and never while undocked.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
+        seen = []
+        window._apply_dock_shape = lambda edge: seen.append(edge)
+        try:
+            window._dock_to_edge("bottom")
+            while Gtk.events_pending():
+                Gtk.main_iteration()
+            self.assertIn("bottom", seen)   # re-clipped at the real docked size
+            seen.clear()
+            window._undock()
+            while Gtk.events_pending():
+                Gtk.main_iteration()
+            self.assertEqual(seen, [])       # the regrow's allocation must not re-clip
+        finally:
+            window.destroy()
+
     def test_dragging_a_docked_bar_slides_along_the_edge_and_pins_the_other_axis(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
