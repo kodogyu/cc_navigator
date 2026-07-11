@@ -49,6 +49,7 @@ class BuildRecordTest(unittest.TestCase):
                 "message": "Allow Bash command: npm test?",
                 "updated_at": 1783665780,
                 "last_prompt": "",
+                "subagent_ids": [],
             },
         )
 
@@ -66,8 +67,9 @@ class BuildRecordTest(unittest.TestCase):
         self.assertIsNone(hook.build_record(payload, ENV, now=1))
 
     def test_a_late_resume_event_keeps_an_idle_session_idle(self):
-        # After Stop (WAITING/idle -> green), a late PostToolUse or SubagentStop
-        # from the just-ended turn must NOT re-light the working spinner.
+        # After Stop (WAITING/idle -> green), a late PostToolUse from the just-
+        # ended turn must NOT re-light the working spinner. A late SubagentStop
+        # is inert too: it carries no main state and its id set is unchanged.
         idle = {"state": hookstate.WAITING, "reason": hookstate.STOP_IDLE, "last_prompt": "hi"}
         for event in ("PostToolUse", "SubagentStop"):
             payload = dict(PAYLOAD, hook_event_name=event, tool_name="Bash")
@@ -76,17 +78,68 @@ class BuildRecordTest(unittest.TestCase):
                 "%s must not override an idle session" % event)
 
     def test_a_resume_event_still_clears_a_red_wait(self):
-        # The un-stick fix is preserved: a resume event clears a red input wait
-        # (any reason that is NOT Stop's reserved idle).
+        # The un-stick fix is preserved: a PostToolUse resume clears a red input
+        # wait (any reason that is NOT Stop's reserved idle).
         red = {"state": hookstate.WAITING, "reason": "permission_prompt"}
         payload = dict(PAYLOAD, hook_event_name="PostToolUse", tool_name="Bash")
         rec = hook.build_record(payload, ENV, now=2, previous=red)
         self.assertEqual(rec["state"], hookstate.WORKING)
 
-    def test_a_resume_event_with_no_previous_is_working(self):
-        payload = dict(PAYLOAD, hook_event_name="SubagentStop")
+    def test_a_post_tool_use_with_no_previous_is_working(self):
+        payload = dict(PAYLOAD, hook_event_name="PostToolUse", tool_name="Bash")
         rec = hook.build_record(payload, ENV, now=2, previous=None)
         self.assertEqual(rec["state"], hookstate.WORKING)
+
+
+class SubagentTrackingTest(unittest.TestCase):
+    def _rec(self, event, previous, agent_id=None, **extra):
+        payload = dict(PAYLOAD, hook_event_name=event, **extra)
+        if agent_id is not None:
+            payload["agent_id"] = agent_id
+        return hook.build_record(payload, ENV, now=5, previous=previous)
+
+    def test_subagent_start_records_the_running_id(self):
+        rec = self._rec("SubagentStart", previous=None, agent_id="sub-1")
+        self.assertEqual(rec["subagent_ids"], ["sub-1"])
+        # No previous state -> the main agent is taken to be working.
+        self.assertEqual(rec["state"], hookstate.WORKING)
+
+    def test_subagent_stop_removes_only_its_own_id(self):
+        prev = {"state": hookstate.WORKING, "reason": "", "subagent_ids": ["sub-1", "sub-2"]}
+        rec = self._rec("SubagentStop", previous=prev, agent_id="sub-1")
+        self.assertEqual(rec["subagent_ids"], ["sub-2"])
+
+    def test_a_subagent_event_carries_the_main_state_forward(self):
+        # The flagship case: main is blocked on the user (red) while a subagent
+        # runs. The SubagentStart must NOT disturb the red wait.
+        red = {"state": hookstate.WAITING, "reason": "permission_prompt",
+               "message": "Allow Bash?", "last_prompt": "hi"}
+        rec = self._rec("SubagentStart", previous=red, agent_id="sub-1")
+        self.assertEqual(rec["state"], hookstate.WAITING)
+        self.assertEqual(rec["reason"], "permission_prompt")
+        self.assertEqual(rec["message"], "Allow Bash?")   # the wait's text persists
+        self.assertEqual(rec["subagent_ids"], ["sub-1"])
+
+    def test_an_unchanged_subagent_set_writes_nothing(self):
+        # A SubagentStop for an id that is not tracked (or a duplicate Start)
+        # leaves the set unchanged, so there is nothing to persist.
+        prev = {"state": hookstate.WORKING, "reason": "", "subagent_ids": ["sub-1"]}
+        self.assertIsNone(self._rec("SubagentStop", previous=prev, agent_id="ghost"))
+        self.assertIsNone(self._rec("SubagentStart", previous=prev, agent_id="sub-1"))
+
+    def test_a_turn_boundary_clears_the_running_set(self):
+        # Stop / a new prompt / session start reset the set -- the leak safety net.
+        prev = {"state": hookstate.WORKING, "reason": "", "subagent_ids": ["a", "b"]}
+        for event in ("Stop", "UserPromptSubmit", "SessionStart"):
+            rec = self._rec(event, previous=prev)
+            self.assertEqual(rec["subagent_ids"], [], event)
+
+    def test_a_normal_classified_event_carries_the_running_set(self):
+        # A Notification (main goes red) while a subagent runs keeps the set.
+        prev = {"state": hookstate.WORKING, "reason": "", "subagent_ids": ["a"]}
+        rec = self._rec("Notification", previous=prev, notification_type="permission_prompt")
+        self.assertEqual(rec["state"], hookstate.WAITING)
+        self.assertEqual(rec["subagent_ids"], ["a"])
 
     def test_missing_session_id_returns_none(self):
         payload = dict(PAYLOAD)

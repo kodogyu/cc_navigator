@@ -68,6 +68,20 @@ class BuildRowsTest(unittest.TestCase):
         )
         self.assertEqual([r.session_id for r in rows], ["w-new", "w-old", "working"])
 
+    def test_subagent_ids_populate_the_active_flag(self):
+        rec = dict(record("a", "%1", state=hookstate.WORKING), subagent_ids=["s1", "s2"])
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].subagent_ids, ("s1", "s2"))
+        self.assertTrue(rows[0].subagent_active)
+
+    def test_missing_or_garbage_subagent_ids_mean_not_active(self):
+        plain = model.build_rows([record("a", "%1")], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(plain[0].subagent_ids, ())
+        self.assertFalse(plain[0].subagent_active)
+        junk = dict(record("b", "%2"), subagent_ids="not-a-list")
+        rows = model.build_rows([junk], {SOCK: {"%2": "demo"}}, {SOCK: {}})
+        self.assertFalse(rows[0].subagent_active)
+
     def test_records_without_socket_or_pane_are_dropped(self):
         bad = {"session_id": "x", "tmux_socket": "", "tmux_pane": "", "updated_at": 1}
         self.assertEqual(model.build_rows([bad], {}, {}), [])

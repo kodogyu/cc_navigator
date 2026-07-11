@@ -75,12 +75,12 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(result, (hookstate.WAITING, "notification"))
         self.assertNotEqual(result[1], hookstate.STOP_IDLE)
 
-    def test_subagent_stop_is_working(self):
-        # A finished subagent means the main agent resumed; it un-sticks a red dot
-        # that would otherwise persist for the whole subagent run.
-        self.assertEqual(
-            hookstate.classify({"hook_event_name": "SubagentStop"}),
-            (hookstate.WORKING, ""))
+    def test_subagent_events_carry_no_main_state(self):
+        # SubagentStart/Stop drive the separate running-subagent count (see
+        # hook.build_record); they never change the MAIN agent's state, so a red
+        # "input" wait persists while a subagent runs instead of being cleared.
+        self.assertIsNone(hookstate.classify({"hook_event_name": "SubagentStart"}))
+        self.assertIsNone(hookstate.classify({"hook_event_name": "SubagentStop"}))
 
     def test_unknown_event_is_ignored(self):
         self.assertIsNone(hookstate.classify({"hook_event_name": "Nonsense"}))

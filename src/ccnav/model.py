@@ -20,10 +20,17 @@ class Row:
     cwd: str
     updated_at: int
     last_prompt: str = ""
+    subagent_ids: Tuple[str, ...] = ()
 
     @property
     def waiting(self) -> bool:
         return self.state == hookstate.WAITING
+
+    @property
+    def subagent_active(self) -> bool:
+        """True while one or more subagents this session launched are still
+        running -- the second, overlapping status icon is shown iff this is set."""
+        return bool(self.subagent_ids)
 
     @property
     def window_title(self) -> str:
@@ -53,6 +60,15 @@ def _as_int(value) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _subagent_ids(value) -> Tuple[str, ...]:
+    """Coerce a state file's subagent_ids to a tuple of strings. A hand-edited
+    or older file may carry a non-list (or be missing the field entirely), which
+    must degrade to 'no running subagents' rather than raise in the poll loop."""
+    if not isinstance(value, list):
+        return ()
+    return tuple(str(x) for x in value)
 
 
 def _newest_per_pane(records):
@@ -94,6 +110,7 @@ def build_rows(
                 cwd=str(rec.get("cwd") or ""),
                 updated_at=_as_int(rec.get("updated_at", 0)),
                 last_prompt=str(rec.get("last_prompt") or ""),
+                subagent_ids=_subagent_ids(rec.get("subagent_ids")),
             )
         )
     rows.sort(key=sort_key)

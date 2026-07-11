@@ -9,11 +9,12 @@ from gi.repository import Gtk  # noqa: E402
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
-        last_prompt="", pane="%1", socket="/tmp/s", updated_at=1):
+        last_prompt="", pane="%1", socket="/tmp/s", updated_at=1, subagent_ids=()):
     return model.Row(
         session_id=session_id, socket=socket, pane=pane, tmux_session="demo",
         title=title, state=state, reason=reason,
         message=message, cwd=cwd, updated_at=updated_at, last_prompt=last_prompt,
+        subagent_ids=tuple(subagent_ids),
     )
 
 
@@ -395,8 +396,9 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(state=hookstate.WORKING, session_id="a")])
             child = window._listbox.get_children()[0]
-            # the working indicator is the cairo reload spinner (a DrawingArea)
-            self.assertEqual(len(self._widgets_of_type(child, Gtk.DrawingArea)), 1)
+            # the working front is the cairo reload spinner (a DrawingArea)
+            self.assertTrue(self._front_is_spinner(child))
+            self.assertFalse(self._back(child).ccnav_subagent)  # no subagent layer
             for text in self._labels_under(child):
                 self.assertNotIn("Waiting input", text)  # the old badge is gone
         finally:
@@ -408,7 +410,7 @@ class NavigatorWindowTest(unittest.TestCase):
             window.set_rows([row(state=hookstate.WAITING, reason="idle", session_id="a")])
             child = window._listbox.get_children()[0]
             self.assertIn("●", self._labels_under(child))  # a coloured dot
-            self.assertEqual(len(self._widgets_of_type(child, Gtk.DrawingArea)), 0)  # no spinner
+            self.assertFalse(self._front_is_spinner(child))  # front is a dot, not a spinner
         finally:
             window.destroy()
 
@@ -418,8 +420,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window.show_all()
         try:
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
-            spinner = self._widgets_of_type(
-                window._listbox.get_children()[0], Gtk.DrawingArea)[0]
+            spinner = self._front(window._listbox.get_children()[0])
             before = spinner.ccnav_angle
             loop = GLib.MainLoop()
             GLib.timeout_add(300, loop.quit)
@@ -433,6 +434,17 @@ class NavigatorWindowTest(unittest.TestCase):
             if "●" in lbl.get_label():
                 return lbl.get_label()
         return ""
+
+    def _front(self, child):
+        return child.ccnav_indicator.ccnav_front
+
+    def _back(self, child):
+        return child.ccnav_indicator.ccnav_back
+
+    def _front_is_spinner(self, child):
+        # The working front is a bare DrawingArea; every other front is a dot
+        # EventBox carrying ccnav_dot_label.
+        return getattr(self._front(child), "ccnav_dot_label", None) is None
 
     def _row_by_id(self, window, session_id):
         for c in window._listbox.get_children():
@@ -477,10 +489,10 @@ class NavigatorWindowTest(unittest.TestCase):
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
             child = window._listbox.get_children()[0]
             self.assertIn("●", self._labels_under(child))  # a dot
-            self.assertEqual(len(self._widgets_of_type(child, Gtk.DrawingArea)), 0)
+            self.assertFalse(self._front_is_spinner(child))
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
             self.assertIs(window._listbox.get_children()[0], child)  # same row widget
-            self.assertEqual(len(self._widgets_of_type(child, Gtk.DrawingArea)), 1)  # dot -> spinner
+            self.assertTrue(self._front_is_spinner(child))  # dot -> spinner in place
         finally:
             window.destroy()
 
@@ -489,7 +501,7 @@ class NavigatorWindowTest(unittest.TestCase):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
-            dot = window._listbox.get_children()[0].ccnav_indicator
+            dot = window._listbox.get_children()[0].ccnav_indicator.ccnav_front
             self.assertIn("●", dot.ccnav_dot_label.get_label())  # filled to start
             ev = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
             handled = dot.emit("button-press-event", ev)
@@ -508,7 +520,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="permission_prompt")])
-            dot = window._listbox.get_children()[0].ccnav_indicator
+            dot = window._listbox.get_children()[0].ccnav_indicator.ccnav_front
             before = dot.ccnav_dot_label.get_label()
             handled = dot.emit("button-press-event", Gdk.Event.new(Gdk.EventType.BUTTON_PRESS))
             self.assertFalse(handled)  # falls through to the row (no toggle on red)
@@ -540,12 +552,12 @@ class NavigatorWindowTest(unittest.TestCase):
                                  reason="idle", message="m1")])
             child = window._listbox.get_children()[0]
             window._on_indicator_clicked(child.ccnav_indicator, None, child)  # -> hollow
-            self.assertIn("▢", child.ccnav_indicator.ccnav_dot_label.get_label())
+            self.assertIn("▢", child.ccnav_indicator.ccnav_front.ccnav_dot_label.get_label())
             # A non-status field changes; the row stays green and same widget.
             window.set_rows([row(session_id="a", state=hookstate.WAITING,
                                  reason="idle", message="m2")])
             self.assertIs(window._listbox.get_children()[0], child)
-            self.assertIn("▢", child.ccnav_indicator.ccnav_dot_label.get_label())
+            self.assertIn("▢", child.ccnav_indicator.ccnav_front.ccnav_dot_label.get_label())
             self.assertIn("a", window._acknowledged)
         finally:
             window.destroy()
@@ -560,6 +572,84 @@ class NavigatorWindowTest(unittest.TestCase):
             self.assertIn("a", window._acknowledged)
             window.set_rows([row(session_id="b", state=hookstate.WAITING, reason="idle")])
             self.assertNotIn("a", window._acknowledged)  # dropped when the row left
+        finally:
+            window.destroy()
+
+    # --- subagent dual-icon layer -------------------------------------------
+
+    def test_front_kind_maps_working_with_subagents_to_orchestrating(self):
+        self.assertEqual(ui.front_kind(row(state=hookstate.WORKING)), "working")
+        self.assertEqual(
+            ui.front_kind(row(state=hookstate.WORKING, subagent_ids=("s1",))),
+            "orchestrating")
+        # a red wait / green report is shown in front unchanged, even with a helper
+        self.assertEqual(
+            ui.front_kind(row(state=hookstate.WAITING, reason="permission_prompt",
+                              subagent_ids=("s1",))), "input")
+        self.assertEqual(
+            ui.front_kind(row(state=hookstate.WAITING, reason="idle",
+                              subagent_ids=("s1",))), "reported")
+
+    def test_a_working_row_with_a_subagent_shows_a_calm_dot_over_a_back_spinner(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WORKING,
+                                 subagent_ids=("s1",))])
+            child = window._listbox.get_children()[0]
+            # front is the calm blue 'orchestrating' dot, NOT a spinner
+            self.assertFalse(self._front_is_spinner(child))
+            self.assertIn("#3584e4", self._dot_markup(child))
+            self.assertTrue(self._back(child).ccnav_subagent)  # helper layer active
+        finally:
+            window.destroy()
+
+    def test_a_red_wait_with_a_subagent_shows_both_at_once(self):
+        # The flagship case: main blocked on the user (red) while a helper runs --
+        # a single icon could not show both; the two layers do.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="permission_prompt", subagent_ids=("s1",))])
+            child = window._listbox.get_children()[0]
+            self.assertIn("#e01b24", self._dot_markup(child))     # front stays red
+            self.assertTrue(self._back(child).ccnav_subagent)     # back spinner shown
+        finally:
+            window.destroy()
+
+    def test_subagent_layer_toggles_on_and_off_in_place(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="permission_prompt")])
+            child = window._listbox.get_children()[0]
+            self.assertFalse(self._back(child).ccnav_subagent)
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="permission_prompt", subagent_ids=("s1",))])
+            self.assertIs(window._listbox.get_children()[0], child)  # same widget
+            self.assertTrue(self._back(child).ccnav_subagent)
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="permission_prompt")])
+            self.assertFalse(self._back(child).ccnav_subagent)  # helper finished
+        finally:
+            window.destroy()
+
+    def test_a_subagent_appearing_in_place_starts_the_back_spinner(self):
+        from gi.repository import GLib
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="permission_prompt")])
+            child = window._listbox.get_children()[0]
+            self.assertFalse(self._back(child).ccnav_spinning)  # idle: no timer
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="permission_prompt", subagent_ids=("s1",))])
+            back = self._back(child)
+            before = back.ccnav_angle
+            loop = GLib.MainLoop()
+            GLib.timeout_add(300, loop.quit)
+            loop.run()
+            self.assertNotEqual(back.ccnav_angle, before)  # started spinning in place
         finally:
             window.destroy()
 
@@ -1235,7 +1325,7 @@ class NavigatorWindowTest(unittest.TestCase):
         try:
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
             child = window._listbox.get_children()[0]
-            spinner = self._widgets_of_type(child, Gtk.DrawingArea)[0]
+            spinner = self._front(child)  # the working front spinner (not the back layer)
             self.assertIsNotNone(spinner.get_ancestor(Gtk.ListBox))  # live -> timer runs
             window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
             self.assertIsNone(spinner.get_ancestor(Gtk.ListBox))  # detached -> timer self-stops

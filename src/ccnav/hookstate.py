@@ -52,14 +52,15 @@ def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:
         # its "..." response. Without this the dot stays red while Claude works.
         return (WORKING, "")
 
-    if event == "SubagentStop":
-        # A subagent finished, so the main agent has resumed. While a subagent
-        # runs it is the ONLY event that fires for the session, so treating it as
-        # WORKING is what un-sticks a red "input" dot for the whole subagent run
-        # (the same resume logic as PostToolUse). It can never wrongly override a
-        # real wait: the main agent can't Stop or prompt while a subagent is still
-        # running, so a genuine WAITING event always lands after this one.
-        return (WORKING, "")
+    # SubagentStart / SubagentStop carry NO main-agent state change. They drive a
+    # separate axis -- the count of running subagents -- maintained by
+    # hook.build_record (add on Start, remove on Stop). The main agent keeps
+    # whatever state it already had: while its helpers run it is typically parked
+    # (still WORKING), and if it is genuinely blocked on the user (a red wait)
+    # that must PERSIST, not be cleared by a subagent finishing. So both return
+    # None here and the main state is carried forward verbatim.
+    if event in ("SubagentStart", "SubagentStop"):
+        return None
 
     if event == "Stop":
         return (WAITING, STOP_IDLE)

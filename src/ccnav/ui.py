@@ -109,6 +109,19 @@ def dot_state(row: model.Row) -> str:
     return model.status_key(row)
 
 
+def front_kind(row: model.Row) -> str:
+    """Which MAIN-agent icon a row's front layer shows. Same as dot_state, except
+    a 'working' main agent that has subagents running is shown 'orchestrating'
+    (a calm blue dot, not a spinner): the work is happening in its helpers, whose
+    spinner is the subagent layer behind it, so the front must not also spin --
+    that is the whole point of the two-icon split. A red 'input' wait or a green
+    'reported' dot is unchanged and still shown in front, even with subagents."""
+    base = dot_state(row)
+    if base == "working" and row.subagent_active:
+        return "orchestrating"
+    return base
+
+
 # The Sort-by-Status section titles, keyed by model's section constants.
 _STATUS_LABELS = {
     model.INPUT_NEEDED: "입력이 필요한 세션",
@@ -126,19 +139,19 @@ _WORKING_PERIOD_MS = 80
 _WORKING_STEP = 0.30  # radians per tick
 
 
-def _draw_reload_spinner(widget: Gtk.Widget, cr: "cairo.Context", angle: float) -> None:
-    """Draw two curved arrows chasing each other around a circle, rotated by
-    `angle`. Two ~150-degree arcs on opposite sides, each capped by a triangular
-    arrowhead pointing clockwise along the arc."""
-    w = widget.get_allocated_width() or _WORKING_SIZE
-    h = widget.get_allocated_height() or _WORKING_SIZE
-    size = min(w, h)
+def _draw_reload_spinner_at(cr, cx: float, cy: float, size: float, angle: float,
+                            colour=_WORKING_COLOUR) -> None:
+    """Draw two curved arrows chasing each other around a circle of diameter
+    `size` centred at (cx, cy), rotated by `angle`. Two ~150-degree arcs on
+    opposite sides, each capped by a triangular arrowhead pointing clockwise
+    along the arc. Centre + size are explicit so the same glyph can be the full
+    front indicator or a smaller subagent layer behind it."""
     r = size * 0.30
     head = size * 0.24
     cr.save()
-    cr.translate(w / 2.0, h / 2.0)
+    cr.translate(cx, cy)
     cr.rotate(angle)
-    cr.set_source_rgb(*_WORKING_COLOUR)
+    cr.set_source_rgb(*colour)
     cr.set_line_width(max(1.5, size * 0.12))
     cr.set_line_cap(cairo.LINE_CAP_ROUND)
     for base in (0.0, math.pi):
@@ -161,13 +174,33 @@ def _draw_reload_spinner(widget: Gtk.Widget, cr: "cairo.Context", angle: float) 
     cr.restore()
 
 
+def _draw_reload_spinner(widget: Gtk.Widget, cr: "cairo.Context", angle: float) -> None:
+    """The full-size front working spinner: centred on the widget."""
+    w = widget.get_allocated_width() or _WORKING_SIZE
+    h = widget.get_allocated_height() or _WORKING_SIZE
+    _draw_reload_spinner_at(cr, w / 2.0, h / 2.0, min(w, h), angle)
+
+
+def _spin_tick(area) -> bool:
+    """One animation step shared by the front and subagent spinners: advance the
+    angle and redraw while the widget is still inside a list, else stop. Keying
+    the stop on the widget's OWN ancestry (not its row's) is what stops a
+    working->waiting flip from orphaning the timer."""
+    try:
+        if area.get_ancestor(Gtk.ListBox) is None:
+            return False
+        area.ccnav_angle = (area.ccnav_angle + _WORKING_STEP) % (2 * math.pi)
+        area.queue_draw()
+        return True
+    except Exception:  # noqa: BLE001 -- widget torn down mid-animation
+        return False
+
+
 def _build_working_arrow() -> Gtk.DrawingArea:
-    """Two curved arrows that spin while Claude works. One self-cleaning GLib
+    """Two curved arrows that spin while Claude works. A self-cleaning GLib
     timeout advances the rotation and drops itself the moment the widget is no
-    longer inside a list -- which covers BOTH the row being removed AND the
-    indicator being swapped out for a dot in place. Keying the stop on the
-    widget's own ancestry (not its row's) is what stops a working->waiting flip
-    from orphaning the timer. The current angle is exposed for tests."""
+    longer inside a list -- covering BOTH the row being removed AND the indicator
+    being swapped out for a dot in place. The current angle is exposed for tests."""
     area = Gtk.DrawingArea()
     area.set_size_request(_WORKING_SIZE, _WORKING_SIZE)
     area.ccnav_angle = 0.0  # type: ignore[attr-defined]
@@ -177,18 +210,56 @@ def _build_working_arrow() -> Gtk.DrawingArea:
         return False
 
     area.connect("draw", on_draw)
+    GLib.timeout_add(_WORKING_PERIOD_MS, lambda: _spin_tick(area))
+    return area
+
+
+# The subagent layer: a smaller reload spinner drawn to the RIGHT and BEHIND the
+# main (front) icon, shown only while this session has a subagent running. The
+# whole indicator is a Gtk.Overlay -- this DrawingArea is the overlay's main
+# child (painted first, so it sits behind), the front icon the overlay child on
+# top. Both share one angle timer that runs only while a subagent is active.
+_INDICATOR_W = 19
+_INDICATOR_H = 16
+_SUBAGENT_SIZE = 13
+
+
+def _draw_subagent(widget: Gtk.Widget, cr: "cairo.Context", angle: float) -> None:
+    w = widget.get_allocated_width() or _INDICATOR_W
+    h = widget.get_allocated_height() or _INDICATOR_H
+    _draw_reload_spinner_at(cr, w - _SUBAGENT_SIZE / 2.0, h / 2.0, _SUBAGENT_SIZE, angle)
+
+
+def _ensure_subagent_spinning(area) -> None:
+    """(Re)start the subagent layer's angle timer if it is not already running.
+    The tick stops itself when the subagent goes away or the row leaves the list;
+    flipping ccnav_subagent back on must therefore restart it."""
+    if getattr(area, "ccnav_spinning", False):
+        return
+    area.ccnav_spinning = True
 
     def tick() -> bool:
-        try:
-            if area.get_ancestor(Gtk.ListBox) is None:
-                return False  # detached (swap) or its row left the list -> stop
-            area.ccnav_angle = (area.ccnav_angle + _WORKING_STEP) % (2 * math.pi)
-            area.queue_draw()
-            return True
-        except Exception:  # noqa: BLE001 -- widget torn down mid-animation
+        if area.get_ancestor(Gtk.ListBox) is None or not area.ccnav_subagent:
+            area.ccnav_spinning = False
             return False
+        return _spin_tick(area)
 
     GLib.timeout_add(_WORKING_PERIOD_MS, tick)
+
+
+def _build_subagent_layer() -> Gtk.DrawingArea:
+    area = Gtk.DrawingArea()
+    area.set_size_request(_INDICATOR_W, _INDICATOR_H)
+    area.ccnav_angle = 0.0  # type: ignore[attr-defined]
+    area.ccnav_subagent = False  # type: ignore[attr-defined]
+    area.ccnav_spinning = False  # type: ignore[attr-defined]
+
+    def on_draw(widget, cr):
+        if widget.ccnav_subagent:
+            _draw_subagent(widget, cr, widget.ccnav_angle)
+        return False
+
+    area.connect("draw", on_draw)
     return area
 
 
@@ -235,18 +306,22 @@ def _dot_markup(kind: str, acknowledged: bool = False) -> str:
     """Markup for a status dot. The green 'reported' dot can be toggled to a
     hollow outline once the user has acknowledged (clicked) it -- a filled dot
     still wants a glance, a hollow box has been seen. Only 'reported' is ever
-    acknowledged; a red 'input' dot is always the filled, attention-seeking form."""
+    acknowledged. 'orchestrating' is the calm blue dot shown for the MAIN agent
+    while its subagents run (it is parked/delegating, so it does not spin -- only
+    the subagent layer behind it does)."""
     if kind == "reported":
         return '<span foreground="#2ec27e">%s</span>' % ("▢" if acknowledged else "●")
+    if kind == "orchestrating":
+        return '<span foreground="#3584e4">●</span>'
     return '<span foreground="#e01b24">●</span>'
 
 
-def _build_indicator(kind: str, acknowledged: bool = False) -> Gtk.Widget:
-    """The status widget for a row: a rotating arrow while working, else a
-    coloured dot (green 'reported', red 'input'). The dot lives inside an
-    EventBox so the row can make the green one clickable (acknowledge toggle);
-    the inner label is stashed as ccnav_dot_label so an in-place colour/shape
-    change never has to rebuild the widget."""
+def _build_front(kind: str, acknowledged: bool = False) -> Gtk.Widget:
+    """The MAIN agent's icon: a rotating arrow while working (no subagents), else
+    a coloured dot -- blue 'orchestrating' (parked on subagents), red 'input',
+    green 'reported'. The dot lives inside an EventBox so the row can make the
+    green one clickable (acknowledge toggle); the inner label is stashed as
+    ccnav_dot_label so an in-place colour/shape change never rebuilds the widget."""
     if kind == "working":
         return _build_working_arrow()
     label = Gtk.Label()
@@ -258,11 +333,38 @@ def _build_indicator(kind: str, acknowledged: bool = False) -> Gtk.Widget:
     return box
 
 
+def _build_indicator_area(kind: str, acknowledged: bool,
+                          subagent_active: bool) -> Gtk.Overlay:
+    """The whole status indicator: the main icon (front, left) overlaid on the
+    subagent spinner (behind, right). The overlay's MAIN child is the subagent
+    layer -- painted first, so it sits behind -- and the front icon is added as
+    an overlay child on top and left-aligned. Refs to both layers are stashed so
+    an in-place update can swap the front or toggle the back without a rebuild."""
+    overlay = Gtk.Overlay()
+    back = _build_subagent_layer()
+    back.ccnav_subagent = subagent_active
+    overlay.add(back)
+
+    front = _build_front(kind, acknowledged)
+    front.set_halign(Gtk.Align.START)
+    front.set_valign(Gtk.Align.CENTER)
+    overlay.add_overlay(front)
+
+    overlay.ccnav_front = front  # type: ignore[attr-defined]
+    overlay.ccnav_back = back    # type: ignore[attr-defined]
+    if subagent_active:
+        _ensure_subagent_spinning(back)
+    return overlay
+
+
 def _row_signature(row: model.Row):
     """The fields whose change the user can see. Excludes updated_at on purpose:
-    the hook never bumps a timestamp without also changing state or reason."""
+    the hook never bumps a timestamp without also changing state or reason. The
+    subagent set is included: a SubagentStart/Stop can change ONLY that field
+    (main state carried forward), and the second icon must still refresh."""
     return (row.session_id, row.socket, row.pane, row.tmux_session, row.title,
-            row.state, row.reason, row.message, row.cwd, row.last_prompt)
+            row.state, row.reason, row.message, row.cwd, row.last_prompt,
+            row.subagent_ids)
 
 
 # Drag target for manual-mode row reordering (within this app only).
@@ -1738,29 +1840,39 @@ class NavigatorWindow(Gtk.Window):
         list_row.ccnav_row = row
         list_row.ccnav_sig = _row_signature(row)
 
-        new_kind = dot_state(row)
+        new_kind = front_kind(row)
         sid = row.session_id
+        overlay = list_row.ccnav_indicator
+        front = overlay.ccnav_front
+        back = overlay.ccnav_back
         # The hollow "acknowledged" mark is meaningful only while green; drop it
         # the moment the session leaves 'reported', so a later return to green
         # starts filled (attention-seeking) again.
         if new_kind != "reported":
             self._acknowledged.discard(sid)
+        # Front layer: swap the overlay's on-top child (spinner <-> dot) when
+        # working-ness flips, else just recolour the dot in place.
         if (new_kind == "working") != (list_row.ccnav_kind == "working"):
-            # working-ness flipped: swap the widget (rotating arrow <-> dot).
-            list_row.ccnav_header.remove(list_row.ccnav_indicator)
-            indicator = _build_indicator(new_kind, sid in self._acknowledged)
-            list_row.ccnav_header.pack_start(indicator, False, False, 0)
-            list_row.ccnav_header.reorder_child(indicator, 0)
-            self._wire_indicator(indicator, list_row)
-            indicator.show_all()
-            list_row.ccnav_indicator = indicator
+            overlay.remove(front)
+            front = _build_front(new_kind, sid in self._acknowledged)
+            front.set_halign(Gtk.Align.START)
+            front.set_valign(Gtk.Align.CENTER)
+            overlay.add_overlay(front)
+            overlay.ccnav_front = front
+            self._wire_indicator(overlay, list_row)
+            front.show_all()
         elif new_kind != list_row.ccnav_kind:
-            # still a dot, only the colour changed (reported <-> input). The
-            # indicator is an EventBox now, so recolour its inner label.
-            label = getattr(list_row.ccnav_indicator, "ccnav_dot_label", None)
+            # still a dot; only colour/shape changed (orchestrating/input/reported).
+            label = getattr(front, "ccnav_dot_label", None)
             if label is not None:
                 label.set_markup(_dot_markup(new_kind, sid in self._acknowledged))
         list_row.ccnav_kind = new_kind
+        # Back layer: show/hide the subagent spinner behind the front icon.
+        if back.ccnav_subagent != row.subagent_active:
+            back.ccnav_subagent = row.subagent_active
+            back.queue_draw()
+            if row.subagent_active:
+                _ensure_subagent_spinning(back)
 
         list_row.ccnav_title.set_markup(_title_markup(row))
         list_row.ccnav_secondary.set_markup(_secondary_markup(row))
@@ -1777,8 +1889,9 @@ class NavigatorWindow(Gtk.Window):
         # Status at a glance, by colour/shape only (the old "Waiting input" text
         # is gone): a rotating arrow while Claude works, a red dot when it needs
         # an answer, a green dot when it has reported and is idle.
-        kind = dot_state(row)
-        indicator = _build_indicator(kind, row.session_id in self._acknowledged)
+        kind = front_kind(row)
+        indicator = _build_indicator_area(
+            kind, row.session_id in self._acknowledged, row.subagent_active)
         header.pack_start(indicator, False, False, 0)
         self._wire_indicator(indicator, list_row)
 
@@ -1918,13 +2031,14 @@ class NavigatorWindow(Gtk.Window):
         entry.set_text("")
         self._on_send(list_row.ccnav_row, text)
 
-    def _wire_indicator(self, indicator: Gtk.Widget, list_row: Gtk.ListBoxRow) -> None:
-        """Make a dot indicator clickable (the acknowledge toggle). The working
-        spinner has no ccnav_dot_label, so it is left inert."""
-        if getattr(indicator, "ccnav_dot_label", None) is not None:
-            indicator.connect("button-press-event", self._on_indicator_clicked, list_row)
+    def _wire_indicator(self, overlay: Gtk.Widget, list_row: Gtk.ListBoxRow) -> None:
+        """Make the front dot clickable (the acknowledge toggle). The working
+        spinner front has no ccnav_dot_label, so it is left inert."""
+        front = getattr(overlay, "ccnav_front", None)
+        if front is not None and getattr(front, "ccnav_dot_label", None) is not None:
+            front.connect("button-press-event", self._on_indicator_clicked, list_row)
 
-    def _on_indicator_clicked(self, _indicator, _event, list_row: Gtk.ListBoxRow) -> bool:
+    def _on_indicator_clicked(self, _front, _event, list_row: Gtk.ListBoxRow) -> bool:
         """Toggle the green 'reported' dot between filled and a hollow outline.
         Only the green dot toggles; a red 'input' dot ignores the click (and lets
         it fall through to the row). Swallowing the green click keeps it from also
@@ -1936,7 +2050,8 @@ class NavigatorWindow(Gtk.Window):
             self._acknowledged.discard(sid)
         else:
             self._acknowledged.add(sid)
-        label = getattr(list_row.ccnav_indicator, "ccnav_dot_label", None)
+        front = getattr(list_row.ccnav_indicator, "ccnav_front", None)
+        label = getattr(front, "ccnav_dot_label", None) if front is not None else None
         if label is not None:
             label.set_markup(_dot_markup("reported", sid in self._acknowledged))
         return True
