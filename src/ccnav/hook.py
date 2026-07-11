@@ -121,7 +121,15 @@ def build_record(
             last_prompt = _flatten(prompt, PROMPT_LIMIT)
         else:
             last_prompt = _flatten((previous or {}).get("last_prompt"), PROMPT_LIMIT)
-        message = _flatten(payload.get("message"), MESSAGE_LIMIT)
+        # A reported/idle (green) session is not blocking on anything, so it must
+        # not carry a "waiting" message: idle_prompt's Notification text ("Claude
+        # is waiting for your input") would otherwise render on a GREEN row and
+        # read as a contradiction. Stop already arrives message-less; this makes
+        # the idle-notification path match it.
+        if reason == hookstate.STOP_IDLE:
+            message = ""
+        else:
+            message = _flatten(payload.get("message"), MESSAGE_LIMIT)
         cwd = str(payload.get("cwd") or "")
 
     return {

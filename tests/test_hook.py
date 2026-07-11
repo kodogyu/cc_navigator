@@ -53,6 +53,21 @@ class BuildRecordTest(unittest.TestCase):
             },
         )
 
+    def test_idle_prompt_notification_is_reported_and_message_free(self):
+        # The idle nudge must leave a finished session GREEN, and must not stamp
+        # a "waiting for input" message onto that green row.
+        payload = dict(PAYLOAD, notification_type="idle_prompt",
+                       message="Claude is waiting for your input")
+        rec = hook.build_record(payload, ENV, now=1)
+        self.assertEqual(rec["state"], hookstate.WAITING)
+        self.assertEqual(rec["reason"], hookstate.STOP_IDLE)  # green, not red
+        self.assertEqual(rec["message"], "")
+
+    def test_permission_prompt_notification_stays_red_with_its_message(self):
+        rec = hook.build_record(PAYLOAD, ENV, now=1)  # PAYLOAD is a permission_prompt
+        self.assertEqual(rec["reason"], "permission_prompt")
+        self.assertEqual(rec["message"], "Allow Bash command: npm test?")
+
     def test_outside_tmux_returns_none(self):
         self.assertIsNone(hook.build_record(PAYLOAD, {}, now=1))
 

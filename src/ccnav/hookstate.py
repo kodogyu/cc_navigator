@@ -18,6 +18,16 @@ STOP_IDLE = "idle"
 # PreToolUse fires for every tool. Only these two mean "the user must answer".
 _WAITING_TOOLS = {"AskUserQuestion": "question", "ExitPlanMode": "plan"}
 
+# Notification types that mean "idle / finished at the prompt", NOT a request for
+# a choice. These read GREEN (reported), like a Stop: Claude output something and
+# is waiting for the user's next move, not for a specific permission/question.
+# idle_prompt fires after an idle timeout, so without this it would OVERWRITE the
+# green Stop that preceded it and turn a finished session red. Every other
+# notification type (permission_prompt, elicitation_dialog, ...) stays red -- the
+# safe default is "wants attention" so a new blocking type is never missed.
+# (notification_type enum sourced from the Claude Code binary.)
+_IDLE_NOTIFICATIONS = {"idle_prompt"}
+
 
 def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:
     """Return (state, reason), or None when the event carries no state change."""
@@ -30,9 +40,13 @@ def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:
         # Empty matcher: every notification_type counts, including
         # elicitation_dialog, which other tools drop.
         reason = str(payload.get("notification_type") or "notification")
-        # A notification means "Claude wants your attention", so it must never
-        # carry Stop's reserved reason (which the UI paints green as "reported,
-        # not blocking"). If a payload's type collides with it, relabel it.
+        # An idle notification means Claude finished and is waiting at the prompt,
+        # not blocking on a choice -> green, like a Stop.
+        if reason in _IDLE_NOTIFICATIONS:
+            return (WAITING, STOP_IDLE)
+        # Every other notification means "Claude wants your attention", so it must
+        # never carry Stop's reserved green reason. If a payload's type literally
+        # collides with it, relabel it (stays red).
         if reason == STOP_IDLE:
             reason = "notification"
         return (WAITING, reason)

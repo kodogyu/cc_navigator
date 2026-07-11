@@ -66,6 +66,21 @@ class ClassifyTest(unittest.TestCase):
         result = hookstate.classify({"hook_event_name": "Stop"})
         self.assertEqual(result, (hookstate.WAITING, hookstate.STOP_IDLE))
 
+    def test_idle_prompt_notification_reads_as_reported_not_input(self):
+        # idle_prompt fires after an idle timeout -- Claude finished its turn and
+        # is waiting at the prompt, NOT blocking on a choice. It must read GREEN
+        # (reported), like a Stop; otherwise the idle nudge turns a finished
+        # session red. (Enum from the Claude Code binary.)
+        result = hookstate.classify(
+            {"hook_event_name": "Notification", "notification_type": "idle_prompt"})
+        self.assertEqual(result, (hookstate.WAITING, hookstate.STOP_IDLE))
+
+    def test_permission_prompt_notification_still_reads_as_input(self):
+        result = hookstate.classify(
+            {"hook_event_name": "Notification", "notification_type": "permission_prompt"})
+        self.assertEqual(result, (hookstate.WAITING, "permission_prompt"))
+        self.assertNotEqual(result[1], hookstate.STOP_IDLE)  # stays red
+
     def test_notification_cannot_shadow_the_stop_idle_reason(self):
         # A Notification typed "idle" must not read as Stop's reserved reason
         # (which the UI paints green as "reported, not blocking") -- a
