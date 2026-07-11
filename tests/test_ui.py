@@ -484,6 +484,85 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_clicking_a_green_dot_toggles_it_hollow_and_back(self):
+        from gi.repository import Gdk
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
+            dot = window._listbox.get_children()[0].ccnav_indicator
+            self.assertIn("●", dot.ccnav_dot_label.get_label())  # filled to start
+            ev = Gdk.Event.new(Gdk.EventType.BUTTON_PRESS)
+            handled = dot.emit("button-press-event", ev)
+            self.assertTrue(handled)  # swallowed, so the row is not also expanded
+            self.assertIn("a", window._acknowledged)
+            self.assertIn("▢", dot.ccnav_dot_label.get_label())  # hollow outline now
+            dot.emit("button-press-event", ev)
+            self.assertNotIn("a", window._acknowledged)
+            self.assertIn("●", dot.ccnav_dot_label.get_label())  # filled again
+        finally:
+            window.destroy()
+
+    def test_clicking_a_red_input_dot_is_ignored(self):
+        from gi.repository import Gdk
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="permission_prompt")])
+            dot = window._listbox.get_children()[0].ccnav_indicator
+            before = dot.ccnav_dot_label.get_label()
+            handled = dot.emit("button-press-event", Gdk.Event.new(Gdk.EventType.BUTTON_PRESS))
+            self.assertFalse(handled)  # falls through to the row (no toggle on red)
+            self.assertNotIn("a", window._acknowledged)
+            self.assertEqual(dot.ccnav_dot_label.get_label(), before)  # unchanged
+        finally:
+            window.destroy()
+
+    def test_leaving_reported_clears_the_acknowledged_mark(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
+            child = window._listbox.get_children()[0]
+            window._on_indicator_clicked(child.ccnav_indicator, None, child)  # acknowledge
+            self.assertIn("a", window._acknowledged)
+            # It resumes working -- leaving green must drop the hollow mark...
+            window.set_rows([row(session_id="a", state=hookstate.WORKING)])
+            self.assertNotIn("a", window._acknowledged)
+            # ...so when it reports again the dot is filled, seeking a fresh glance.
+            window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle")])
+            self.assertIn("●", self._dot_markup(window._listbox.get_children()[0]))
+        finally:
+            window.destroy()
+
+    def test_acknowledged_hollow_survives_an_update_that_stays_green(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="idle", message="m1")])
+            child = window._listbox.get_children()[0]
+            window._on_indicator_clicked(child.ccnav_indicator, None, child)  # -> hollow
+            self.assertIn("▢", child.ccnav_indicator.ccnav_dot_label.get_label())
+            # A non-status field changes; the row stays green and same widget.
+            window.set_rows([row(session_id="a", state=hookstate.WAITING,
+                                 reason="idle", message="m2")])
+            self.assertIs(window._listbox.get_children()[0], child)
+            self.assertIn("▢", child.ccnav_indicator.ccnav_dot_label.get_label())
+            self.assertIn("a", window._acknowledged)
+        finally:
+            window.destroy()
+
+    def test_a_gone_session_drops_its_acknowledged_mark(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([row(session_id="a", state=hookstate.WAITING, reason="idle"),
+                             row(session_id="b", state=hookstate.WAITING, reason="idle")])
+            a = self._row_by_id(window, "a")
+            window._on_indicator_clicked(a.ccnav_indicator, None, a)
+            self.assertIn("a", window._acknowledged)
+            window.set_rows([row(session_id="b", state=hookstate.WAITING, reason="idle")])
+            self.assertNotIn("a", window._acknowledged)  # dropped when the row left
+        finally:
+            window.destroy()
+
     def test_gone_session_is_removed_and_new_one_added(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:

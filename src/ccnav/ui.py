@@ -231,15 +231,31 @@ def _meta_markup(row: model.Row) -> str:
             % GLib.markup_escape_text(state_line))
 
 
-def _build_indicator(kind: str) -> Gtk.Widget:
+def _dot_markup(kind: str, acknowledged: bool = False) -> str:
+    """Markup for a status dot. The green 'reported' dot can be toggled to a
+    hollow outline once the user has acknowledged (clicked) it -- a filled dot
+    still wants a glance, a hollow box has been seen. Only 'reported' is ever
+    acknowledged; a red 'input' dot is always the filled, attention-seeking form."""
+    if kind == "reported":
+        return '<span foreground="#2ec27e">%s</span>' % ("▢" if acknowledged else "●")
+    return '<span foreground="#e01b24">●</span>'
+
+
+def _build_indicator(kind: str, acknowledged: bool = False) -> Gtk.Widget:
     """The status widget for a row: a rotating arrow while working, else a
-    coloured dot (green 'reported', red 'input')."""
+    coloured dot (green 'reported', red 'input'). The dot lives inside an
+    EventBox so the row can make the green one clickable (acknowledge toggle);
+    the inner label is stashed as ccnav_dot_label so an in-place colour/shape
+    change never has to rebuild the widget."""
     if kind == "working":
         return _build_working_arrow()
-    dot = Gtk.Label()
-    colour = "#2ec27e" if kind == "reported" else "#e01b24"
-    dot.set_markup('<span foreground="%s">●</span>' % colour)
-    return dot
+    label = Gtk.Label()
+    label.set_markup(_dot_markup(kind, acknowledged))
+    box = Gtk.EventBox()
+    box.set_visible_window(False)  # transparent, but still receives button events
+    box.add(label)
+    box.ccnav_dot_label = label  # type: ignore[attr-defined]
+    return box
 
 
 def _row_signature(row: model.Row):
@@ -345,6 +361,7 @@ class NavigatorWindow(Gtk.Window):
         self._group_counts = {}   # group_key -> {input, reported, working}
         self._status_counts = {}  # status section -> count
         self._collapsed_groups = set()  # group keys collapsed in Group mode
+        self._acknowledged = set()  # session_ids whose green dot is shown hollow
         self._manual_order = []         # session_ids in the user's manual order
         self._group_override = {}       # session_id -> group_key it was dragged into
         self._group_names = {}          # group_key -> user-chosen display name
@@ -1296,6 +1313,7 @@ class NavigatorWindow(Gtk.Window):
             if session_id not in desired_ids:
                 self._listbox.remove(child)
                 del existing[session_id]
+                self._acknowledged.discard(session_id)
 
         # Add new rows and update changed ones in place. Display order is owned
         # by the listbox sort func (model.sort_key), so position on insert does
@@ -1721,18 +1739,27 @@ class NavigatorWindow(Gtk.Window):
         list_row.ccnav_sig = _row_signature(row)
 
         new_kind = dot_state(row)
+        sid = row.session_id
+        # The hollow "acknowledged" mark is meaningful only while green; drop it
+        # the moment the session leaves 'reported', so a later return to green
+        # starts filled (attention-seeking) again.
+        if new_kind != "reported":
+            self._acknowledged.discard(sid)
         if (new_kind == "working") != (list_row.ccnav_kind == "working"):
             # working-ness flipped: swap the widget (rotating arrow <-> dot).
             list_row.ccnav_header.remove(list_row.ccnav_indicator)
-            indicator = _build_indicator(new_kind)
+            indicator = _build_indicator(new_kind, sid in self._acknowledged)
             list_row.ccnav_header.pack_start(indicator, False, False, 0)
             list_row.ccnav_header.reorder_child(indicator, 0)
-            indicator.show()
+            self._wire_indicator(indicator, list_row)
+            indicator.show_all()
             list_row.ccnav_indicator = indicator
         elif new_kind != list_row.ccnav_kind:
-            # still a dot, only the colour changed (reported <-> input).
-            colour = "#2ec27e" if new_kind == "reported" else "#e01b24"
-            list_row.ccnav_indicator.set_markup('<span foreground="%s">●</span>' % colour)
+            # still a dot, only the colour changed (reported <-> input). The
+            # indicator is an EventBox now, so recolour its inner label.
+            label = getattr(list_row.ccnav_indicator, "ccnav_dot_label", None)
+            if label is not None:
+                label.set_markup(_dot_markup(new_kind, sid in self._acknowledged))
         list_row.ccnav_kind = new_kind
 
         list_row.ccnav_title.set_markup(_title_markup(row))
@@ -1751,8 +1778,9 @@ class NavigatorWindow(Gtk.Window):
         # is gone): a rotating arrow while Claude works, a red dot when it needs
         # an answer, a green dot when it has reported and is idle.
         kind = dot_state(row)
-        indicator = _build_indicator(kind)
+        indicator = _build_indicator(kind, row.session_id in self._acknowledged)
         header.pack_start(indicator, False, False, 0)
+        self._wire_indicator(indicator, list_row)
 
         # Drag handle on the RIGHT (visible only in group mode). A GtkListBoxRow is
         # activatable and swallows button drags, so the drag SOURCE is this grip,
@@ -1889,3 +1917,26 @@ class NavigatorWindow(Gtk.Window):
             return
         entry.set_text("")
         self._on_send(list_row.ccnav_row, text)
+
+    def _wire_indicator(self, indicator: Gtk.Widget, list_row: Gtk.ListBoxRow) -> None:
+        """Make a dot indicator clickable (the acknowledge toggle). The working
+        spinner has no ccnav_dot_label, so it is left inert."""
+        if getattr(indicator, "ccnav_dot_label", None) is not None:
+            indicator.connect("button-press-event", self._on_indicator_clicked, list_row)
+
+    def _on_indicator_clicked(self, _indicator, _event, list_row: Gtk.ListBoxRow) -> bool:
+        """Toggle the green 'reported' dot between filled and a hollow outline.
+        Only the green dot toggles; a red 'input' dot ignores the click (and lets
+        it fall through to the row). Swallowing the green click keeps it from also
+        selecting/expanding the row -- the dot is its own little control."""
+        if list_row.ccnav_kind != "reported":
+            return False
+        sid = list_row.ccnav_row.session_id
+        if sid in self._acknowledged:
+            self._acknowledged.discard(sid)
+        else:
+            self._acknowledged.add(sid)
+        label = getattr(list_row.ccnav_indicator, "ccnav_dot_label", None)
+        if label is not None:
+            label.set_markup(_dot_markup("reported", sid in self._acknowledged))
+        return True
