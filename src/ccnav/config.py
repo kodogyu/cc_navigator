@@ -20,8 +20,9 @@ from typing import Optional
 CORNERS = ("top-right", "top-left", "bottom-right", "bottom-left")
 
 # How the session list is grouped: "status" (input-needed / reported / working
-# sections) or "group" (one section per project directory).
-SORT_MODES = ("status", "group")
+# sections), "group" (one section per project directory), or "manual" (the user
+# drags rows into any order).
+SORT_MODES = ("status", "group", "manual")
 
 # Ranges are clamps, not rejections: an out-of-range number is pulled to the
 # nearest bound rather than dropped, so a fat-fingered edit still does something

@@ -466,6 +466,45 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_manual_mode_orders_by_the_manual_order(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="manual"))
+        try:
+            window.set_rows([row(session_id="a"), row(session_id="b"), row(session_id="c")])
+            self.assertEqual(self._display_ids(window), ["a", "b", "c"])  # insertion order
+            window._reorder_session("c", "a")  # drag c to just before a
+            self.assertEqual(self._display_ids(window), ["c", "a", "b"])
+        finally:
+            window.destroy()
+
+    def test_manual_order_appends_new_and_prunes_gone_sessions(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="manual"))
+        try:
+            window.set_rows([row(session_id="a"), row(session_id="b")])
+            self.assertEqual(window._manual_order, ["a", "b"])
+            window.set_rows([row(session_id="b"), row(session_id="c")])  # a gone, c new
+            self.assertEqual(window._manual_order, ["b", "c"])  # a pruned, c appended at end
+        finally:
+            window.destroy()
+
+    def test_reorder_ignores_self_and_unknown_ids(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.with_updates(config.Settings(), sort_mode="manual"))
+        try:
+            window.set_rows([row(session_id="a"), row(session_id="b")])
+            window._reorder_session("a", "a")  # self -> no-op
+            window._reorder_session("z", "a")  # unknown dragged -> no-op
+            self.assertEqual(window._manual_order, ["a", "b"])
+        finally:
+            window.destroy()
+
     def test_dock_to_edge_switches_to_the_docked_bar_with_orientation(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:

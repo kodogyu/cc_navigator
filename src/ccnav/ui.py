@@ -249,6 +249,10 @@ def _row_signature(row: model.Row):
             row.state, row.reason, row.message, row.cwd, row.last_prompt)
 
 
+# Drag target for manual-mode row reordering (within this app only).
+_DRAG_TARGETS = [Gtk.TargetEntry.new("CCNAV_SESSION", Gtk.TargetFlags.SAME_APP, 0)]
+
+
 class NavigatorWindow(Gtk.Window):
     def __init__(
         self,
@@ -271,6 +275,7 @@ class NavigatorWindow(Gtk.Window):
         self._group_counts = {}   # group_key -> {input, reported, working}
         self._status_counts = {}  # status section -> count
         self._collapsed_groups = set()  # group keys collapsed in Group mode
+        self._manual_order = []         # session_ids in the user's manual order
         self._eval_available = True
         self._sticky = ""
         self._hint = ""
@@ -403,6 +408,7 @@ class NavigatorWindow(Gtk.Window):
         sort_combo = Gtk.ComboBoxText()
         sort_combo.append(config.SORT_MODES[0], "상태별 정렬")   # "status"
         sort_combo.append(config.SORT_MODES[1], "그룹별 정렬")   # "group"
+        sort_combo.append(config.SORT_MODES[2], "수동 정렬")     # "manual"
         sort_combo.set_active_id(self._settings.sort_mode)
         sort_combo.connect("changed", self._on_sort_mode_changed)
         self._sort_combo = sort_combo
@@ -1032,6 +1038,7 @@ class NavigatorWindow(Gtk.Window):
                 self._update_row(child, row)
 
         self._recompute_sections(rows)
+        self._sync_manual_order(rows)
         self._reconcile_group_headers(rows)
         self._update_count_badge()
         self._update_dock_count()
@@ -1071,11 +1078,68 @@ class NavigatorWindow(Gtk.Window):
         self._group_rank = {k: i for i, k in enumerate(order)}
 
     def _section_sort_key(self, row: model.Row):
-        if self._settings.sort_mode == "group":
+        mode = self._settings.sort_mode
+        if mode == "manual":
+            return (self._manual_index(row.session_id),)
+        if mode == "group":
             rank = self._group_rank.get(model.group_key(row), 1 << 30)
             return (rank,) + tuple(model.sort_key(row))
         rank = model.STATUS_SECTIONS.index(model.status_key(row))
         return (rank,) + tuple(model.sort_key(row))
+
+    # -- manual order (Manual mode) ------------------------------------------
+
+    def _sync_manual_order(self, rows: List[model.Row]) -> None:
+        """Keep _manual_order in step with the live sessions: drop the gone,
+        append the new at the end. The user's relative order is preserved."""
+        present = {r.session_id for r in rows}
+        self._manual_order = [s for s in self._manual_order if s in present]
+        known = set(self._manual_order)
+        for row in rows:
+            if row.session_id not in known:
+                self._manual_order.append(row.session_id)
+                known.add(row.session_id)
+
+    def _manual_index(self, session_id: str) -> int:
+        try:
+            return self._manual_order.index(session_id)
+        except ValueError:
+            return 1 << 30
+
+    def _reorder_session(self, dragged_id: str, target_id: str) -> None:
+        """Move `dragged_id` to just before `target_id` in the manual order."""
+        if dragged_id == target_id or dragged_id not in self._manual_order:
+            return
+        self._manual_order.remove(dragged_id)
+        try:
+            index = self._manual_order.index(target_id)
+        except ValueError:
+            index = len(self._manual_order)
+        self._manual_order.insert(index, dragged_id)
+        self._listbox.invalidate_sort()
+
+    def _set_row_draggable(self, list_row: Gtk.ListBoxRow, on: bool) -> None:
+        """Enable drag-to-reorder only in Manual mode, so a normal drag elsewhere
+        never starts DnD over the reply entry or the row's buttons."""
+        if on:
+            list_row.drag_source_set(
+                Gdk.ModifierType.BUTTON1_MASK, _DRAG_TARGETS, Gdk.DragAction.MOVE)
+        else:
+            list_row.drag_source_unset()
+
+    def _on_row_drag_get(self, list_row, _context, selection, _info, _time) -> None:
+        if not getattr(list_row, "ccnav_is_header", False):
+            selection.set(selection.get_target(), 8,
+                          list_row.ccnav_row.session_id.encode("utf-8"))
+
+    def _on_row_drag_received(self, list_row, _context, _x, _y, selection, _info, _time) -> None:
+        if (self._settings.sort_mode != "manual"
+                or getattr(list_row, "ccnav_is_header", False)):
+            return
+        data = selection.get_data()
+        if not data:
+            return
+        self._reorder_session(data.decode("utf-8", "replace"), list_row.ccnav_row.session_id)
 
     def _row_sort_key(self, widget):
         if getattr(widget, "ccnav_is_header", False):
@@ -1100,10 +1164,10 @@ class NavigatorWindow(Gtk.Window):
         return model.group_key(widget.ccnav_row) not in self._collapsed_groups
 
     def _header_func(self, row_widget, before_widget) -> None:
-        """Status mode draws section titles as GtkListBox headers on the first
-        session of each section. Group mode uses header ROWS instead, so every
-        row's list-header is cleared there."""
-        if (self._settings.sort_mode == "group"
+        """Only Status mode draws section titles as GtkListBox headers (on the
+        first session of each section). Group mode uses header ROWS and Manual
+        mode has no sections, so every row's list-header is cleared there."""
+        if (self._settings.sort_mode != "status"
                 or getattr(row_widget, "ccnav_is_header", False)):
             row_widget.set_header(None)
             return
@@ -1245,6 +1309,11 @@ class NavigatorWindow(Gtk.Window):
         rows = [c.ccnav_row for c in self._listbox.get_children()
                 if not getattr(c, "ccnav_is_header", False)]
         self._reconcile_group_headers(rows)
+        # Rows are drag sources only in manual mode.
+        manual = mode == "manual"
+        for child in self._listbox.get_children():
+            if not getattr(child, "ccnav_is_header", False):
+                self._set_row_draggable(child, manual)
         self._listbox.invalidate_sort()
         self._listbox.invalidate_filter()
         self._listbox.invalidate_headers()
@@ -1358,6 +1427,13 @@ class NavigatorWindow(Gtk.Window):
         list_row.ccnav_prompt = prompt_label  # type: ignore[attr-defined]
         list_row.ccnav_meta = meta  # type: ignore[attr-defined]
         list_row.ccnav_sig = _row_signature(row)  # type: ignore[attr-defined]
+
+        # Manual-mode drag-to-reorder: every row is a drop target; it is a drag
+        # SOURCE only while in manual mode (toggled here and on mode change).
+        list_row.drag_dest_set(Gtk.DestDefaults.ALL, _DRAG_TARGETS, Gdk.DragAction.MOVE)
+        list_row.connect("drag-data-get", self._on_row_drag_get)
+        list_row.connect("drag-data-received", self._on_row_drag_received)
+        self._set_row_draggable(list_row, self._settings.sort_mode == "manual")
 
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         body.set_margin_top(6)
