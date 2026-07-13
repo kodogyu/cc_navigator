@@ -1835,10 +1835,14 @@ class SettingsUiTest(unittest.TestCase):
             # assert the round-tripped decimal form rather than the hex text.
             self.assertIn("rgb(18,52,86)", css)
             self.assertIn("background-color", css)
-            # Clearing both means an empty provider.
+            # Clearing both drops the USER overrides but leaves the built-in
+            # theme: the custom colour and font size are gone, yet the provider
+            # still carries the theme (which always sets a background-color).
             window.apply_settings(config.Settings(font_size=0, bg_color=""))
-            self.assertNotIn("pt", window._css.to_string())
-            self.assertNotIn("background-color", window._css.to_string())
+            cleared = window._css.to_string()
+            self.assertNotIn("15pt", cleared)
+            self.assertNotIn("rgb(18,52,86)", cleared)  # the user's custom bg is gone
+            self.assertIn("background-color", cleared)   # theme background remains
         finally:
             window.destroy()
 

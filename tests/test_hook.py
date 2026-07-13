@@ -42,6 +42,9 @@ class BuildRecordTest(unittest.TestCase):
             {
                 "session_id": "11111111-2222-3333-4444-555555555555",
                 "cwd": "/data/projects/demo_project",
+                "kind": "tmux",
+                "claude_pid": 0,
+                "ai_title": "",
                 "tmux_socket": "/tmp/tmux-1000/default",
                 "tmux_pane": "%12",
                 "state": hookstate.WAITING,

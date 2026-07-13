@@ -19,9 +19,10 @@ from typing import Callable, Dict, List, Set
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gio, GLib, Gtk  # noqa: E402
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import config, gnome, model, notify, paths, proc, statestore, tmuxctl, ui  # noqa: E402
+from . import config, gnome, model, notify, paths, proc, procstat, statestore, tmuxctl, ui, wiring  # noqa: E402
 
 # Fallback only: the live interval comes from self._settings.poll_seconds. Kept
 # so a bare Application built in a test (which does not load config) still polls
@@ -56,16 +57,37 @@ class Collected:
     unreachable: int
 
 
+def _vscode_pids(records: List[Dict[str, object]]) -> Set[int]:
+    """The claude pids carried by the VSCode records -- the ones whose liveness
+    the poller checks against /proc each tick."""
+    pids = set()  # type: Set[int]
+    for rec in records:
+        if str(rec.get("kind") or "") != "vscode":
+            continue
+        try:
+            pid = int(rec.get("claude_pid", 0))
+        except (TypeError, ValueError):
+            continue
+        if pid > 0:
+            pids.add(pid)
+    return pids
+
+
 def collect_rows(
     state_dir: pathlib.Path,
     read_all: Callable[[pathlib.Path], List[Dict[str, object]]] = statestore.read_all,
     sessions_for: Callable[[str], "tuple"] = tmuxctl.sessions_by_pane_result,
     titles_for: Callable[[str], Dict[str, str]] = tmuxctl.titles_by_pane,
     prune: Callable[..., int] = statestore.prune,
+    live_pids_for: Callable[[Set[int]], Set[int]] = procstat.live_claude_pids,
 ) -> Collected:
     records = read_all(state_dir)
     sockets = sorted({str(r.get("tmux_socket") or "") for r in records if r.get("tmux_socket")})
-    if not sockets:
+    observed_pids = _vscode_pids(records)
+    if not sockets and not observed_pids:
+        # Nothing to observe: no tmux socket and no VSCode session. Return before
+        # touching tmux or prune -- an empty directory must cost nothing and must
+        # not have every state file judged against an empty live set.
         return Collected([], 0)
     # sessions_for reports (ok, panes): ok is False when tmux did not answer
     # (dead socket, or a timed-out slow one). Only sockets that DID answer may
@@ -74,8 +96,17 @@ def collect_rows(
     sessions = {socket: panes for socket, (_ok, panes) in results.items()}
     observed = {socket for socket, (ok, _panes) in results.items() if ok}
     titles = {socket: titles_for(socket) for socket in sockets}
-    prune(state_dir, model.live_pane_keys(sessions), observed)
-    rows = model.build_rows(records, sessions, titles)
+    # Kernel liveness for the VSCode sessions: same "observed vs live" split tmux
+    # uses, so prune never reaps a pid it did not actually check this tick.
+    live_pids = live_pids_for(observed_pids)
+    prune(
+        state_dir,
+        model.live_pane_keys(sessions),
+        observed,
+        live_pids=live_pids,
+        observed_pids=observed_pids,
+    )
+    rows = model.build_rows(records, sessions, titles, live_pids=live_pids)
     return Collected(rows, len(set(sockets) - observed))
 
 
@@ -114,18 +145,33 @@ def send_status(result: tmuxctl.SendResult) -> str:
     return ""
 
 
+def _default_activate_vscode(row: model.Row) -> gnome.ActivationResult:
+    """A VSCode row is addressed by its session id (tab-precise), with the
+    workspace folder as the focus-verification target and window fallback."""
+    return gnome.activate_vscode_session(row.session_id, row.vscode_folder)
+
+
 def perform_jump(
     row: model.Row,
     select_pane: Callable[[str, str], None],
     activate: Callable[[str], gnome.ActivationResult],
+    activate_vscode: Callable[[model.Row], gnome.ActivationResult] = _default_activate_vscode,
 ) -> str:
-    """select_pane must run before activate: tmux needs the pane selected
-    before the window is raised, or the user lands on the wrong pane.
+    """Raise the session's window (VSCode: its tab) and report the outcome.
 
-    select_pane ignores tmux's exit codes by design (Task 6), so there is
-    nothing to branch on here -- activate always runs, even when the pane
-    selection failed.
+    A VSCode session has no tmux pane to select -- its address is the editor tab,
+    reached by session id -- so it skips select_pane. A tmux session selects its
+    pane before activating: tmux needs the pane selected before the window is
+    raised, or the user lands on the wrong pane. select_pane ignores tmux's exit
+    codes by design (Task 6), so there is nothing to branch on there -- activate
+    always runs, even when selection failed.
     """
+    if row.is_vscode:
+        result = activate_vscode(row)
+        # Label the status with the session's own headline when it has one, so a
+        # failure names the specific session, not just its (shared) folder.
+        label = row.title or row.vscode_folder
+        return jump_status(result, "%s (VS Code)" % label)
     select_pane(row.socket, row.pane)
     result = activate(row.window_title)
     return jump_status(result, row.window_title)
@@ -280,7 +326,11 @@ class Application:
 
         def worker() -> None:
             try:
-                status = perform_jump(row, tmuxctl.select_pane, gnome.activate_window_titled)
+                status = perform_jump(
+                    row,
+                    tmuxctl.select_pane,
+                    gnome.activate_window_titled,
+                )
             except Exception as exc:  # noqa: BLE001 -- the button must come back regardless
                 status = "이동 중 예기치 않은 오류가 발생했습니다: %s" % exc
             GLib.idle_add(self._on_jump_done, row.session_id, status)
@@ -296,6 +346,16 @@ class Application:
     # -- send -----------------------------------------------------------
 
     def send(self, row: model.Row, text: str) -> None:
+        if row.is_vscode:
+            # A VSCode session has no pane to type into; only the window jump is
+            # supported. Say so plainly instead of routing an empty socket/pane
+            # into tmux, which would fail with a misleading "could not confirm
+            # delivery" message.
+            self.window.set_status(
+                "VS Code 세션은 답장을 지원하지 않습니다. '세션으로 이동'만 가능합니다."
+            )
+            return
+
         def worker() -> None:
             try:
                 result = tmuxctl.send_text(row.socket, row.pane, text)
@@ -318,6 +378,14 @@ def main(argv=None) -> int:
     if "--version" in argv:
         print("cc-navigator %s" % __version__)
         return 0
+    # Give the window a unique, stable WM_CLASS (res_name via prgname, res_class
+    # via program_class) equal to the launcher's basename/StartupWMClass, so GNOME
+    # binds the running window to the installed .desktop -- otherwise it inherits
+    # a generic "python3" class and the dock shows a stray unnamed icon instead of
+    # this app's. Must run before the window is created (below), so WM_CLASS is set
+    # when it is realized.
+    GLib.set_prgname(wiring.APP_ID)
+    Gdk.set_program_class(wiring.APP_ID)
     application = Application()
     # Wired here, not in NavigatorWindow: this is where the main loop exists.
     application.window.connect("destroy", Gtk.main_quit)

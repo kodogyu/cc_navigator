@@ -123,11 +123,20 @@ def prune(
     live_panes: Set[Tuple[str, str]],
     observed_sockets: Set[str],
     now: Optional[int] = None,
+    live_pids: Set[int] = frozenset(),
+    observed_pids: Set[int] = frozenset(),
 ) -> int:
     """Delete state files whose pane is gone, that are stale, or that are junk.
 
     This is what makes a SessionEnd hook unnecessary: a session that is gone
     from tmux is gone from the model.
+
+    A VSCode (non-tmux) record has no pane, so its liveness comes from the
+    kernel instead: `live_pids` is the set of claude pids the poller found still
+    running this tick, and `observed_pids` is the set it actually checked. A
+    VSCode record is reaped iff its claude_pid was observed and is not live --
+    the same "never judge what you did not observe" rule the tmux path uses for
+    an unanswered socket, so a pid the poller did not check is left alone.
 
     `observed_sockets` is the set of tmux sockets whose pane list was actually
     obtained this tick. The liveness test -- "this pane is not in live_panes,
@@ -156,6 +165,19 @@ def prune(
             record = json.loads(path.read_text())
         except (ValueError, OSError):
             if _try_unlink(path):
+                removed += 1
+            continue
+
+        # A VSCode record is judged by its claude pid, never by a pane. Reap it
+        # when the pid we checked is no longer a running claude; leave it alone
+        # if we did not check it this tick (mirrors the unobserved-socket rule).
+        if str(record.get("kind") or "") == "vscode":
+            try:
+                pid = int(record.get("claude_pid", 0))
+            except (TypeError, ValueError):
+                pid = 0
+            gone_pid = pid <= 0 or (pid in observed_pids and pid not in live_pids)
+            if gone_pid and _try_unlink(path):
                 removed += 1
             continue
 

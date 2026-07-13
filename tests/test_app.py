@@ -72,7 +72,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [record()],
             sessions_for=sessions_for,
             titles_for=lambda s: {"%1": "t"},
-            prune=lambda d, live, observed: 0,
+            prune=lambda d, live, observed, **_: 0,
         )
         self.assertEqual(asked, [SOCK])
         self.assertEqual(len(result.rows), 1)
@@ -82,7 +82,7 @@ class CollectRowsTest(unittest.TestCase):
     def test_prunes_using_the_live_pane_set(self):
         seen = {}
 
-        def fake_prune(directory, live, observed):
+        def fake_prune(directory, live, observed, **_):
             seen["live"] = live
             seen["observed"] = observed
             return 0
@@ -104,7 +104,7 @@ class CollectRowsTest(unittest.TestCase):
         # waiting session that will never re-announce itself.
         seen = {}
 
-        def fake_prune(directory, live, observed):
+        def fake_prune(directory, live, observed, **_):
             seen["live"] = live
             seen["observed"] = observed
             return 0
@@ -130,7 +130,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [],
             sessions_for=explode,
             titles_for=explode,
-            prune=lambda d, live, observed: 0,
+            prune=lambda d, live, observed, **_: 0,
         )
         self.assertEqual(result.rows, [])
         self.assertEqual(result.unreachable, 0)
@@ -143,7 +143,7 @@ class CollectRowsTest(unittest.TestCase):
         # -- wasted work, and on a real directory it would delete every state
         # file present, which is exactly the bug "tmux is never called"
         # exists to keep this function cheap enough to avoid.
-        def explode(directory, live, observed):
+        def explode(directory, live, observed, **_):
             raise AssertionError("must not prune when there is nothing to prune")
 
         result = app.collect_rows(

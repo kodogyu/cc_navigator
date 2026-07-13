@@ -36,6 +36,52 @@ EMPTY_HINT = (
 EVAL_UNAVAILABLE_HINT = "GNOME Shell Eval을 쓸 수 없어 '이동'이 비활성화되었습니다."
 UNREACHABLE_HINT = "tmux %d곳에 연결하지 못해 일부 세션이 목록에서 빠졌을 수 있습니다."
 
+# The dim/secondary text colour used across the row markup (subtitle, path, meta,
+# grip, group counts). Lightened from the old Adwaita grey so it stays readable on
+# the dark theme background below. One constant so every dim label matches.
+_DIM = "#9aa0b4"
+
+# The panel's built-in look: "Midnight Violet" with a mint accent. Scoped entirely
+# to `.ccnav` so it never touches another GTK app or the system theme. It sets
+# colour, background, border and radius only -- never font-size -- so the Settings
+# font-size scaling still composes on top (see _apply_css, which appends the user's
+# bg/font rules AFTER this block so they win on equal specificity).
+ACCENT = "#5eead4"          # mint
+_BG = "#1e1e2e"             # deep slate
+_THEME_CSS = """
+.ccnav, .ccnav.background {{ background-color:{bg}; color:#e6e6ef; }}
+.ccnav decoration {{ border-radius:14px; }}
+.ccnav headerbar {{ background:#181825; border:none; box-shadow:none;
+    min-height:34px; color:#e6e6ef; padding:0 4px; }}
+.ccnav headerbar button {{ background:transparent; border:none; box-shadow:none;
+    color:#c6c6d4; margin:3px 1px; padding:2px 6px; }}
+.ccnav headerbar button:hover {{ background:rgba(255,255,255,0.10); border-radius:8px; }}
+.ccnav scrolledwindow, .ccnav viewport, .ccnav list, .ccnav row {{ background:transparent; }}
+.ccnav row {{ color:#e6e6ef; border-radius:10px; margin:2px 6px; padding:4px 4px;
+    border:1px solid transparent; }}
+.ccnav row:hover {{ background:#26263a; }}
+.ccnav row:selected {{ background:#2a2a3c; border:1px solid {accent}; }}
+.ccnav row:selected:hover {{ background:#30304a; }}
+.ccnav entry {{ background:rgba(255,255,255,0.06); color:#e6e6ef;
+    border:1px solid rgba(255,255,255,0.14); border-radius:8px; padding:4px 8px;
+    box-shadow:none; caret-color:{accent}; }}
+.ccnav entry:focus {{ border-color:{accent}; box-shadow:none; }}
+.ccnav button {{ background:rgba(255,255,255,0.06); color:#e6e6ef;
+    border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:4px 10px;
+    box-shadow:none; text-shadow:none; }}
+.ccnav button:hover {{ background:rgba(255,255,255,0.12); }}
+.ccnav button:disabled {{ color:rgba(255,255,255,0.35); }}
+.ccnav-jump {{ background:{accent}; color:#12121c; font-weight:700; border:none; }}
+.ccnav-jump:hover {{ background:#7ff0dd; }}
+.ccnav-jump:disabled {{ background:rgba(94,234,212,0.22); color:rgba(255,255,255,0.40); }}
+.ccnav combobox button {{ background:rgba(255,255,255,0.06); color:#e6e6ef; }}
+.ccnav separator {{ background:rgba(255,255,255,0.08); }}
+.ccnav scrollbar {{ background:transparent; border:none; }}
+.ccnav scrollbar slider {{ background:rgba(255,255,255,0.20); border-radius:8px;
+    min-width:6px; min-height:24px; }}
+.ccnav scrollbar slider:hover {{ background:rgba(255,255,255,0.34); }}
+""".format(bg=_BG, accent=ACCENT)
+
 # Resolved once, at import, so it costs nothing per row. Tests inject their own
 # via the `hostname` parameter rather than depending on this machine's name.
 _HOSTNAME = socket.gethostname()
@@ -313,12 +359,12 @@ def _title_markup(row: model.Row) -> str:
 
 
 def _secondary_markup(row: model.Row) -> str:
-    return ('<small><span foreground="#77767b">%s</span></small>'
+    return ('<small><span foreground="#9aa0b4">%s</span></small>'
             % GLib.markup_escape_text(_oneline(secondary_line(row))))
 
 
 def _path_markup(row: model.Row) -> str:
-    return ('<small><span foreground="#77767b">%s</span></small>'
+    return ('<small><span foreground="#9aa0b4">%s</span></small>'
             % GLib.markup_escape_text(_oneline(row.cwd)))
 
 
@@ -328,7 +374,7 @@ def _prompt_markup(prompt: str) -> str:
 
 def _meta_markup(row: model.Row) -> str:
     state_line = _oneline(row.state + (" · " + row.reason if row.reason else ""))
-    return ('<small><span foreground="#77767b">%s</span></small>'
+    return ('<small><span foreground="#9aa0b4">%s</span></small>'
             % GLib.markup_escape_text(state_line))
 
 
@@ -394,7 +440,7 @@ def _row_signature(row: model.Row):
     (main state carried forward), and the second icon must still refresh."""
     return (row.session_id, row.socket, row.pane, row.tmux_session, row.title,
             row.state, row.reason, row.message, row.cwd, row.last_prompt,
-            row.subagent_ids)
+            row.subagent_ids, row.kind, row.claude_pid)
 
 
 # Drag targets (within this app only). A dragged SESSION reorders a row / moves it
@@ -802,9 +848,12 @@ class NavigatorWindow(Gtk.Window):
         Both are optional: font_size 0 and bg_color "" each omit their rule, and
         an empty provider restores the theme. Scoped to .ccnav so no other app is
         touched."""
-        parts = []
+        # The built-in theme goes first; the user's bg/font rules are appended
+        # AFTER it so, at equal specificity, they win -- a custom background or
+        # font size still overrides the theme's defaults.
+        parts = [_THEME_CSS]
         if settings.bg_color:
-            parts.append(".ccnav { background-color: %s; }" % settings.bg_color)
+            parts.append(".ccnav, .ccnav.background { background-color: %s; }" % settings.bg_color)
         if settings.font_size > 0:
             parts.append(".ccnav, .ccnav * { font-size: %dpt; }" % settings.font_size)
         self._css.load_from_data("\n".join(parts).encode("utf-8"))
@@ -1879,7 +1928,7 @@ class NavigatorWindow(Gtk.Window):
         header_row.ccnav_title_label.set_markup(
             "<b>%s</b>" % GLib.markup_escape_text(_STATUS_LABELS.get(bucket, bucket)))
         header_row.ccnav_count_label.set_markup(
-            '<small><span foreground="#77767b">%d</span></small>'
+            '<small><span foreground="#9aa0b4">%d</span></small>'
             % self._status_counts.get(bucket, 0))
 
     def _on_status_toggle(self, _button, bucket: str) -> None:
@@ -1947,7 +1996,7 @@ class NavigatorWindow(Gtk.Window):
         # too). An EventBox gives the label an input window to start the drag from.
         grip = Gtk.EventBox()
         grip_label = Gtk.Label()
-        grip_label.set_markup('<span foreground="#77767b">⠿</span>')
+        grip_label.set_markup('<span foreground="#9aa0b4">⠿</span>')
         grip.add(grip_label)
         grip.set_tooltip_text("드래그해서 그룹 순서 변경")
         grip.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, _GROUP_DRAG_TARGETS, Gdk.DragAction.MOVE)
@@ -1970,7 +2019,7 @@ class NavigatorWindow(Gtk.Window):
         names.pack_start(name, False, False, 0)
         if group_key:  # a blank cwd shows just "~"; no empty path line under it
             path = Gtk.Label(xalign=0.0)
-            path.set_markup('<small><span foreground="#77767b">%s</span></small>'
+            path.set_markup('<small><span foreground="#9aa0b4">%s</span></small>'
                             % GLib.markup_escape_text(_oneline(group_key)))
             path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
             names.pack_start(path, False, False, 0)
@@ -2159,7 +2208,7 @@ class NavigatorWindow(Gtk.Window):
         # not the row.
         grip = Gtk.EventBox()
         grip_label = Gtk.Label()
-        grip_label.set_markup('<span foreground="#77767b">⠿</span>')
+        grip_label.set_markup('<span foreground="#9aa0b4">⠿</span>')
         grip.add(grip_label)
         grip.set_tooltip_text("드래그해서 순서 변경 / 그룹 이동")
         grip.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, _DRAG_TARGETS, Gdk.DragAction.MOVE)
@@ -2190,6 +2239,7 @@ class NavigatorWindow(Gtk.Window):
         entry.connect("activate", self._on_entry_activate, list_row)
 
         jump = Gtk.Button(label="세션으로 이동")
+        jump.get_style_context().add_class("ccnav-jump")
         jump.set_sensitive(self._eval_available)
         jump.connect("clicked", self._on_jump_clicked, list_row)
 

@@ -21,10 +21,27 @@ class Row:
     updated_at: int
     last_prompt: str = ""
     subagent_ids: Tuple[str, ...] = ()
+    kind: str = "tmux"
+    claude_pid: int = 0
+    ai_title: str = ""
 
     @property
     def waiting(self) -> bool:
         return self.state == hookstate.WAITING
+
+    @property
+    def is_vscode(self) -> bool:
+        """A VSCode extension-hosted session: no tmux pane, addressed by raising
+        its editor window instead. Reply is unavailable for these; a jump maps to
+        focusing the workspace's VSCode window (see gnome.activate_vscode_window)."""
+        return self.kind == "vscode"
+
+    @property
+    def vscode_folder(self) -> str:
+        """The workspace folder name a VSCode window's title carries
+        ('... - <folder> - Visual Studio Code') -- the cwd's last path segment,
+        which is how a jump finds the right editor window."""
+        return group_label(self.cwd)
 
     @property
     def subagent_active(self) -> bool:
@@ -85,12 +102,36 @@ def _newest_per_pane(records):
     return newest
 
 
+def _newest_vscode(records):
+    """Newest record per session_id among the VSCode (non-tmux) records.
+
+    tmux records are keyed (socket, pane); a VSCode session has neither, so it
+    is keyed by its own session_id -- which is stable across a session's whole
+    life. Two sessions open on the same workspace folder keep distinct rows
+    because their session_ids differ."""
+    newest = {}  # type: Dict[str, dict]
+    for rec in records:
+        if str(rec.get("kind") or "") != "vscode":
+            continue
+        sid = str(rec.get("session_id") or "")
+        if not sid:
+            continue
+        current = newest.get(sid)
+        if current is None or _as_int(rec.get("updated_at", 0)) > _as_int(
+            current.get("updated_at", 0)
+        ):
+            newest[sid] = rec
+    return newest
+
+
 def build_rows(
     records: List[Dict[str, object]],
     sessions_by_socket: Dict[str, Dict[str, str]],
     titles_by_socket: Dict[str, Dict[str, str]],
+    live_pids: Set[int] = frozenset(),
 ) -> List[Row]:
-    """A row exists iff its state file's pane is currently live in tmux."""
+    """A tmux row exists iff its pane is live in tmux; a VSCode row exists iff
+    its claude_pid is in `live_pids` (the poller's kernel liveness check)."""
     rows = []  # type: List[Row]
     for (socket, pane), rec in _newest_per_pane(records).items():
         sessions = sessions_by_socket.get(socket, {})
@@ -111,6 +152,37 @@ def build_rows(
                 updated_at=_as_int(rec.get("updated_at", 0)),
                 last_prompt=str(rec.get("last_prompt") or ""),
                 subagent_ids=_subagent_ids(rec.get("subagent_ids")),
+            )
+        )
+    for sid, rec in _newest_vscode(records).items():
+        pid = _as_int(rec.get("claude_pid", 0))
+        if pid not in live_pids:
+            continue  # the owning claude process is gone -> the session ended
+        cwd = str(rec.get("cwd") or "")
+        # Headline priority for a VSCode session: its AI-generated tab title (the
+        # name the user sees in VSCode), then the last real prompt, then -- via
+        # ui.primary_line's fallback to tmux_session -- the workspace folder. The
+        # folder alone cannot tell two sessions in one workspace apart; the title
+        # can, and matches what VSCode shows.
+        ai_title = str(rec.get("ai_title") or "")
+        last_prompt = str(rec.get("last_prompt") or "")
+        rows.append(
+            Row(
+                session_id=sid,
+                socket="",
+                pane="",
+                tmux_session=group_label(cwd),
+                title=ai_title or last_prompt,
+                state=str(rec.get("state") or ""),
+                reason=str(rec.get("reason") or ""),
+                message=str(rec.get("message") or ""),
+                cwd=cwd,
+                updated_at=_as_int(rec.get("updated_at", 0)),
+                last_prompt=last_prompt,
+                subagent_ids=_subagent_ids(rec.get("subagent_ids")),
+                kind="vscode",
+                claude_pid=pid,
+                ai_title=ai_title,
             )
         )
     rows.sort(key=sort_key)
