@@ -2090,3 +2090,96 @@ class SettingsUiTest(unittest.TestCase):
             self.assertTrue(window._update_button.get_sensitive())
         finally:
             window.destroy()
+
+
+class UsageButtonTest(unittest.TestCase):
+    """The bottom usage button: it must live at the bottom of the content box, fetch
+    through the injected loader (never the network), guard against a double click, and
+    render either the limit rows or the failure message into its popover."""
+
+    def _widgets_of_type(self, root, cls):
+        """Depth-first in child order -- the order the user sees them stacked."""
+        found = []
+
+        def walk(w):
+            if isinstance(w, cls):
+                found.append(w)
+            if isinstance(w, Gtk.Container):
+                for child in w.get_children():
+                    walk(child)
+
+        walk(root)
+        return found
+
+    def _popover_text(self, window):
+        return " ".join(
+            (l.get_text() or "") for l in self._widgets_of_type(window._usage_popover, Gtk.Label))
+
+    def test_the_usage_button_is_the_last_widget_in_the_content_box(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            self.assertIs(window._content.get_children()[-1], window._usage_button)
+            self.assertIn("사용량", window._usage_button.get_label())
+        finally:
+            window.destroy()
+
+    def test_clicking_renders_a_row_per_limit_with_its_percent(self):
+        from ccnav import usage
+        result = usage.Usage(plan="Max 20x", entries=[
+            usage.Entry("세션 (5시간)", 26, "normal", ""),
+            usage.Entry("주간 (전체)", 7, "normal", ""),
+        ])
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            usage_load=lambda: (result, ""))
+        try:
+            window._usage_button.emit("clicked")
+            self._pump()
+            text = self._popover_text(window)
+            self.assertIn("Max 20x", text)
+            self.assertIn("세션 (5시간)", text)
+            self.assertIn("26%", text)
+            self.assertIn("7%", text)
+            bars = self._widgets_of_type(window._usage_popover, Gtk.LevelBar)
+            self.assertEqual([int(b.get_value()) for b in bars], [26, 7])
+        finally:
+            window.destroy()
+
+    def test_a_failure_shows_the_message_instead_of_raising(self):
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            usage_load=lambda: (None, "인증이 만료되었습니다"))
+        try:
+            window._usage_button.emit("clicked")
+            self._pump()
+            self.assertIn("인증이 만료되었습니다", self._popover_text(window))
+        finally:
+            window.destroy()
+
+    def test_a_second_click_while_a_fetch_is_in_flight_does_not_start_another(self):
+        import threading
+        calls = []
+        release = threading.Event()
+
+        def slow_load():
+            calls.append(1)
+            release.wait(2.0)
+            return None, "네트워크"
+
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, usage_load=slow_load)
+        try:
+            window._usage_button.emit("clicked")
+            self.assertFalse(window._usage_button.get_sensitive(), "disabled while in flight")
+            window._usage_button.emit("clicked")  # the double click
+            release.set()
+            self._pump()
+            self.assertEqual(len(calls), 1, "the loader ran once")
+            self.assertTrue(window._usage_button.get_sensitive(), "re-enabled after")
+        finally:
+            window.destroy()
+
+    def _pump(self, ms=400):
+        loop = GLib.MainLoop()
+        GLib.timeout_add(ms, lambda: (loop.quit(), False)[1])
+        loop.run()
