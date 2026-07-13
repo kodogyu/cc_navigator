@@ -73,12 +73,31 @@ class StateStoreTest(unittest.TestCase):
         names = sorted(p.name for p in self.dir.iterdir())
         self.assertEqual(names, ["alive.json"])
 
-    def test_prune_removes_stale_records_even_if_pane_is_live(self):
+    def test_prune_keeps_a_stale_record_whose_pane_is_still_live(self):
+        # Liveness is derived from tmux, never from hook recency. A session the
+        # user simply did not talk to overnight fires no hooks, so its record
+        # ages -- but tmux still reports its pane, so it is ALIVE and its row
+        # must stay. Ageing it out here made every idle-but-live session vanish
+        # from the panel after 24h (they only came back when a hook happened to
+        # fire again). Age is a reaper for records we cannot verify, not a
+        # liveness test for ones we can.
         statestore.write(self.dir, record(session_id="old", updated_at=0))
         live = {("/tmp/tmux-1000/default", "%1")}
         removed = statestore.prune(
             self.dir,
             live,
+            {"/tmp/tmux-1000/default"},
+            now=statestore.MAX_AGE_SECONDS * 30,  # idle for a month, still live
+        )
+        self.assertEqual(removed, 0)
+        self.assertEqual([p.name for p in self.dir.iterdir()], ["old.json"])
+
+    def test_prune_ages_out_a_stale_record_whose_pane_is_gone(self):
+        # The age reaper still fires for a record tmux does NOT vouch for.
+        statestore.write(self.dir, record(session_id="old", pane="%9", updated_at=0))
+        removed = statestore.prune(
+            self.dir,
+            {("/tmp/tmux-1000/default", "%1")},  # %9 is not live
             {"/tmp/tmux-1000/default"},
             now=statestore.MAX_AGE_SECONDS + 1,
         )

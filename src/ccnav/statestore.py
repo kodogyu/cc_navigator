@@ -138,9 +138,12 @@ def prune(
     and its row never comes back (F3). A record on an UNOBSERVED socket is left
     alone on liveness.
 
-    The age and junk checks stay unconditional: an unparseable file, or a
-    genuinely stale one, is removed regardless -- so an unreachable socket's
-    files are still reaped by age rather than leaking forever.
+    The junk check stays unconditional: an unparseable file is removed
+    regardless. The age check applies ONLY to a record whose socket was not
+    observed, so an unreachable socket's files are reaped rather than leaking
+    forever. A record whose pane tmux positively reports as live is never aged
+    out -- an idle session fires no hooks, and killing it for that would be the
+    same silent failure as F3, just on a slower clock.
     """
     if now is None:
         now = int(time.time())
@@ -170,7 +173,14 @@ def prune(
         observed = socket in observed_sockets or not placeable
         gone = observed and (socket, pane) not in live_panes
 
-        if gone or age > MAX_AGE_SECONDS:
+        # Age is a reaper for records tmux cannot vouch for -- NOT a liveness
+        # test for ones it can. A live, observed pane is kept however old its
+        # record is: a session the user simply did not talk to overnight fires
+        # no hooks, so its record ages while the session is perfectly alive.
+        # Ageing it out made every idle-but-live session vanish from the panel
+        # after 24h, the silent failure this project exists to prevent. Liveness
+        # is derived from tmux, never announced by hook recency.
+        if gone or (not observed and age > MAX_AGE_SECONDS):
             if _try_unlink(path):
                 removed += 1
     return removed
