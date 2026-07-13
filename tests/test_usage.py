@@ -1,4 +1,5 @@
 import datetime
+import time
 import json
 import pathlib
 import tempfile
@@ -259,3 +260,108 @@ class RedirectTokenLeakTest(unittest.TestCase):
         self.assertEqual(self.leaked, [], "the token must not reach the redirect target")
         self.assertIsNone(payload)
         self.assertEqual(err, usage.ERR_NETWORK, "a redirect is just a failed fetch")
+
+
+class TransientRetryTest(unittest.TestCase):
+    """A one-off failure must not become the user's problem. The button used to report
+    "네트워크" and the user simply pressed it again and it worked -- so the retry was
+    real, it was just being done by a human. Do it once ourselves."""
+
+    def test_a_transient_failure_is_retried_once_and_succeeds(self):
+        calls = []
+
+        def flaky(req, timeout=None):
+            calls.append(1)
+            if len(calls) == 1:
+                raise urllib.error.URLError("connection reset")
+            return _FakeResponse(PAYLOAD)
+
+        payload, err = usage.fetch("sk-tok", opener=flaky)
+        self.assertEqual(err, "")
+        self.assertIsNotNone(payload)
+        self.assertEqual(len(calls), 2, "one retry")
+
+    def test_a_persistent_failure_still_reports_after_the_retry(self):
+        calls = []
+
+        def dead(req, timeout=None):
+            calls.append(1)
+            raise urllib.error.URLError("offline")
+
+        payload, err = usage.fetch("sk-tok", opener=dead)
+        self.assertIsNone(payload)
+        self.assertEqual(err, usage.ERR_NETWORK)
+        self.assertEqual(len(calls), 2, "tried twice, then gave up")
+
+    def test_a_401_is_not_retried(self):
+        calls = []
+
+        def unauthorized(req, timeout=None):
+            calls.append(1)
+            raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", {}, None)
+
+        _payload, err = usage.fetch("sk-tok", opener=unauthorized)
+        self.assertIn("인증", err)
+        self.assertEqual(len(calls), 1, "a rejected token will be rejected again")
+
+
+class HonestErrorsTest(unittest.TestCase):
+    """Every non-401 HTTP failure used to be reported as "(네트워크)" -- a rate limit
+    and a 500 both blamed the user's connection. Say what actually happened."""
+
+    def _fetch_status(self, code):
+        def opener(req, timeout=None):
+            raise urllib.error.HTTPError(req.full_url, code, "boom", {}, None)
+        return usage.fetch("sk-tok", opener=opener)[1]
+
+    def test_a_rate_limit_says_so(self):
+        self.assertIn("잠시", self._fetch_status(429))
+        self.assertNotIn("네트워크", self._fetch_status(429))
+
+    def test_a_server_error_says_so_and_names_the_status(self):
+        err = self._fetch_status(503)
+        self.assertIn("503", err)
+        self.assertNotIn("네트워크", err)
+
+    def test_a_genuine_network_failure_still_says_network(self):
+        def offline(req, timeout=None):
+            raise urllib.error.URLError("offline")
+        self.assertEqual(usage.fetch("sk-tok", opener=offline)[1], usage.ERR_NETWORK)
+
+
+class ExpiredTokenTest(unittest.TestCase):
+    """The access token lives ~8h and CLAUDE CODE refreshes it, not us. Sending a token
+    we can see is expired just buys a 401 whose message ("다시 로그인하세요") is wrong:
+    the user does not need to log in again, they need Claude Code to refresh it -- which
+    happens on its own the next time a session runs. Check the clock before the call."""
+
+    def _creds(self, expires_at_ms):
+        return usage.Credentials("sk-tok", "max", "default_claude_max_20x", expires_at_ms)
+
+    def test_an_expired_token_is_not_sent_and_the_message_is_actionable(self):
+        called = []
+
+        def opener(req, timeout=None):
+            called.append(1)
+            return _FakeResponse(PAYLOAD)
+
+        past = int((time.time() - 60) * 1000)
+        result, err = usage.load(read=lambda: self._creds(past), opener=opener)
+        self.assertIsNone(result)
+        self.assertEqual(called, [], "do not spend a request on a token we know is dead")
+        self.assertIn("갱신", err, "tell them what actually fixes it")
+        self.assertNotIn("네트워크", err)
+
+    def test_a_valid_token_is_used(self):
+        future = int((time.time() + 3600) * 1000)
+        result, err = usage.load(read=lambda: self._creds(future),
+                                 opener=lambda req, timeout=None: _FakeResponse(PAYLOAD))
+        self.assertEqual(err, "")
+        self.assertEqual(result.plan, "Max 20x")
+
+    def test_a_credentials_file_with_no_expiry_is_still_tried(self):
+        # Never let a missing field become a hard block -- send it and let the server decide.
+        result, err = usage.load(read=lambda: self._creds(0),
+                                 opener=lambda req, timeout=None: _FakeResponse(PAYLOAD))
+        self.assertEqual(err, "")
+        self.assertIsNotNone(result)

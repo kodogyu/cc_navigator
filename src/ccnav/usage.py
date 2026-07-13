@@ -13,6 +13,7 @@ from __future__ import annotations
 import datetime
 import json
 import pathlib
+import time
 import urllib.error
 import urllib.request
 from typing import Callable, List, NamedTuple, Optional, Tuple
@@ -42,7 +43,15 @@ _OPENER = urllib.request.build_opener(_NoRedirect)
 
 # Failures the UI shows verbatim. Every one of them is a normal outcome, not a bug.
 ERR_NO_CREDENTIALS = "로그인 정보를 찾을 수 없습니다"
-ERR_AUTH = "인증이 만료되었습니다 — claude에서 다시 로그인하세요"
+# The access token lives ~8h and CLAUDE CODE refreshes it -- cc_navigator only reads it.
+# So "log in again" is the wrong advice for an expired token: using any Claude Code
+# session refreshes it. (We deliberately do NOT refresh it ourselves: the refresh token
+# rotates, and consuming it without atomically persisting the new one could break the
+# user's actual Claude Code login. Not a risk a status panel gets to take.)
+ERR_EXPIRED = "인증 토큰이 만료되었습니다 — Claude Code 세션을 한 번 사용하면 갱신됩니다"
+ERR_AUTH = "인증이 거부되었습니다 — 토큰 갱신(Claude Code 사용) 또는 claude 재로그인이 필요합니다"
+ERR_RATE = "요청이 너무 많습니다 — 잠시 후 다시 시도하세요"
+ERR_SERVER = "서버 오류 (%d) — 잠시 후 다시 시도하세요"
 ERR_NETWORK = "사용량을 가져오지 못했습니다 (네트워크)"
 ERR_SHAPE = "사용량 형식을 알 수 없습니다 (Claude Code 업데이트?)"
 
@@ -58,6 +67,7 @@ class Credentials(NamedTuple):
     access_token: str
     subscription_type: str
     rate_limit_tier: str
+    expires_at: int = 0  # ms since epoch; 0 = the file did not say, so do not judge it
 
 
 class Entry(NamedTuple):
@@ -93,10 +103,12 @@ def read_credentials(path: Optional[pathlib.Path] = None) -> Optional[Credential
     token = oauth.get("accessToken")
     if not isinstance(token, str) or not token:
         return None
+    expires = oauth.get("expiresAt")
     return Credentials(
         access_token=token,
         subscription_type=str(oauth.get("subscriptionType") or ""),
         rate_limit_tier=str(oauth.get("rateLimitTier") or ""),
+        expires_at=expires if isinstance(expires, int) and not isinstance(expires, bool) else 0,
     )
 
 
@@ -186,6 +198,36 @@ def describe_reset(iso, now: Optional[datetime.datetime] = None) -> str:
     return "%d분 후 리셋" % max(minutes, 1)
 
 
+def _attempt(request, opener, timeout) -> Tuple[Optional[dict], str, bool]:
+    """One try. Returns (payload, error, transient) -- `transient` says whether trying
+    again could plausibly give a different answer."""
+    try:
+        with opener(request, timeout=timeout) as response:
+            payload = json.loads(response.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as exc:
+        # HTTPError is a URLError subclass, so it must be caught first. Report what
+        # actually happened: a rate limit and a 500 are not the user's connection, and
+        # calling them "(네트워크)" sent people to check their wifi for our problem.
+        if exc.code in (401, 403):
+            return None, ERR_AUTH, False       # a rejected token stays rejected
+        if exc.code == 429:
+            return None, ERR_RATE, False       # retrying immediately only digs deeper
+        if 300 <= exc.code < 400:
+            # A redirect we refused on purpose (_NoRedirect, so the token goes nowhere
+            # else). Deterministic, so no retry; to the user it is simply a failed fetch.
+            return None, ERR_NETWORK, False
+        if exc.code >= 500:
+            return None, ERR_SERVER % exc.code, True
+        return None, ERR_SERVER % exc.code, False
+    except (urllib.error.URLError, OSError):   # timeout, reset, DNS, offline
+        return None, ERR_NETWORK, True
+    except ValueError:                         # a body that is not JSON
+        return None, ERR_SHAPE, False
+    if not isinstance(payload, dict):
+        return None, ERR_SHAPE, False
+    return payload, "", False
+
+
 def fetch(
     token: str,
     opener: Optional[Callable] = None,
@@ -193,7 +235,13 @@ def fetch(
 ) -> Tuple[Optional[dict], str]:
     """The only I/O: the same GET Claude Code itself makes. `opener` is injected so the
     tests never touch the network; it defaults to the redirect-refusing opener above,
-    so the token cannot be carried anywhere else. Returns (payload, "") or (None, msg)."""
+    so the token cannot be carried anywhere else. Returns (payload, "") or (None, msg).
+
+    A transient failure is retried ONCE. The user was already doing this by hand --
+    "it said network, I pressed it again and it worked" -- so the retry was real, it was
+    just being performed by a person. A 401 or a rate limit is not retried: the answer
+    would be the same, only slower.
+    """
     if opener is None:
         opener = _OPENER.open
     request = urllib.request.Request(
@@ -204,18 +252,10 @@ def fetch(
             "Content-Type": "application/json",
         },
     )
-    try:
-        with opener(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        return None, (ERR_AUTH if exc.code in (401, 403) else ERR_NETWORK)
-    except (urllib.error.URLError, OSError):
-        return None, ERR_NETWORK
-    except ValueError:  # a body that is not JSON -- the endpoint changed under us
-        return None, ERR_SHAPE
-    if not isinstance(payload, dict):
-        return None, ERR_SHAPE
-    return payload, ""
+    payload, error, transient = _attempt(request, opener, timeout)
+    if payload is None and transient:
+        payload, error, _ = _attempt(request, opener, timeout)
+    return payload, error
 
 
 def load(
@@ -228,6 +268,12 @@ def load(
     credentials = read()
     if credentials is None:
         return None, ERR_NO_CREDENTIALS
+    # Don't spend a request on a token whose own file says it is dead: the server would
+    # just 401, and the honest advice for that is not "log in again" -- Claude Code
+    # refreshes this token by itself the next time a session runs. expires_at == 0 means
+    # the file did not say, so we send it and let the server decide.
+    if credentials.expires_at and credentials.expires_at <= int(time.time() * 1000):
+        return None, ERR_EXPIRED
     payload, error = fetch(credentials.access_token, opener=opener, timeout=timeout)
     if payload is None:
         return None, error

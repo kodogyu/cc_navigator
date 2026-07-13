@@ -4,6 +4,24 @@ cc_navigator has no build artifact: **Settings ⚙ → 업데이트 확인** fas
 checkout to the latest `master` and restarts. So this file, not a download page, is how
 you find out what changed — and what a new version starts doing on your machine.
 
+## 0.2.1-beta — 2026-07-14
+
+### Fixed
+
+- **The usage button no longer needs a second press.** A transient failure (a reset
+  connection, a blip) is now retried once automatically — the retry was already
+  happening, it was just being done by hand.
+- **Its error messages stop lying.** Every non-401 failure used to be reported as
+  "(네트워크)", so a rate limit or a server error sent you to check your wifi for our
+  problem. A 429 and a 5xx now say what they are.
+- **An expired token gives the advice that actually works.** The access token lives ~8h
+  and *Claude Code* refreshes it — cc_navigator only reads it. So the old "log in again"
+  was wrong: using any Claude Code session refreshes it. The panel now checks the expiry
+  in the credentials file, says so, and does not waste a request on a token it can see is
+  dead. (It deliberately does **not** refresh the token itself: the refresh token rotates,
+  and consuming it without atomically persisting the new one could break your real Claude
+  Code login. Not a risk a status panel gets to take.)
+
 ## 0.2.0-beta — 2026-07-13
 
 First tagged release. **Beta** because of one known limitation (see below) that can put a
