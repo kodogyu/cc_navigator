@@ -666,6 +666,13 @@ class NavigatorWindow(Gtk.Window):
 
         self._status = Gtk.Label(xalign=0.0)
         self._status.set_line_wrap(True)
+        # Empty almost all the time (it only speaks up on a failed jump/send or an
+        # unreachable socket), and an empty label still claims a full row. Drive its
+        # visibility from its text -- see _render_status -- so the bottom strip costs
+        # only what it actually shows. no_show_all keeps a later window.show_all()
+        # from reviving the empty row.
+        self._status.set_no_show_all(True)
+        self._status.set_visible(False)
 
         # "Sort by" selector: status sections vs project groups. In group mode
         # the list is arranged manually by drag; the "자동 정렬" button re-groups
@@ -693,6 +700,9 @@ class NavigatorWindow(Gtk.Window):
         self._usage_button = Gtk.Button(label="사용량 확인")
         self._usage_button.set_relief(Gtk.ReliefStyle.NONE)
         self._usage_button.set_tooltip_text("로그인된 계정의 사용량(한도) 보기")
+        # Bottom-RIGHT and only as wide as it needs to be: a full-width button ate a
+        # third of the panel's bottom edge for a control the user presses rarely.
+        self._usage_button.set_halign(Gtk.Align.END)
         self._usage_button.connect("clicked", self._on_usage_clicked)
         self._usage_popover = Gtk.Popover.new(self._usage_button)
         self._usage_popover.set_position(Gtk.PositionType.TOP)
@@ -707,7 +717,7 @@ class NavigatorWindow(Gtk.Window):
         box.pack_start(sort_row, False, False, 0)
         box.pack_start(scroller, True, True, 0)
         box.pack_start(self._status, False, False, 4)
-        box.pack_start(self._usage_button, False, False, 0)
+        box.pack_end(self._usage_button, False, False, 0)  # flush to the bottom edge
         self._content = box
 
         # A Stack holds the full panel and a minimal "docked" bar. Attach mode
@@ -1567,7 +1577,9 @@ class NavigatorWindow(Gtk.Window):
             self._on_settings_changed(new)
 
     def _render_status(self) -> None:
-        self._status.set_text(compose_status(self._sticky, self._hint, self._transient))
+        text = compose_status(self._sticky, self._hint, self._transient)
+        self._status.set_text(text)
+        self._status.set_visible(bool(text))  # an empty label must not reserve a row
 
     def set_eval_available(self, available: bool) -> None:
         self._eval_available = available

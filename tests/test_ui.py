@@ -2183,3 +2183,63 @@ class UsageButtonTest(unittest.TestCase):
         loop = GLib.MainLoop()
         GLib.timeout_add(ms, lambda: (loop.quit(), False)[1])
         loop.run()
+
+
+class BottomBarLayoutTest(unittest.TestCase):
+    """The bottom strip must cost only what it shows: the usage button sits right-
+    aligned at about a third of the width, and the status label -- empty almost all
+    the time -- takes no vertical space until it actually has something to say."""
+
+    def _pump(self, ms=250):
+        loop = GLib.MainLoop()
+        GLib.timeout_add(ms, lambda: (loop.quit(), False)[1])
+        loop.run()
+
+    def test_the_usage_button_is_right_aligned_and_about_a_third_wide(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.resize(340, 420)
+            window.show_all()
+            self._pump()
+            self.assertEqual(window._usage_button.get_halign(), Gtk.Align.END)
+            width = window._usage_button.get_allocation().width
+            self.assertLess(width, 340 // 2, "must not span the panel")
+            self.assertGreater(width, 40, "must still be clickable")
+        finally:
+            window.destroy()
+
+    def test_an_empty_status_label_takes_no_space(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.show_all()
+            self._pump()
+            self.assertEqual(window._status.get_text(), "")
+            self.assertFalse(window._status.get_visible(),
+                             "an empty status label must not reserve a row")
+        finally:
+            window.destroy()
+
+    def test_a_status_message_reveals_the_label(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.show_all()
+            self._pump()
+            window.set_status("이동하지 못했습니다")
+            self.assertTrue(window._status.get_visible())
+            self.assertIn("이동하지 못했습니다", window._status.get_text())
+            window.set_status("")  # and it hides again when cleared
+            self.assertFalse(window._status.get_visible())
+        finally:
+            window.destroy()
+
+    def test_show_all_does_not_reveal_an_empty_status_label(self):
+        # show_all() re-reveals every child by default -- the label must opt out, or
+        # the row comes back the first time the window is shown again.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.show_all()
+            self._pump()
+            window.show_all()
+            self.assertFalse(window._status.get_visible())
+        finally:
+            window.destroy()
