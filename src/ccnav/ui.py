@@ -19,7 +19,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, model, updater, wiring  # noqa: E402
+from . import config, model, updater, usage, wiring  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -497,11 +497,15 @@ class NavigatorWindow(Gtk.Window):
         on_send: Callable[[model.Row, str], None],
         settings: "config.Settings" = None,
         on_settings_changed: Callable[["config.Settings"], None] = None,
+        usage_load: Callable = None,
     ) -> None:
         super().__init__(title="cc_navigator")
         self._on_jump = on_jump
         self._on_send = on_send
         self._on_settings_changed = on_settings_changed
+        # Injected so tests drive the usage popover without touching the network.
+        self._usage_load = usage_load or usage.load
+        self._usage_in_flight = False
         self._settings = settings or config.Settings()
         # Section metadata for the two list views, recomputed on each set_rows
         # and read by the sort/header funcs. Initialised empty so those funcs are
@@ -683,10 +687,27 @@ class NavigatorWindow(Gtk.Window):
         sort_row.pack_start(sort_combo, False, False, 0)
         sort_row.pack_start(auto_sort, False, False, 0)
 
+        # The account's plan limits, on demand: the bottom button fetches them and shows
+        # them in a popover above itself. Fetching is a network call, so it never runs
+        # on the GTK main thread (see _on_usage_clicked).
+        self._usage_button = Gtk.Button(label="사용량 확인")
+        self._usage_button.set_relief(Gtk.ReliefStyle.NONE)
+        self._usage_button.set_tooltip_text("로그인된 계정의 사용량(한도) 보기")
+        self._usage_button.connect("clicked", self._on_usage_clicked)
+        self._usage_popover = Gtk.Popover.new(self._usage_button)
+        self._usage_popover.set_position(Gtk.PositionType.TOP)
+        self._usage_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self._usage_body.set_margin_top(10)
+        self._usage_body.set_margin_bottom(10)
+        self._usage_body.set_margin_start(12)
+        self._usage_body.set_margin_end(12)
+        self._usage_popover.add(self._usage_body)
+
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.pack_start(sort_row, False, False, 0)
         box.pack_start(scroller, True, True, 0)
         box.pack_start(self._status, False, False, 4)
+        box.pack_start(self._usage_button, False, False, 0)
         self._content = box
 
         # A Stack holds the full panel and a minimal "docked" bar. Attach mode
@@ -1169,6 +1190,88 @@ class NavigatorWindow(Gtk.Window):
         dialog = self._build_settings_dialog()
         dialog.run()
         dialog.destroy()
+
+    # -- account usage --------------------------------------------------------
+
+    def _on_usage_clicked(self, _button) -> None:
+        """Open the popover on "불러오는 중…" and fetch off the GTK thread (it is a
+        network call). The in-flight flag makes a second click a no-op -- otherwise a
+        double click would fire two requests and race to fill the same popover."""
+        if self._usage_in_flight:
+            return
+        self._usage_in_flight = True
+        self._usage_button.set_sensitive(False)
+        self._render_usage(None, "불러오는 중…")
+        if self._usage_button.get_mapped():  # a popover on an unmapped widget cannot show
+            self._usage_popover.popup()
+
+        def worker() -> None:
+            try:
+                result, error = self._usage_load()
+            except Exception as exc:  # noqa: BLE001 -- the button must always come back
+                result, error = None, "사용량을 불러오지 못했습니다: %s" % exc
+            GLib.idle_add(self._on_usage_done, result, error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_usage_done(self, result, error: str) -> bool:
+        self._usage_in_flight = False
+        self._usage_button.set_sensitive(True)
+        self._render_usage(result, error)
+        return False  # one-shot idle source
+
+    def _render_usage(self, result, message: str) -> None:
+        """Rebuild the popover body: the plan, then one row per limit (label, bar,
+        percent, reset). A failure -- including an endpoint we can no longer read --
+        is just a message, so the panel never breaks on it."""
+        for child in self._usage_body.get_children():
+            self._usage_body.remove(child)
+
+        if result is None:
+            label = Gtk.Label(xalign=0.0)
+            label.set_line_wrap(True)
+            label.set_max_width_chars(32)
+            label.set_text(message)
+            self._usage_body.pack_start(label, False, False, 0)
+            self._usage_body.show_all()
+            return
+
+        if result.plan:
+            plan = Gtk.Label(xalign=0.0)
+            plan.set_markup("<b>%s</b>" % GLib.markup_escape_text(result.plan))
+            self._usage_body.pack_start(plan, False, False, 0)
+
+        for entry in result.entries:
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            name = Gtk.Label(xalign=0.0, label=entry.label)
+            percent = Gtk.Label(xalign=1.0)
+            percent.set_markup("<b>%d%%</b>" % entry.percent)
+            top.pack_start(name, True, True, 0)
+            top.pack_end(percent, False, False, 0)
+
+            bar = Gtk.LevelBar.new_for_interval(0, 100)
+            bar.set_value(max(0, min(100, entry.percent)))
+            bar.set_size_request(220, 8)
+            # The endpoint's own severity drives the colour, so a limit it considers
+            # hot looks hot here too (GTK ships high/full offsets on a LevelBar).
+            if entry.severity in ("warning", "high"):
+                bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_HIGH, 100)
+            elif entry.severity in ("critical", "exceeded"):
+                bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 100)
+
+            row.pack_start(top, False, False, 0)
+            row.pack_start(bar, False, False, 0)
+            reset = usage.describe_reset(entry.resets_at)
+            if reset:
+                hint = Gtk.Label(xalign=0.0)
+                hint.set_markup(
+                    '<small><span foreground="#77767b">%s</span></small>'
+                    % GLib.markup_escape_text(reset))
+                row.pack_start(hint, False, False, 0)
+            self._usage_body.pack_start(row, False, False, 0)
+
+        self._usage_body.show_all()
 
     def _on_update_clicked(self, button) -> None:
         """Fetch + fast-forward off the GTK thread (it touches the network and

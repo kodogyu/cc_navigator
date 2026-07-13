@@ -95,3 +95,7 @@ it along, detach to restore).
 **Stay informed:** a desktop notification fires when a session becomes *your turn*
 (needs input, or finished). On by default — toggle it, opacity, colour, font, and
 more in **Settings**.
+
+**Check your usage:** the button at the bottom (**"사용량 확인"**) shows the logged-in
+account's plan and its limits — session (5-hour), weekly, and per-model weekly — each
+with a bar, a percentage, and when it resets.
