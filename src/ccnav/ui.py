@@ -706,6 +706,19 @@ class NavigatorWindow(Gtk.Window):
         self._usage_button.connect("clicked", self._on_usage_clicked)
         self._usage_popover = Gtk.Popover.new(self._usage_button)
         self._usage_popover.set_position(Gtk.PositionType.TOP)
+        # Dismissal is OURS, not GTK's. A modal popover takes a pointer grab and is
+        # supposed to close itself on a click outside -- but in this window (a
+        # keep-above UTILITY toplevel the WM does not reliably focus) it did not, and
+        # while that grab is held the click never reaches our own handlers either, so
+        # the popover just sat there. Turning the grab off puts every click back on the
+        # normal path, where _dismiss_usage_popover can close it deterministically.
+        self._usage_popover.set_modal(False)
+        # A press on the empty strip beside the button (or any other dead space) is
+        # consumed by no child, so it bubbles up to the toplevel -- close the popover.
+        # A toplevel's default event mask has no BUTTON_PRESS, so without this the
+        # handler below is simply never called and dead-space clicks do nothing.
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.connect("button-press-event", self._dismiss_usage_popover)
         self._usage_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self._usage_body.set_margin_top(10)
         self._usage_body.set_margin_bottom(10)
@@ -1203,10 +1216,23 @@ class NavigatorWindow(Gtk.Window):
 
     # -- account usage --------------------------------------------------------
 
+    def _dismiss_usage_popover(self, *_args) -> bool:
+        """Put the usage popover away on a click elsewhere -- the empty strip beside
+        the button, a session row, anything. GTK's modal grab is supposed to do this,
+        but the panel cannot rely on it (it is a keep-above utility window that the WM
+        does not always focus), so dismissal is explicit. Returns False so the click
+        still does whatever it was going to do."""
+        if self._usage_popover.get_visible():
+            self._usage_popover.popdown()
+        return False
+
     def _on_usage_clicked(self, _button) -> None:
         """Open the popover on "불러오는 중…" and fetch off the GTK thread (it is a
         network call). The in-flight flag makes a second click a no-op -- otherwise a
         double click would fire two requests and race to fill the same popover."""
+        if self._usage_popover.get_visible():
+            self._usage_popover.popdown()  # a second press on the button toggles it shut
+            return
         if self._usage_in_flight:
             return
         self._usage_in_flight = True
@@ -2385,6 +2411,7 @@ class NavigatorWindow(Gtk.Window):
         selected so _on_row_activated can distinguish a re-click (collapse) from
         a first click (expand). Return False so the click is never swallowed."""
         self._pre_press_selected = listbox.get_selected_row()
+        self._dismiss_usage_popover()  # a click in the list puts the popover away
         return False
 
     def _on_row_activated(self, listbox, activated) -> None:

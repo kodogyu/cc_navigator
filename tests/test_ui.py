@@ -4,7 +4,7 @@ import unittest
 from ccnav import hookstate, model, ui
 
 # ui pins the Gtk version on import above, so this bare import is safe here.
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
 
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
@@ -2241,5 +2241,104 @@ class BottomBarLayoutTest(unittest.TestCase):
             self._pump()
             window.show_all()
             self.assertFalse(window._status.get_visible())
+        finally:
+            window.destroy()
+
+
+class UsagePopoverDismissTest(unittest.TestCase):
+    """Once the popover is up, a click anywhere else must put it away -- the empty
+    strip beside the button, a session row, or the button itself (a toggle). It must
+    not depend on GTK's modal grab, which is why each path is asserted here."""
+
+    def _pump(self, ms=300):
+        loop = GLib.MainLoop()
+        GLib.timeout_add(ms, lambda: (loop.quit(), False)[1])
+        loop.run()
+
+    def _window(self):
+        from ccnav import usage
+        result = usage.Usage(plan="Max 20x",
+                             entries=[usage.Entry("세션 (5시간)", 26, "normal", "")])
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None,
+                                    usage_load=lambda: (result, ""))
+        window.show_all()
+        self._pump()
+        return window
+
+    def _open(self, window):
+        window._usage_button.emit("clicked")
+        self._pump()
+        self.assertTrue(window._usage_popover.get_visible(), "precondition: popover is up")
+
+    def test_clicking_the_empty_space_beside_the_button_closes_the_popover(self):
+        window = self._window()
+        try:
+            self._open(window)
+            # A press that no child consumes bubbles to the toplevel -- the empty
+            # strip beside the button is exactly that.
+            window.emit("button-press-event",
+                        Gdk.Event.new(Gdk.EventType.BUTTON_PRESS))
+            self._pump()
+            self.assertFalse(window._usage_popover.get_visible())
+        finally:
+            window.destroy()
+
+    def test_the_popover_does_not_take_a_grab(self):
+        # A modal popover grabs the pointer, and while it holds that grab the click
+        # that should dismiss it never reaches our handlers -- which is exactly how it
+        # got stuck open. Dismissal is ours, so the grab must stay off.
+        window = self._window()
+        try:
+            self.assertFalse(window._usage_popover.get_modal())
+        finally:
+            window.destroy()
+
+    def test_the_window_actually_listens_for_button_presses(self):
+        # Emitting the signal by hand proves the handler works but NOT that a real
+        # click ever reaches it: a toplevel's default event mask has no BUTTON_PRESS,
+        # so without add_events the dead-space click is silently never delivered.
+        # (Found the hard way -- the handler was right and the clicks still did
+        # nothing.) Guard the routing, not just the handler.
+        window = self._window()
+        try:
+            mask = window.get_events()
+            self.assertTrue(mask & Gdk.EventMask.BUTTON_PRESS_MASK,
+                            "the toplevel must ask for button presses")
+        finally:
+            window.destroy()
+
+    def test_clicking_a_session_row_closes_the_popover(self):
+        window = self._window()
+        try:
+            window.set_rows([row(session_id="a")])
+            self._pump()
+            self._open(window)
+            window._listbox.emit("button-press-event",
+                                 Gdk.Event.new(Gdk.EventType.BUTTON_PRESS))
+            self._pump()
+            self.assertFalse(window._usage_popover.get_visible())
+        finally:
+            window.destroy()
+
+    def test_clicking_the_button_again_toggles_the_popover_shut(self):
+        loads = []
+
+        def load():
+            from ccnav import usage
+            loads.append(1)
+            return usage.Usage("Max 20x", [usage.Entry("세션 (5시간)", 26, "normal", "")]), ""
+
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None,
+                                    usage_load=load)
+        try:
+            window.show_all()
+            self._pump()
+            window._usage_button.emit("clicked")
+            self._pump()
+            self.assertTrue(window._usage_popover.get_visible())
+            window._usage_button.emit("clicked")   # the second press closes it
+            self._pump()
+            self.assertFalse(window._usage_popover.get_visible())
+            self.assertEqual(len(loads), 1, "closing must not re-fetch")
         finally:
             window.destroy()
