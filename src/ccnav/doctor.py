@@ -301,12 +301,23 @@ def run_all(
     if not isinstance(settings, dict):
         settings = {}
 
+    # Ask the interpreter to actually import what the app imports, rather than
+    # stat'ing /usr/bin/python3 -- which exists on every Debian box, while
+    # python3-gi does not. Stat'ing it made the single most likely fresh-user
+    # failure (no PyGObject) the one case guaranteed to print [ok]. cairo is in
+    # the probe because ui.py imports it unconditionally and python3-gi does not
+    # pull it in. Import-only, so this is safe with no display.
+    gi_code, _out = run([
+        "/usr/bin/python3", "-c",
+        "import gi, cairo; gi.require_version('Gtk','3.0'); from gi.repository import Gtk",
+    ])
+
     return [
         Check(
             "python3",
-            os.path.exists("/usr/bin/python3"),
-            "/usr/bin/python3 is the interpreter with PyGObject",
-            "apt install python3-gi gir1.2-gtk-3.0",
+            gi_code == 0,
+            "/usr/bin/python3 can import PyGObject (gi + Gtk 3) and cairo",
+            "apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0",
         ),
         Check(
             "tmux",
@@ -319,6 +330,19 @@ def run_all(
             shutil.which("xprop") is not None,
             "xprop independently verifies that focus actually moved",
             "apt install x11-utils",
+        ),
+        Check(
+            "gdbus",
+            shutil.which("gdbus") is not None,
+            "gdbus carries the jump request to GNOME Shell",
+            "apt install libglib2.0-bin",
+        ),
+        Check(
+            "notify-send",
+            shutil.which("notify-send") is not None,
+            "desktop notifications when a session becomes your turn",
+            "apt install libnotify-bin",
+            required=False,  # a feature, not a prerequisite: the panel works without it
         ),
         check_tmux_conf(conf_text),
         probe_tmux_conf(tmux_conf, run=run),

@@ -199,3 +199,63 @@ class LoadTest(unittest.TestCase):
         result, err = usage.load(read=lambda: usage.Credentials("t", "", ""), opener=boom)
         self.assertIsNone(result)
         self.assertIn("네트워크", err)
+
+
+class RedirectTokenLeakTest(unittest.TestCase):
+    """urllib's redirect handler copies EVERY header except content-length/type onto
+    the new request -- Authorization included, with no same-host check (unlike
+    requests, which strips it across hosts). So one 302 would hand the account's
+    OAuth bearer token to whatever host the redirect names, over plain http if it
+    says so. The token must never leave api.anthropic.com: refuse redirects.
+
+    This is proven against real sockets, not mocks: two local HTTP servers, one
+    redirecting to the other, and the second records what it was sent.
+    """
+
+    def setUp(self):
+        import http.server
+        import threading
+
+        self.leaked = []
+        leaked = self.leaked
+
+        class Sink(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # the redirect target -- records any Authorization
+                leaked.append(self.headers.get("Authorization"))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"{}")
+
+            def log_message(self, *_a):
+                pass
+
+        self.sink = http.server.HTTPServer(("127.0.0.1", 0), Sink)
+        sink_port = self.sink.server_port
+        threading.Thread(target=self.sink.serve_forever, daemon=True).start()
+        self.addCleanup(self.sink.shutdown)
+
+        class Redirector(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:%d/stolen" % sink_port)
+                self.end_headers()
+
+            def log_message(self, *_a):
+                pass
+
+        self.redirector = http.server.HTTPServer(("127.0.0.1", 0), Redirector)
+        self.url = "http://127.0.0.1:%d/usage" % self.redirector.server_port
+        threading.Thread(target=self.redirector.serve_forever, daemon=True).start()
+        self.addCleanup(self.redirector.shutdown)
+
+    def test_the_bearer_token_is_never_followed_to_a_redirect_target(self):
+        original = usage.USAGE_URL
+        usage.USAGE_URL = self.url
+        try:
+            payload, err = usage.fetch("sk-secret-token")
+        finally:
+            usage.USAGE_URL = original
+
+        self.assertEqual(self.leaked, [], "the token must not reach the redirect target")
+        self.assertIsNone(payload)
+        self.assertEqual(err, usage.ERR_NETWORK, "a redirect is just a failed fetch")

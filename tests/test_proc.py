@@ -83,3 +83,23 @@ class RunnerWithTimeoutTest(unittest.TestCase):
     def test_the_bound_runner_passes_a_successful_call_through(self):
         runner = proc.runner_with_timeout(5.0)
         self.assertEqual(runner(["/usr/bin/python3", "-c", "print('ok')"]), (0, "ok\n"))
+
+
+class MissingBinaryTest(unittest.TestCase):
+    """A binary that is not installed must be a nonzero exit, not an exception.
+
+    Every caller treats nonzero as failure, so a missing tool degrades on its own --
+    but an escaping FileNotFoundError took down the doctor (a raw traceback, zero
+    checks printed), the app's own startup probe, and the notification worker thread.
+    """
+
+    def test_a_missing_binary_returns_nonzero_instead_of_raising(self):
+        code, out = proc.run_command(["definitely-not-a-real-binary-xyz"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "")
+
+    def test_a_binary_that_is_a_directory_also_degrades(self):
+        # Not FileNotFoundError but still an OSError (IsADirectoryError/PermissionError).
+        code, out = proc.run_command(["/tmp"])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(out, "")

@@ -212,14 +212,22 @@ class Application:
         # Surface an unreachable-tmux hint in its own status slot, so a wedged
         # socket is not silently indistinguishable from every session ending.
         self.window.set_unreachable(collected.unreachable)
-        self._maybe_notify(collected.rows)
+        self._maybe_notify(collected)
         return False  # one-shot idle source; True would re-run it forever
 
-    def _maybe_notify(self, rows: List[model.Row]) -> None:
+    def _maybe_notify(self, collected: Collected) -> None:
         """Fire a desktop notification for each session that just became 'your
         turn' (transitioned into input-needed or reported). Runs on the GTK main
         thread; the actual notify-send is dispatched to a worker thread."""
-        fires, new_status = notify.changed_rows(self._prev_status, rows)
+        # A tick with an unreachable socket is BLIND, not empty: a tmux query that
+        # did not answer makes build_rows drop every row on that socket (which is
+        # what `unreachable` exists to report). Rebaselining on that erased the
+        # baseline, so the next good tick saw every session as new and re-fired a
+        # popup for all of them; and a stuttered first tick spent the startup guard
+        # on an empty baseline and then burst. A blind tick must change nothing.
+        if collected.unreachable:
+            return
+        fires, new_status = notify.changed_rows(self._prev_status, collected.rows)
         self._prev_status = new_status
         # The first tick has no prior statuses, so every waiting session would
         # look 'new'. Seed the baseline silently and only notify from the second

@@ -21,6 +21,25 @@ USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 OAUTH_BETA = "oauth-2025-04-20"
 DEFAULT_TIMEOUT = 8.0
 
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse to follow redirects, because urllib would carry the token along.
+
+    Its redirect handler copies every header except content-length/content-type onto
+    the new request -- Authorization included, with no same-host check (requests, by
+    contrast, strips it across hosts). So a single 302 would hand the account's bearer
+    token to whatever host the Location names, over plain http if it says so. Returning
+    None makes urllib raise the 3xx as an HTTPError, which fetch() already maps to a
+    plain "could not fetch" message. The usage endpoint has no legitimate reason to
+    redirect us. (tests/test_usage.py proves the leak against real sockets.)
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
 # Failures the UI shows verbatim. Every one of them is a normal outcome, not a bug.
 ERR_NO_CREDENTIALS = "로그인 정보를 찾을 수 없습니다"
 ERR_AUTH = "인증이 만료되었습니다 — claude에서 다시 로그인하세요"
@@ -169,11 +188,14 @@ def describe_reset(iso, now: Optional[datetime.datetime] = None) -> str:
 
 def fetch(
     token: str,
-    opener: Callable = urllib.request.urlopen,
+    opener: Optional[Callable] = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> Tuple[Optional[dict], str]:
     """The only I/O: the same GET Claude Code itself makes. `opener` is injected so the
-    tests never touch the network. Returns (payload, "") or (None, <message>)."""
+    tests never touch the network; it defaults to the redirect-refusing opener above,
+    so the token cannot be carried anywhere else. Returns (payload, "") or (None, msg)."""
+    if opener is None:
+        opener = _OPENER.open
     request = urllib.request.Request(
         USAGE_URL,
         headers={
@@ -198,7 +220,7 @@ def fetch(
 
 def load(
     read: Callable[[], Optional[Credentials]] = read_credentials,
-    opener: Callable = urllib.request.urlopen,
+    opener: Optional[Callable] = None,
     timeout: float = DEFAULT_TIMEOUT,
 ) -> Tuple[Optional[Usage], str]:
     """The seam the UI calls (on a worker thread -- this does network I/O). Every failure

@@ -29,6 +29,15 @@ def run_command(argv: Sequence[str], timeout: float = DEFAULT_TIMEOUT) -> Tuple[
         # conventional timeout status: nonzero, so every existing caller's
         # "code != 0 means failure" check already covers it.
         return 124, ""
+    except OSError:
+        # The binary is missing (FileNotFoundError), not executable, or not a file.
+        # This has to be an exit code like any other failure, not an exception: the
+        # callers are a diagnostic tool, the app's startup probe, and a notification
+        # worker thread, and an escaping FileNotFoundError killed all three (the
+        # doctor printed a traceback and ZERO checks on a box without gdbus -- the
+        # exact fresh machine it exists to diagnose). 127 is the shell's convention
+        # for "command not found": nonzero, so "code != 0 means failure" covers it.
+        return 127, ""
     return completed.returncode, completed.stdout
 
 
