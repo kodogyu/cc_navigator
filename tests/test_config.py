@@ -39,7 +39,8 @@ class FromDictCoercionTest(unittest.TestCase):
         raw = {
             "poll_seconds": 2.5, "corner": "bottom-left", "width": 500,
             "height": 600, "keep_above": False, "all_workspaces": False,
-            "font_size": 14, "opacity": 0.8, "bg_color": "#101010",
+            "font_size": 14, "opacity": 0.8, "theme": "nord",
+            "bg_color": "#101010", "dark_color": "#080808",
             "sort_mode": "group", "notifications": False,
         }
         self.assertEqual(config.from_dict(raw).to_dict(), raw)

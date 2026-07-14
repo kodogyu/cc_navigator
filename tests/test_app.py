@@ -59,6 +59,57 @@ class VersionTest(unittest.TestCase):
         self.assertIn(__version__, buf.getvalue())
 
 
+class SingleInstanceLockTest(unittest.TestCase):
+    def test_second_acquire_of_the_same_lock_is_denied(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        lock = d / "instance.lock"
+        fd1 = app.acquire_single_instance(lock)
+        self.addCleanup(lambda: os.close(fd1))
+        self.assertIsNotNone(fd1)
+        self.assertNotEqual(fd1, -1)
+        # A second instance sees the held lock and is denied (-> raise+exit path).
+        self.assertIsNone(app.acquire_single_instance(lock))
+
+    def test_lock_frees_when_the_holder_closes_it(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        lock = d / "instance.lock"
+        fd1 = app.acquire_single_instance(lock)
+        os.close(fd1)  # the "first instance" exits
+        fd2 = app.acquire_single_instance(lock)  # a later launch can now acquire
+        self.addCleanup(lambda: os.close(fd2))
+        self.assertTrue(fd2 and fd2 != -1)
+
+    def test_unopenable_lock_path_returns_the_start_anyway_sentinel(self):
+        # A directory that does not exist can't hold a lock file; rather than
+        # block startup, acquire returns -1 (truthy) so main() proceeds.
+        self.assertEqual(
+            app.acquire_single_instance(pathlib.Path("/no/such/dir/instance.lock")), -1
+        )
+
+
+class ActivateByClassTest(unittest.TestCase):
+    def test_js_matches_on_wm_class(self):
+        js = gnome.activate_class_js("io.github.kodogyu.CcNavigator")
+        self.assertIn("io.github.kodogyu.CcNavigator", js)
+        self.assertIn("get_wm_class", js)
+        self.assertIn("Main.activateWindow", js)
+
+    def test_activate_by_class_confirms_via_xprop(self):
+        cls = "io.github.kodogyu.CcNavigator"
+
+        def run(argv):
+            if argv and argv[0] == "gdbus":
+                return 0, "(true, '\"matched=1\"')"
+            if "WM_CLASS" in argv:
+                return 0, 'WM_CLASS(STRING) = "%s", "%s"' % (cls, cls)
+            if "_NET_ACTIVE_WINDOW" in argv:
+                return 0, "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x1"
+            return 1, ""
+        result = gnome.activate_window_by_class(cls, run=run, sleep=lambda _s: None, timeout=0.05)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.matched, 1)
+
+
 class CollectRowsTest(unittest.TestCase):
     def test_queries_only_the_sockets_the_state_files_mention(self):
         asked = []
@@ -286,6 +337,10 @@ class _FakeWindow:
         self.status = None
         self.rows = None
         self.unreachable = None
+        self.usage = "unset"
+
+    def set_usage(self, usage):
+        self.usage = usage
 
     def set_row_jump_sensitive(self, session_id, sensitive):
         self.sensitivity[session_id] = sensitive
@@ -437,6 +492,37 @@ class SendStatusTest(unittest.TestCase):
         )
         self.assertIn("Enter", not_submitted)
         self.assertNotIn("Enter", not_delivered)
+
+
+class ApplicationUsageTest(unittest.TestCase):
+    def test_apply_usage_forwards_to_the_window(self):
+        from ccnav import usage
+        snap = usage.UsageSnapshot(weekly_percent=24.0, token_cost=168.31, token_percent=12.8)
+        instance = _bare_application()
+        instance._apply_usage(snap)
+        self.assertEqual(instance.window.usage, snap)
+        instance._apply_usage(None)  # no data hides it
+        self.assertIsNone(instance.window.usage)
+
+    def test_usage_loop_fetches_applies_and_stops(self):
+        from ccnav import usage
+        snap = usage.UsageSnapshot(weekly_percent=24.0, token_cost=10.0, token_percent=0.76)
+        instance = _bare_application()
+        instance._stop = threading.Event()
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            instance._stop.set()  # run exactly one iteration
+            return snap
+
+        instance._usage_fetch = fetch
+        worker = threading.Thread(target=instance._usage_loop)
+        worker.start()
+        worker.join(timeout=2.0)
+        _pump_until(lambda: instance.window.usage != "unset")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(instance.window.usage, snap)
 
 
 class ApplicationSendThreadingTest(unittest.TestCase):

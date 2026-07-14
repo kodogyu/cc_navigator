@@ -11,10 +11,12 @@ GTK code at all times").
 """
 from __future__ import annotations
 
+import fcntl
+import os
 import pathlib
 import threading
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Set
+from typing import Callable, Dict, List, Optional, Set
 
 import gi
 
@@ -22,12 +24,16 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import config, gnome, model, notify, paths, proc, procstat, statestore, tmuxctl, ui, wiring  # noqa: E402
+from . import config, gnome, model, notify, paths, proc, procstat, statestore, tmuxctl, ui, usage, wiring  # noqa: E402
 
 # Fallback only: the live interval comes from self._settings.poll_seconds. Kept
 # so a bare Application built in a test (which does not load config) still polls
 # at a sane rate before a settings object is attached.
 POLL_SECONDS = 1
+
+# The usage total (ccusage over the week's transcripts) changes slowly and each
+# fetch costs ~1s, so it refreshes far less often than the session list.
+USAGE_POLL_SECONDS = 300
 
 # Eval("1+1") is a local D-Bus round trip and answers in milliseconds. The probe
 # runs before the window is mapped, so it cannot freeze a live window -- but on a
@@ -182,10 +188,15 @@ class Application:
         self,
         collect: Callable[[pathlib.Path], List[model.Row]] = collect_rows,
         probe_eval: Callable[[], bool] = probe_eval_available,
+        usage_fetch: Optional[Callable[[], object]] = None,
     ) -> None:
         # `collect` is injectable so the poll loop's error handling can be
         # tested with a collector that raises, without GTK or a real tmux.
         self._collect = collect
+        # usage_fetch is opt-in: its default None means no usage thread, so a
+        # test constructing Application never spawns ccusage. main() passes the
+        # real fetcher in.
+        self._usage_fetch = usage_fetch
         self.state_dir = paths.ensure_state_dir()
         self._settings = config.load()
         self.window = ui.NavigatorWindow(
@@ -215,6 +226,31 @@ class Application:
         self._wake = threading.Event()
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
+
+        # Usage runs on its OWN thread, not the 1s poll loop: ccusage takes ~1s
+        # and the weekly total barely moves, so it fetches on a slow cadence.
+        self._usage_thread = None
+        if self._usage_fetch is not None:
+            self._usage_thread = threading.Thread(target=self._usage_loop, daemon=True)
+            self._usage_thread.start()
+
+    # -- usage ------------------------------------------------------------
+
+    def _usage_loop(self) -> None:
+        """Fetch this week's usage now, then every USAGE_POLL_SECONDS. Off the
+        GTK thread (ccusage is a subprocess); results handed back via idle_add.
+        A raising fetch must not kill the thread -- degrade to 'no value'."""
+        while not self._stop.is_set():
+            try:
+                usage = self._usage_fetch()
+            except Exception:  # noqa: BLE001 -- a broken fetch must not end the thread
+                usage = None
+            GLib.idle_add(self._apply_usage, usage)
+            self._stop.wait(USAGE_POLL_SECONDS)
+
+    def _apply_usage(self, usage) -> bool:
+        self.window.set_usage(usage)
+        return False  # one-shot idle source
 
     # -- polling ----------------------------------------------------------
 
@@ -315,6 +351,10 @@ class Application:
         self._stop.set()
         self._wake.set()
         self._poll_thread.join()
+        # The usage thread waits on the same _stop event, so it is already
+        # unblocking; join it too so no ccusage subprocess outlives shutdown.
+        if self._usage_thread is not None:
+            self._usage_thread.join(timeout=1.0)
 
     # -- jump ---------------------------------------------------------------
 
@@ -371,6 +411,30 @@ class Application:
         return False
 
 
+# Held open for the whole process lifetime so the flock below is not released.
+# Closing the fd (or the process dying) frees the lock; that is exactly the
+# lifetime we want, so this is never explicitly closed.
+_instance_lock_fd = None  # type: Optional[int]
+
+
+def acquire_single_instance(lock_path: pathlib.Path) -> Optional[int]:
+    """Take an exclusive, non-blocking flock. Return the held fd, or None if
+    another live instance already holds it. The lock is tied to the open file
+    description, so a crash releases it automatically -- no stale pidfile to
+    reap. Returns -1 (a truthy sentinel, not None) if the lock file itself can't
+    be opened, so a locking failure never blocks the app from starting."""
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return -1
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def main(argv=None) -> int:
     import sys
     from . import __version__
@@ -386,7 +450,24 @@ def main(argv=None) -> int:
     # when it is realized.
     GLib.set_prgname(wiring.APP_ID)
     Gdk.set_program_class(wiring.APP_ID)
-    application = Application()
+
+    # Single instance: the panel is a skip-taskbar utility window, so GNOME does
+    # not track it as a running app -- clicking the dock launcher would otherwise
+    # spawn a SECOND panel instead of focusing the one already open. Guard with an
+    # flock: if another instance holds it, raise that window (matched by the
+    # WM_CLASS we set above) and exit, so the launcher click reads as "focus the
+    # running panel". A lock error returns the -1 sentinel and we start normally.
+    global _instance_lock_fd
+    try:
+        lock_path = paths.ensure_state_dir() / "instance.lock"
+        _instance_lock_fd = acquire_single_instance(lock_path)
+    except OSError:
+        _instance_lock_fd = -1
+    if _instance_lock_fd is None:
+        gnome.activate_window_by_class(wiring.APP_ID)
+        return 0
+
+    application = Application(usage_fetch=usage.fetch_usage)
     # Wired here, not in NavigatorWindow: this is where the main loop exists.
     application.window.connect("destroy", Gtk.main_quit)
     application.window.show_all()

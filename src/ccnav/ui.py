@@ -19,7 +19,8 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, model, updater, wiring  # noqa: E402
+from . import config, model, themes, updater, wiring  # noqa: E402
+from . import usage as usage_mod  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -36,51 +37,6 @@ EMPTY_HINT = (
 EVAL_UNAVAILABLE_HINT = "GNOME Shell Eval을 쓸 수 없어 '이동'이 비활성화되었습니다."
 UNREACHABLE_HINT = "tmux %d곳에 연결하지 못해 일부 세션이 목록에서 빠졌을 수 있습니다."
 
-# The dim/secondary text colour used across the row markup (subtitle, path, meta,
-# grip, group counts). Lightened from the old Adwaita grey so it stays readable on
-# the dark theme background below. One constant so every dim label matches.
-_DIM = "#9aa0b4"
-
-# The panel's built-in look: "Midnight Violet" with a mint accent. Scoped entirely
-# to `.ccnav` so it never touches another GTK app or the system theme. It sets
-# colour, background, border and radius only -- never font-size -- so the Settings
-# font-size scaling still composes on top (see _apply_css, which appends the user's
-# bg/font rules AFTER this block so they win on equal specificity).
-ACCENT = "#5eead4"          # mint
-_BG = "#1e1e2e"             # deep slate
-_THEME_CSS = """
-.ccnav, .ccnav.background {{ background-color:{bg}; color:#e6e6ef; }}
-.ccnav decoration {{ border-radius:14px; }}
-.ccnav headerbar {{ background:#181825; border:none; box-shadow:none;
-    min-height:34px; color:#e6e6ef; padding:0 4px; }}
-.ccnav headerbar button {{ background:transparent; border:none; box-shadow:none;
-    color:#c6c6d4; margin:3px 1px; padding:2px 6px; }}
-.ccnav headerbar button:hover {{ background:rgba(255,255,255,0.10); border-radius:8px; }}
-.ccnav scrolledwindow, .ccnav viewport, .ccnav list, .ccnav row {{ background:transparent; }}
-.ccnav row {{ color:#e6e6ef; border-radius:10px; margin:2px 6px; padding:4px 4px;
-    border:1px solid transparent; }}
-.ccnav row:hover {{ background:#26263a; }}
-.ccnav row:selected {{ background:#2a2a3c; border:1px solid {accent}; }}
-.ccnav row:selected:hover {{ background:#30304a; }}
-.ccnav entry {{ background:rgba(255,255,255,0.06); color:#e6e6ef;
-    border:1px solid rgba(255,255,255,0.14); border-radius:8px; padding:4px 8px;
-    box-shadow:none; caret-color:{accent}; }}
-.ccnav entry:focus {{ border-color:{accent}; box-shadow:none; }}
-.ccnav button {{ background:rgba(255,255,255,0.06); color:#e6e6ef;
-    border:1px solid rgba(255,255,255,0.12); border-radius:8px; padding:4px 10px;
-    box-shadow:none; text-shadow:none; }}
-.ccnav button:hover {{ background:rgba(255,255,255,0.12); }}
-.ccnav button:disabled {{ color:rgba(255,255,255,0.35); }}
-.ccnav-jump {{ background:{accent}; color:#12121c; font-weight:700; border:none; }}
-.ccnav-jump:hover {{ background:#7ff0dd; }}
-.ccnav-jump:disabled {{ background:rgba(94,234,212,0.22); color:rgba(255,255,255,0.40); }}
-.ccnav combobox button {{ background:rgba(255,255,255,0.06); color:#e6e6ef; }}
-.ccnav separator {{ background:rgba(255,255,255,0.08); }}
-.ccnav scrollbar {{ background:transparent; border:none; }}
-.ccnav scrollbar slider {{ background:rgba(255,255,255,0.20); border-radius:8px;
-    min-width:6px; min-height:24px; }}
-.ccnav scrollbar slider:hover {{ background:rgba(255,255,255,0.34); }}
-""".format(bg=_BG, accent=ACCENT)
 
 # Resolved once, at import, so it costs nothing per row. Tests inject their own
 # via the `hostname` parameter rather than depending on this machine's name.
@@ -708,6 +664,37 @@ class NavigatorWindow(Gtk.Window):
 
         self._status = Gtk.Label(xalign=0.0)
         self._status.set_line_wrap(True)
+        self._status.set_no_show_all(True)  # _render_status shows it only when non-empty
+        self._status.set_visible(False)
+
+        # Bottom usage line, one row (see usage.py): weekly % (orange, Claude API)
+        # beside the "Token Usage" ccusage bar, whose "NN%  $XXX" is drawn INSIDE
+        # the bar. Each piece is hidden until its own fetch delivers a value; a
+        # single widget with no children, so no_show_all + set_visible suffices.
+        self._weekly_label = Gtk.Label(xalign=0.0)
+        self._weekly_label.set_no_show_all(True)
+        # Same size and bold weight as the weekly label beside it, but white --
+        # matching the session titles above (no foreground -> inherits the theme's
+        # light text colour), not the orange of "사용량".
+        self._token_cap = Gtk.Label(xalign=0.0)
+        self._token_cap.set_markup('<b>Token Usage</b>')
+        self._token_cap.set_no_show_all(True)
+        # GtkProgressBar's own show_text draws the label ABOVE the bar in this GTK
+        # build, so instead overlay a centred label ON the bar to get "NN%  $XXX"
+        # truly inside it.
+        self._token_bar = Gtk.ProgressBar()
+        self._token_bar.set_valign(Gtk.Align.CENTER)
+        self._token_bar.get_style_context().add_class("token-bar")
+        self._token_value = Gtk.Label()
+        self._token_value.set_halign(Gtk.Align.CENTER)
+        self._token_value.set_valign(Gtk.Align.CENTER)
+        self._token_value.get_style_context().add_class("token-bar-text")
+        self._token_overlay = Gtk.Overlay()
+        self._token_overlay.add(self._token_bar)
+        self._token_overlay.add_overlay(self._token_value)
+        self._token_overlay.show_all()
+        self._token_overlay.set_no_show_all(True)
+        self._token_overlay.set_visible(False)
 
         # "Sort by" selector: status sections vs project groups. In group mode
         # the list is arranged manually by drag; the "자동 정렬" button re-groups
@@ -729,10 +716,20 @@ class NavigatorWindow(Gtk.Window):
         sort_row.pack_start(sort_combo, False, False, 0)
         sort_row.pack_start(auto_sort, False, False, 0)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.pack_start(sort_row, False, False, 0)
         box.pack_start(scroller, True, True, 0)
-        box.pack_start(self._status, False, False, 4)
+        box.pack_start(self._status, False, False, 0)
+        # Weekly % and the Token Usage bar share one bottom line, inset slightly
+        # from the window edges (left/right margins) and lifted off the very edge.
+        usage_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        usage_row.set_margin_start(10)
+        usage_row.set_margin_end(10)
+        usage_row.set_margin_bottom(4)
+        usage_row.pack_start(self._weekly_label, False, False, 0)
+        usage_row.pack_start(self._token_cap, False, False, 0)
+        usage_row.pack_start(self._token_overlay, True, True, 0)
+        box.pack_start(usage_row, False, False, 0)
         self._content = box
 
         # A Stack holds the full panel and a minimal "docked" bar. Attach mode
@@ -844,16 +841,11 @@ class NavigatorWindow(Gtk.Window):
         self.move(x, y)
 
     def _apply_css(self, settings: "config.Settings") -> None:
-        """Scale the panel's font and tint its background via the scoped provider.
-        Both are optional: font_size 0 and bg_color "" each omit their rule, and
-        an empty provider restores the theme. Scoped to .ccnav so no other app is
-        touched."""
-        # The built-in theme goes first; the user's bg/font rules are appended
-        # AFTER it so, at equal specificity, they win -- a custom background or
-        # font size still overrides the theme's defaults.
-        parts = [_THEME_CSS]
-        if settings.bg_color:
-            parts.append(".ccnav, .ccnav.background { background-color: %s; }" % settings.bg_color)
+        """Build the chosen theme's stylesheet (with the user's bg/dark colour
+        overrides folded into its palette) and apply it, then append the font-size
+        rule. Scoped to .ccnav so no other app is touched."""
+        palette = themes.resolve(settings.theme, settings.bg_color, settings.dark_color)
+        parts = [themes.build_css(palette)]
         if settings.font_size > 0:
             parts.append(".ccnav, .ccnav * { font-size: %dpt; }" % settings.font_size)
         self._css.load_from_data("\n".join(parts).encode("utf-8"))
@@ -1289,7 +1281,14 @@ class NavigatorWindow(Gtk.Window):
         no Apply/Cancel to get out of sync with what is on screen. Closing it
         just dismisses it -- the settings are already saved."""
         s = self._settings
-        dialog = Gtk.Dialog(title="cc_navigator 설정", transient_for=self, modal=True)
+        # use_header_bar: give the dialog a CSD header bar (like the panel) so its
+        # top is a themed dark bar, not a light server-side titlebar.
+        dialog = Gtk.Dialog(title="cc_navigator 설정", transient_for=self,
+                            modal=True, use_header_bar=1)
+        # The theme CSS is scoped to .ccnav; the settings dialog is a separate
+        # toplevel, so without this class it renders in the default (light) theme
+        # while the panel is dark. Tag it too so both match.
+        dialog.get_style_context().add_class("ccnav")
         dialog.add_button("닫기", Gtk.ResponseType.CLOSE)
         content = dialog.get_content_area()
         content.set_spacing(8)
@@ -1368,32 +1367,51 @@ class NavigatorWindow(Gtk.Window):
         grid.attach(font_box, 1, row, 1, 1)
         row += 1
 
-        # Background colour: a colour button plus a "테마 그대로" clear button.
-        add_label("배경색")
-        color_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        color_btn = Gtk.ColorButton()
-        if s.bg_color:
-            rgba = Gdk.RGBA()
-            rgba.parse(s.bg_color)
-            color_btn.set_rgba(rgba)
+        # Colour theme. Switching resets the two colour overrides below so the
+        # chosen theme shows in its own colours (then the user can re-tweak).
+        add_label("테마")
+        theme_combo = Gtk.ComboBoxText()
+        for tid, name in themes.theme_choices():
+            theme_combo.append(tid, name)
+        theme_combo.set_active_id(s.theme)
 
-        def on_color(btn):
+        def on_theme(combo):
+            tid = combo.get_active_id()
+            if tid and tid != self._settings.theme:
+                self._commit_settings(config.with_updates(
+                    self._settings, theme=tid, bg_color="", dark_color=""))
+
+        theme_combo.connect("changed", on_theme)
+        grid.attach(theme_combo, 1, row, 1, 1)
+        row += 1
+
+        def _hex_of(btn):
             rgba = btn.get_rgba()
-            hexcolor = "#%02x%02x%02x" % (
+            return "#%02x%02x%02x" % (
                 int(round(rgba.red * 255)), int(round(rgba.green * 255)),
                 int(round(rgba.blue * 255)))
-            self._commit_settings(config.with_updates(self._settings, bg_color=hexcolor))
 
-        clear_btn = Gtk.Button(label="테마 그대로")
+        def color_override_row(label_text, field, current):
+            add_label(label_text)
+            box_ = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            btn = Gtk.ColorButton()
+            if current:
+                rgba = Gdk.RGBA()
+                rgba.parse(current)
+                btn.set_rgba(rgba)
+            btn.connect("color-set", lambda b: self._commit_settings(
+                config.with_updates(self._settings, **{field: _hex_of(b)})))
+            clear = Gtk.Button(label="테마 그대로")
+            clear.connect("clicked", lambda _b: self._commit_settings(
+                config.with_updates(self._settings, **{field: ""})))
+            box_.pack_start(btn, False, False, 0)
+            box_.pack_start(clear, False, False, 0)
+            grid.attach(box_, 1, row, 1, 1)
 
-        def on_clear(_b):
-            self._commit_settings(config.with_updates(self._settings, bg_color=""))
-
-        color_btn.connect("color-set", on_color)
-        clear_btn.connect("clicked", on_clear)
-        color_box.pack_start(color_btn, False, False, 0)
-        color_box.pack_start(clear_btn, False, False, 0)
-        grid.attach(color_box, 1, row, 1, 1)
+        # Background and header ("dark") colour overrides on top of the theme.
+        color_override_row("배경색", "bg_color", s.bg_color)
+        row += 1
+        color_override_row("진한 색 (헤더)", "dark_color", s.dark_color)
         row += 1
 
         # Opacity.
@@ -1513,7 +1531,11 @@ class NavigatorWindow(Gtk.Window):
             self._on_settings_changed(new)
 
     def _render_status(self) -> None:
-        self._status.set_text(compose_status(self._sticky, self._hint, self._transient))
+        text = compose_status(self._sticky, self._hint, self._transient)
+        self._status.set_text(text)
+        # Collapse the status line when empty so it does not reserve a blank row
+        # above the usage area (the "too much whitespace" report).
+        self._status.set_visible(bool(text))
 
     def set_eval_available(self, available: bool) -> None:
         self._eval_available = available
@@ -1530,6 +1552,40 @@ class NavigatorWindow(Gtk.Window):
     def set_status(self, text: str) -> None:
         self._transient = text
         self._render_status()
+
+    def set_usage(self, snapshot) -> None:
+        """Render the two bottom usage readings from a usage.UsageSnapshot (or
+        None). Each part hides itself when its value is missing."""
+        if snapshot is None:
+            self._weekly_label.set_visible(False)
+            self._token_cap.set_visible(False)
+            self._token_bar.set_visible(False)
+            return
+
+        # Weekly usage % (Claude API), orange text.
+        if snapshot.weekly_percent is None:
+            self._weekly_label.set_visible(False)
+        else:
+            self._weekly_label.set_markup(
+                '<span foreground="#ffb454"><b>사용량 %d%%</b></span>'
+                % round(snapshot.weekly_percent))
+            self._weekly_label.set_visible(True)
+
+        # Token Usage (ccusage): the bar fills to the actual percent (fraction is
+        # percent/100), and "NN%  $XXX" is overlaid centred inside it.
+        if snapshot.token_percent is None:
+            self._token_cap.set_visible(False)
+            self._token_overlay.set_visible(False)
+        else:
+            self._token_bar.set_fraction(max(0.0, min(1.0, snapshot.token_percent / 100.0)))
+            cost = snapshot.token_cost or 0.0
+            self._token_value.set_markup(
+                '<small>%d%%  $%d</small>' % (round(snapshot.token_percent), round(cost)))
+            self._token_overlay.set_tooltip_text(
+                "이번 주 토큰 사용액 $%.2f / $%d (월요일 기준 누적)"
+                % (cost, int(usage_mod.WEEKLY_BUDGET_DOLLARS)))
+            self._token_cap.set_visible(True)
+            self._token_overlay.set_visible(True)
 
     def set_unreachable(self, count: int) -> None:
         """The hint slot: a poll found `count` sockets that held sessions but did

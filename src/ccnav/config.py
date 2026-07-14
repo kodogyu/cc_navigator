@@ -37,6 +37,11 @@ OPACITY_MIN, OPACITY_MAX = 0.3, 1.0
 # A background colour is either "" (no override, keep the theme) or a #rrggbb hex.
 _HEX_RE = re.compile(r"^#[0-9A-Fa-f]{6}\Z")
 
+# Selectable colour themes (ids match themes.THEMES). Kept here as a plain tuple so
+# config validation does not import the GTK-adjacent themes module.
+THEME_IDS = ("midnight", "nord", "graphite", "light")
+DEFAULT_THEME = "midnight"
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -48,7 +53,9 @@ class Settings:
     all_workspaces: bool = True
     font_size: int = 0  # 0 = use the system default font size
     opacity: float = 1.0
-    bg_color: str = ""  # "" = no override, keep the theme
+    theme: str = DEFAULT_THEME  # colour theme id (see THEME_IDS)
+    bg_color: str = ""  # "" = keep the theme's background, else a #rrggbb override
+    dark_color: str = ""  # "" = keep the theme's header/dark colour, else #rrggbb
     sort_mode: str = "status"  # "status" | "group"
     notifications: bool = True  # desktop notify when a session becomes "your turn"
 
@@ -62,7 +69,9 @@ class Settings:
             "all_workspaces": self.all_workspaces,
             "font_size": self.font_size,
             "opacity": self.opacity,
+            "theme": self.theme,
             "bg_color": self.bg_color,
+            "dark_color": self.dark_color,
             "sort_mode": self.sort_mode,
             "notifications": self.notifications,
         }
@@ -108,6 +117,11 @@ def _coerce(raw: dict, base: Settings) -> Settings:
 
     bg = raw.get("bg_color")
     bg = bg if isinstance(bg, str) and _HEX_RE.match(bg) else base.bg_color
+    dark = raw.get("dark_color")
+    dark = dark if isinstance(dark, str) and _HEX_RE.match(dark) else base.dark_color
+
+    theme = raw.get("theme")
+    theme = theme if theme in THEME_IDS else base.theme
 
     sort_mode = raw.get("sort_mode")
     sort_mode = sort_mode if sort_mode in SORT_MODES else base.sort_mode
@@ -121,7 +135,9 @@ def _coerce(raw: dict, base: Settings) -> Settings:
         all_workspaces=all_ws,
         font_size=font,
         opacity=opacity,
+        theme=theme,
         bg_color=bg,
+        dark_color=dark,
         sort_mode=sort_mode,
         notifications=notifications,
     )

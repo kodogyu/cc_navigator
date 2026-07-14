@@ -72,6 +72,40 @@ def activate_ts_js(title: str) -> str:
     )
 
 
+def activate_class_js(wm_class: str) -> str:
+    """Raise the first window whose WM_CLASS equals `wm_class`, counting all.
+
+    Used to focus cc_navigator's OWN window from a second launch (single
+    instance). The panel is skip-taskbar, so it is matched by class rather than
+    by being in any window list."""
+    return (
+        "(function(){var found=null,n=0;var k='%s';"
+        "global.get_window_actors().forEach(function(a){"
+        "var w=a.get_meta_window();"
+        "if((w.get_wm_class()||'')===k){n++;if(!found)found=w;}"
+        "});if(found)Main.activateWindow(found);"
+        "return 'matched='+n;})()" % escape_js(wm_class)
+    )
+
+
+def activate_window_by_class(
+    wm_class: str,
+    run: Runner = run_command,
+    sleep: Callable[[float], None] = time.sleep,
+    timeout: float = 1.5,
+) -> ActivationResult:
+    """Activate the window with WM_CLASS `wm_class`, verified via xprop."""
+    _, raw = eval_js(activate_class_js(wm_class), run=run)
+    matched = parse_match_count(raw)
+    deadline = time.monotonic() + timeout
+    while True:
+        if active_window_class(run=run) == wm_class:
+            return ActivationResult(True, matched)
+        if time.monotonic() >= deadline:
+            return ActivationResult(False, matched)
+        sleep(0.1)
+
+
 # A VSCode window is not addressed by an exact title (its title tracks the active
 # editor and changes constantly). It is matched by two stable things at once: the
 # wm_class the editor sets, and the workspace folder segment its title always
@@ -146,6 +180,22 @@ def active_window_title(run: Runner = run_command) -> Optional[str]:
     if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
         return value[1:-1]
     return None
+
+
+def active_window_class(run: Runner = run_command) -> Optional[str]:
+    """The WM_CLASS (class part) of the focused window, or None.
+
+    xprop prints `WM_CLASS(STRING) = "instance", "Class"`; the class is the last
+    quoted field. Used to confirm a raise-by-class actually landed, the same
+    xprop cross-check the title path uses."""
+    window_id = _active_window_id(run)
+    if not window_id:
+        return None
+    code, out = run(["xprop", "-id", window_id, "WM_CLASS"])
+    if code != 0 or "=" not in out:
+        return None
+    quoted = re.findall(r'"([^"]*)"', out)
+    return quoted[-1] if quoted else None
 
 
 def _wait_for_focus(
