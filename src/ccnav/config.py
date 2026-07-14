@@ -62,6 +62,7 @@ class Settings:
     # execute an already-installed `ccusage` binary against local Claude logs;
     # it never downloads or installs the program itself.
     ccusage_enabled: bool = False
+    click_to_jump: bool = False  # a single click on a row jumps, skipping expand
 
     def to_dict(self) -> dict:
         return {
@@ -79,6 +80,7 @@ class Settings:
             "sort_mode": self.sort_mode,
             "notifications": self.notifications,
             "ccusage_enabled": self.ccusage_enabled,
+            "click_to_jump": self.click_to_jump,
         }
 
 
@@ -118,6 +120,8 @@ def _coerce(raw: dict, base: Settings) -> Settings:
     ccusage_enabled = (
         ccusage_enabled if isinstance(ccusage_enabled, bool) else base.ccusage_enabled
     )
+    click_to_jump = raw.get("click_to_jump")
+    click_to_jump = click_to_jump if isinstance(click_to_jump, bool) else base.click_to_jump
 
     font_raw = _as_number(raw.get("font_size"), base.font_size)
     font = 0 if font_raw <= 0 else int(_clamp(font_raw, FONT_MIN, FONT_MAX))
@@ -150,6 +154,7 @@ def _coerce(raw: dict, base: Settings) -> Settings:
         sort_mode=sort_mode,
         notifications=notifications,
         ccusage_enabled=ccusage_enabled,
+        click_to_jump=click_to_jump,
     )
 
 

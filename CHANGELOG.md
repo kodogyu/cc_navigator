@@ -29,6 +29,15 @@ you find out what changed — and what a new version starts doing on your machin
 - VS Code process liveness records both PID and kernel start time, preventing a stale
   session from surviving PID reuse by another Claude process.
 
+### Fixed
+
+- Transient jump/send status messages clear automatically after ten seconds instead
+  of occupying the panel indefinitely.
+- A working session with no hook update for fifteen minutes is presented as idle,
+  recovering from a missed final `Stop` event without hiding the row.
+- Settings can optionally make a single row click jump immediately to that session;
+  the safer expand-first interaction remains the default.
+
 ## 0.2.1-beta — 2026-07-14
 
 ### Fixed

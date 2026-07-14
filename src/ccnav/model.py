@@ -1,10 +1,18 @@
 """Join state files with live tmux panes into the rows the UI renders."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from dataclasses import dataclass, replace
+from typing import Dict, List, Optional, Set, Tuple
 
 from . import hookstate
+
+# A "working" session updates its record on every tool event (PreToolUse /
+# PostToolUse), and Claude Code's foreground bash tops out at ~10 min, so a real
+# working session refreshes at least that often. A record left at "working" with
+# NO update for this long is almost certainly a session whose finishing "Stop"
+# hook was missed (or a turn that was aborted): it is shown as idle rather than
+# spinning forever. Generous enough that a long single operation is not misread.
+STALE_WORKING_SECONDS = 900
 
 
 @dataclass(frozen=True)
@@ -124,14 +132,30 @@ def _newest_vscode(records):
     return newest
 
 
+def _destale(row: Row, now: int, stale_seconds: int) -> Row:
+    """Present a long-untouched 'working' row as idle/reported instead. Only a
+    working row can go stale (a waiting one is already terminal); the threshold
+    guards against flipping a session mid-operation."""
+    if (row.state == hookstate.WORKING and stale_seconds > 0
+            and (now - row.updated_at) > stale_seconds):
+        return replace(row, state=hookstate.WAITING, reason=hookstate.STOP_IDLE)
+    return row
+
+
 def build_rows(
     records: List[Dict[str, object]],
     sessions_by_socket: Dict[str, Dict[str, str]],
     titles_by_socket: Dict[str, Dict[str, str]],
     live_pids: Set[object] = frozenset(),
+    now: Optional[int] = None,
+    stale_seconds: int = STALE_WORKING_SECONDS,
 ) -> List[Row]:
     """A tmux row exists iff its pane is live in tmux; a VSCode row exists iff
-    its process identity is in `live_pids` (the poller's kernel check)."""
+    its process identity is in `live_pids` (the poller's kernel liveness check).
+
+    When `now` is given, a 'working' row untouched for longer than `stale_seconds`
+    is shown as idle (see _destale). `now` is None for callers that do not want
+    that (existing tests), so staleness is opt-in per call."""
     rows = []  # type: List[Row]
     for (socket, pane), rec in _newest_per_pane(records).items():
         sessions = sessions_by_socket.get(socket, {})
@@ -187,6 +211,8 @@ def build_rows(
                 ai_title=ai_title,
             )
         )
+    if now is not None:
+        rows = [_destale(row, now, stale_seconds) for row in rows]
     rows.sort(key=sort_key)
     return rows
 

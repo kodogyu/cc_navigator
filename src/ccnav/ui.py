@@ -36,6 +36,10 @@ EMPTY_HINT = (
 EVAL_UNAVAILABLE_HINT = "GNOME Shell Eval을 쓸 수 없어 '이동'이 비활성화되었습니다."
 UNREACHABLE_HINT = "tmux %d곳에 연결하지 못해 일부 세션이 목록에서 빠졌을 수 있습니다."
 
+# How long a transient status message (reply/jump outcome) stays before it
+# auto-clears, so a one-off notice does not sit on screen indefinitely.
+_STATUS_CLEAR_SECONDS = 10
+
 
 # Resolved once, at import, so it costs nothing per row. Tests inject their own
 # via the `hostname` parameter rather than depending on this machine's name.
@@ -526,6 +530,7 @@ class NavigatorWindow(Gtk.Window):
         self._sticky = ""
         self._hint = ""
         self._transient = ""
+        self._status_clear_source = 0  # GLib timeout id that auto-clears _transient
         # None so the very first set_rows always renders; thereafter it holds the
         # signature of the rows on screen so an unchanged tick is a no-op.
         self._signature = None
@@ -1599,6 +1604,15 @@ class NavigatorWindow(Gtk.Window):
         grid.attach(ccusage_box, 1, row, 1, 1)
         row += 1
 
+        click_jump = Gtk.CheckButton(label="클릭하면 바로 세션으로 이동")
+        click_jump.set_active(s.click_to_jump)
+        click_jump.set_tooltip_text(
+            "행을 한 번 클릭하면 펼치지 않고 곧바로 세션 창으로 이동합니다")
+        click_jump.connect("toggled", lambda w: self._commit_settings(
+            config.with_updates(self._settings, click_to_jump=w.get_active())))
+        grid.attach(click_jump, 1, row, 1, 1)
+        row += 1
+
         from . import __version__
         # Bottom row: an update button + its status on the left, the version on
         # the right. Same version format as `cc-navigator --version` (app.main),
@@ -1702,6 +1716,21 @@ class NavigatorWindow(Gtk.Window):
     def set_status(self, text: str) -> None:
         self._transient = text
         self._render_status()
+        # Transient messages (reply/jump outcomes, the VSCode "no reply" notice)
+        # should not linger forever -- auto-clear after a few seconds. Any new
+        # status resets the timer; a cleared/empty status cancels it.
+        if self._status_clear_source:
+            GLib.source_remove(self._status_clear_source)
+            self._status_clear_source = 0
+        if text:
+            self._status_clear_source = GLib.timeout_add_seconds(
+                _STATUS_CLEAR_SECONDS, self._clear_transient)
+
+    def _clear_transient(self) -> bool:
+        self._status_clear_source = 0
+        self._transient = ""
+        self._render_status()
+        return False  # one-shot
 
     def set_token_usage(self, snapshot) -> None:
         """Render the opt-in local ccusage estimate, or hide it when disabled."""
@@ -2530,7 +2559,15 @@ class NavigatorWindow(Gtk.Window):
         """A click on the row that was ALREADY selected collapses it (deselects).
         row-selected has by now moved the selection onto `activated`, so compare
         against the pre-press selection, not the live one, or every first click
-        would collapse the row it just opened."""
+        would collapse the row it just opened.
+
+        In click-to-jump mode a click on a session row jumps straight to it and
+        leaves the row collapsed instead of expanding the reply/detail area."""
+        if (self._settings.click_to_jump and self._eval_available
+                and hasattr(activated, "ccnav_row")):
+            self._on_jump(activated.ccnav_row)
+            listbox.unselect_row(activated)  # don't leave it expanded
+            return
         if activated is self._pre_press_selected:
             listbox.unselect_row(activated)
 
