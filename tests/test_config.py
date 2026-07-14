@@ -41,7 +41,7 @@ class FromDictCoercionTest(unittest.TestCase):
             "height": 600, "keep_above": False, "all_workspaces": False,
             "font_size": 14, "opacity": 0.8, "theme": "nord",
             "bg_color": "#101010", "dark_color": "#080808",
-            "sort_mode": "group", "notifications": False,
+            "sort_mode": "group", "notifications": False, "click_to_jump": True,
         }
         self.assertEqual(config.from_dict(raw).to_dict(), raw)
 

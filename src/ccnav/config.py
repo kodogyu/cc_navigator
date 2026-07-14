@@ -58,6 +58,7 @@ class Settings:
     dark_color: str = ""  # "" = keep the theme's header/dark colour, else #rrggbb
     sort_mode: str = "status"  # "status" | "group"
     notifications: bool = True  # desktop notify when a session becomes "your turn"
+    click_to_jump: bool = False  # a single click on a row jumps, skipping expand
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +75,7 @@ class Settings:
             "dark_color": self.dark_color,
             "sort_mode": self.sort_mode,
             "notifications": self.notifications,
+            "click_to_jump": self.click_to_jump,
         }
 
 
@@ -109,6 +111,8 @@ def _coerce(raw: dict, base: Settings) -> Settings:
     all_ws = all_ws if isinstance(all_ws, bool) else base.all_workspaces
     notifications = raw.get("notifications")
     notifications = notifications if isinstance(notifications, bool) else base.notifications
+    click_to_jump = raw.get("click_to_jump")
+    click_to_jump = click_to_jump if isinstance(click_to_jump, bool) else base.click_to_jump
 
     font_raw = _as_number(raw.get("font_size"), base.font_size)
     font = 0 if font_raw <= 0 else int(_clamp(font_raw, FONT_MIN, FONT_MAX))
@@ -140,6 +144,7 @@ def _coerce(raw: dict, base: Settings) -> Settings:
         dark_color=dark,
         sort_mode=sort_mode,
         notifications=notifications,
+        click_to_jump=click_to_jump,
     )
 
 

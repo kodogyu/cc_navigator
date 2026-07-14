@@ -14,6 +14,7 @@ from __future__ import annotations
 import fcntl
 import os
 import pathlib
+import time
 import threading
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set
@@ -112,7 +113,8 @@ def collect_rows(
         live_pids=live_pids,
         observed_pids=observed_pids,
     )
-    rows = model.build_rows(records, sessions, titles, live_pids=live_pids)
+    rows = model.build_rows(
+        records, sessions, titles, live_pids=live_pids, now=int(time.time()))
     return Collected(rows, len(set(sockets) - observed))
 
 

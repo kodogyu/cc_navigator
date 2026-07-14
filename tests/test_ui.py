@@ -220,6 +220,55 @@ class RoundedRegionTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
+class ClickToJumpTest(unittest.TestCase):
+    def _session_child(self, window):
+        return next(c for c in window._listbox.get_children()
+                    if not getattr(c, "ccnav_is_header", False))
+
+    def test_a_row_click_jumps_when_the_setting_is_on(self):
+        from ccnav import config
+        jumped = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: jumped.append(r), on_send=lambda r, t: None,
+            settings=config.Settings(click_to_jump=True))
+        try:
+            window.set_eval_available(True)
+            window.set_rows([row(session_id="a")])
+            window._on_row_activated(window._listbox, self._session_child(window))
+            self.assertEqual([r.session_id for r in jumped], ["a"])
+        finally:
+            window.destroy()
+
+    def test_a_row_click_does_not_jump_when_the_setting_is_off(self):
+        from ccnav import config
+        jumped = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: jumped.append(r), on_send=lambda r, t: None,
+            settings=config.Settings(click_to_jump=False))
+        try:
+            window.set_eval_available(True)
+            window.set_rows([row(session_id="a")])
+            window._on_row_activated(window._listbox, self._session_child(window))
+            self.assertEqual(jumped, [])
+        finally:
+            window.destroy()
+
+    def test_click_to_jump_is_suppressed_when_eval_is_unavailable(self):
+        from ccnav import config
+        jumped = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: jumped.append(r), on_send=lambda r, t: None,
+            settings=config.Settings(click_to_jump=True))
+        try:
+            window.set_eval_available(False)  # jump disabled -> click must not fire it
+            window.set_rows([row(session_id="a")])
+            window._on_row_activated(window._listbox, self._session_child(window))
+            self.assertEqual(jumped, [])
+        finally:
+            window.destroy()
+
+
+@unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
 class NavigatorWindowTest(unittest.TestCase):
     def test_constructs_and_accepts_rows(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
@@ -1843,6 +1892,26 @@ class SettingsUiTest(unittest.TestCase):
             self.assertNotIn("15pt", cleared)
             self.assertNotIn("rgb(18,52,86)", cleared)  # the user's custom bg is gone
             self.assertIn("background-color", cleared)   # theme background remains
+        finally:
+            window.destroy()
+
+    def test_transient_status_arms_and_clears(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.Settings(),
+        )
+        try:
+            window.set_status("답장을 지원하지 않습니다")
+            self.assertEqual(window._transient, "답장을 지원하지 않습니다")
+            self.assertNotEqual(window._status_clear_source, 0, "a clear timer must be armed")
+            window._clear_transient()
+            self.assertEqual(window._transient, "")
+            self.assertEqual(window._status_clear_source, 0)
+            # An empty status cancels any pending timer rather than arming one.
+            window.set_status("x")
+            window.set_status("")
+            self.assertEqual(window._status_clear_source, 0)
         finally:
             window.destroy()
 
