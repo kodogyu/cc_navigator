@@ -67,6 +67,64 @@ class TmuxSocketsTest(unittest.TestCase):
                 uid=self.uid),
         )
 
+    def test_ignores_internal_doctor_probe_sockets(self):
+        probe = self.unix_socket(self.directory / "ccnav_probe_12345")
+        ordinary = self.unix_socket(self.directory / "ccnav_probe_work")
+
+        found = paths.tmux_sockets(
+            env={"TMUX_TMPDIR": self.temp.name}, uid=self.uid)
+
+        self.assertNotIn(str(probe), found)
+        self.assertIn(str(ordinary), found, "only the PID-only namespace is reserved")
+
+    def test_cleanup_removes_only_a_same_user_pid_named_socket(self):
+        probe = self.unix_socket(self.directory / "ccnav_probe_12345")
+
+        removed = paths.cleanup_tmux_probe_socket(
+            probe.name,
+            env={"TMUX_TMPDIR": self.temp.name},
+            uid=self.uid,
+        )
+
+        self.assertTrue(removed)
+        self.assertFalse(probe.exists())
+
+    def test_cleanup_refuses_a_lookalike_or_regular_file(self):
+        lookalike = self.unix_socket(self.directory / "ccnav_probe_work")
+        regular = self.directory / "ccnav_probe_12345"
+        regular.write_text("not a socket")
+
+        self.assertFalse(paths.cleanup_tmux_probe_socket(
+            lookalike.name,
+            env={"TMUX_TMPDIR": self.temp.name},
+            uid=self.uid,
+        ))
+        self.assertFalse(paths.cleanup_tmux_probe_socket(
+            regular.name,
+            env={"TMUX_TMPDIR": self.temp.name},
+            uid=self.uid,
+        ))
+        self.assertTrue(lookalike.exists())
+        self.assertTrue(regular.exists())
+
+    def test_cleanup_refuses_a_symlinked_tmux_directory(self):
+        real_directory = pathlib.Path(self.temp.name) / "real-tmux-directory"
+        real_directory.mkdir()
+        probe = self.unix_socket(real_directory / "ccnav_probe_12345")
+        linked_base = pathlib.Path(self.temp.name) / "linked"
+        linked_base.mkdir()
+        (linked_base / ("tmux-%d" % self.uid)).symlink_to(
+            real_directory, target_is_directory=True)
+
+        removed = paths.cleanup_tmux_probe_socket(
+            probe.name,
+            env={"TMUX_TMPDIR": str(linked_base)},
+            uid=self.uid,
+        )
+
+        self.assertFalse(removed)
+        self.assertTrue(probe.exists())
+
     def test_missing_socket_directory_is_empty(self):
         self.assertEqual(
             paths.tmux_sockets(
