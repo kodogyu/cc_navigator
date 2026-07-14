@@ -2260,9 +2260,9 @@ class SettingsUiTest(unittest.TestCase):
 
 
 class UsageButtonTest(unittest.TestCase):
-    """The bottom usage button: it must live at the bottom of the content box, fetch
-    through the injected loader (never the network), guard against a double click, and
-    render either the limit rows or the failure message into its popover."""
+    """The usage button: it must share the bottom bar with Token Usage, fetch through
+    the injected loader (never the network), guard against a double click, and render
+    either the limit rows or the failure message into its popover."""
 
     def _widgets_of_type(self, root, cls):
         """Depth-first in child order -- the order the user sees them stacked."""
@@ -2282,10 +2282,16 @@ class UsageButtonTest(unittest.TestCase):
         return " ".join(
             (l.get_text() or "") for l in self._widgets_of_type(window._usage_popover, Gtk.Label))
 
-    def test_the_usage_button_is_the_last_widget_in_the_content_box(self):
+    def test_the_usage_button_shares_the_last_row_with_token_usage(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
-            self.assertIs(window._content.get_children()[-1], window._usage_button)
+            self.assertIs(window._content.get_children()[-1], window._bottom_bar)
+            self.assertIs(window._token_row.get_parent(), window._bottom_bar)
+            self.assertIs(window._usage_button.get_parent(), window._bottom_bar)
+            self.assertEqual(
+                window._bottom_bar.query_child_packing(window._usage_button)[3],
+                Gtk.PackType.END,
+            )
             self.assertIn("사용량", window._usage_button.get_label())
         finally:
             window.destroy()
@@ -2373,21 +2379,27 @@ class UsageButtonTest(unittest.TestCase):
 
 
 class BottomBarLayoutTest(unittest.TestCase):
-    """The bottom strip must cost only what it shows: the usage button sits right-
-    aligned at about a third of the width, and the status label -- empty almost all
-    the time -- takes no vertical space until it actually has something to say."""
+    """The bottom strip must cost only what it shows: Token Usage and its action sit
+    on one line, with the action on the right, and the status label -- empty almost
+    all the time -- takes no vertical space until it actually has something to say."""
 
-    def test_the_usage_button_is_right_aligned_and_about_a_third_wide(self):
+    def test_the_usage_button_is_to_the_right_of_token_usage(self):
+        from ccnav import usage
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
+            window.set_token_usage(usage.TokenUsage(10.0, 5.0, ""))
             window.resize(340, 420)
             window.show_all()
             # Wait for a real allocation, not for a guessed delay.
-            pump_until(lambda: window._usage_button.get_allocation().width > 1)
+            pump_until(lambda: window._token_row.get_allocation().width > 1)
             self.assertEqual(window._usage_button.get_halign(), Gtk.Align.END)
-            width = window._usage_button.get_allocation().width
-            self.assertLess(width, 340 // 2, "must not span the panel")
-            self.assertGreater(width, 40, "must still be clickable")
+            token = window._token_row.get_allocation()
+            button = window._usage_button.get_allocation()
+            bottom = window._bottom_bar.get_allocation()
+            self.assertLessEqual(token.x + token.width, button.x)
+            self.assertEqual(button.x + button.width, bottom.width)
+            self.assertLess(button.width, 340 // 2, "must not span the panel")
+            self.assertGreater(button.width, 40, "must still be clickable")
         finally:
             window.destroy()
 
