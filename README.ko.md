@@ -107,3 +107,8 @@ set -g set-titles-string 'ccnav:#{session_name}'
 `~/.claude/.credentials.json`의 OAuth 토큰을 읽어 Anthropic의 **비공식 내부**
 `/api/oauth/usage` 엔드포인트(Claude Code의 `/usage`가 쓰는 그것)를 호출하므로, Claude Code
 업데이트로 **동작을 멈출 수 있습니다** — 그때는 팝오버가 그렇게 알려주고 패널은 계속 돕니다.
+
+**외부 도구 주의:** 이번 주 토큰 비용 추정은 설정에서 **"ccusage 토큰 비용 계산
+사용"**을 직접 켠 경우에만 동작합니다. `ccusage`는 cc_navigator에 포함되지 않은 외부
+프로그램이며 로컬 Claude 대화 로그를 읽습니다. cc_navigator는 이를 자동 설치하거나
+`npx`로 다운로드하지 않으므로, 사용하려면 출처를 확인한 뒤 별도로 설치해야 합니다.

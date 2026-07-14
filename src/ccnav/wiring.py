@@ -18,12 +18,22 @@ from typing import Optional
 
 APP_ID = "io.github.kodogyu.CcNavigator"
 
+# The app ships its own icon; point the launcher at it by absolute path so it
+# shows the real icon in the app grid / dock instead of a generic terminal glyph,
+# with no icon-theme cache step to go stale. Resolved from this file's location
+# (src/ccnav/wiring.py -> repo root), so it stays correct wherever the repo lives.
+_ICON_PATH = str(pathlib.Path(__file__).resolve().parents[2] / "icons" / "window_icon.png")
+
+# StartupWMClass binds the running window to THIS launcher, so a pinned dock icon
+# is the one that lights up (or relaunches) rather than a stray generic entry.
+# The app sets its WM_CLASS to APP_ID (see app.main), so they match exactly.
 _DESKTOP = """[Desktop Entry]
 Type=Application
 Name=cc-navigator
 Comment=Navigate Claude Code sessions
 Exec=%(exec)s
-Icon=utilities-terminal
+Icon=%(icon)s
+StartupWMClass=%(wmclass)s
 Categories=Utility;Development;
 Terminal=false
 """
@@ -62,8 +72,14 @@ def launcher_installed(apps_dir: Optional[pathlib.Path] = None) -> bool:
     return launcher_path(apps_dir).exists()
 
 
+def _desktop_text(exec_path: str) -> str:
+    """The filled-in .desktop body. One place so the launcher and the autostart
+    entry (which appends its own key) can never drift on icon/WM_CLASS."""
+    return _DESKTOP % {"exec": exec_path, "icon": _ICON_PATH, "wmclass": APP_ID}
+
+
 def install_launcher(exec_path: str, apps_dir: Optional[pathlib.Path] = None) -> None:
-    _atomic_write(launcher_path(apps_dir), _DESKTOP % {"exec": exec_path})
+    _atomic_write(launcher_path(apps_dir), _desktop_text(exec_path))
 
 
 def remove_launcher(apps_dir: Optional[pathlib.Path] = None) -> bool:
@@ -102,7 +118,7 @@ def set_autostart(
     enabled: bool, exec_path: str, autostart_dir: Optional[pathlib.Path] = None
 ) -> None:
     flag = "true" if enabled else "false"
-    text = _DESKTOP % {"exec": exec_path} + "X-GNOME-Autostart-enabled=%s\n" % flag
+    text = _desktop_text(exec_path) + "X-GNOME-Autostart-enabled=%s\n" % flag
     _atomic_write(autostart_path(autostart_dir), text)
 
 

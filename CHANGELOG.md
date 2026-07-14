@@ -4,6 +4,40 @@ cc_navigator has no build artifact: **Settings ⚙ → 업데이트 확인** fas
 checkout to the latest `master` and restarts. So this file, not a download page, is how
 you find out what changed — and what a new version starts doing on your machine.
 
+## 0.3.0-beta — Unreleased
+
+### New
+
+- VS Code extension sessions now appear without a tmux pane, use their AI title as
+  the headline, and can jump to the matching editor tab.
+- Four selectable colour themes, custom background/header colours, a dock-integrated
+  launcher, and a single-instance guard.
+- An optional local token-cost estimate can be enabled in Settings. It uses the
+  separately installed `ccusage` executable every five minutes and is **off by
+  default**.
+
+### Security and privacy
+
+- cc_navigator never installs `ccusage`, never falls back to `npx`, and never
+  downloads executable code when the option is enabled. The Settings warning states
+  that the external program reads local Claude conversation logs before consent is
+  given.
+- Account usage keeps the redirect-refusing HTTPS client from 0.2.x, so the OAuth
+  bearer token is sent only to the intended Anthropic endpoint.
+- VS Code tab URIs are sent only after one exact target window is independently
+  confirmed; failed or ambiguous window matches leave the editor untouched.
+- VS Code process liveness records both PID and kernel start time, preventing a stale
+  session from surviving PID reuse by another Claude process.
+
+### Fixed
+
+- Transient jump/send status messages clear automatically after ten seconds instead
+  of occupying the panel indefinitely.
+- A working session with no hook update for fifteen minutes is presented as idle,
+  recovering from a missed final `Stop` event without hiding the row.
+- Settings can optionally make a single row click jump immediately to that session;
+  the safer expand-first interaction remains the default.
+
 ## 0.2.1-beta — 2026-07-14
 
 ### Fixed

@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import datetime
 import json
+import math
 import pathlib
+import shutil
+import subprocess
 import time
 import urllib.error
 import urllib.request
@@ -281,3 +284,123 @@ def load(
     if not parsed.entries:  # a 200 we cannot read is still a broken endpoint
         return None, ERR_SHAPE
     return Usage(plan=plan_name(credentials), entries=parsed.entries), ""
+
+
+# Optional local token-cost estimate -----------------------------------------
+#
+# This path is deliberately separate from load(): account limits are fetched
+# only when the user presses the button, while ccusage is an external program
+# that may read local Claude transcripts. Application gates every call behind
+# Settings.ccusage_enabled. We never fall back to npx and never install anything.
+
+WEEKLY_BUDGET_DOLLARS = 1315.0
+CCUSAGE_TIMEOUT = 40.0
+ERR_CCUSAGE_NOT_INSTALLED = (
+    "ccusage를 찾을 수 없습니다. 외부 프로그램을 직접 설치한 뒤 다시 시도하세요."
+)
+ERR_CCUSAGE_FAILED = "ccusage 실행에 실패했습니다. 설치 상태와 권한을 확인하세요."
+ERR_CCUSAGE_SHAPE = "ccusage 출력 형식을 알 수 없습니다. 버전 호환성을 확인하세요."
+
+
+class TokenUsage(NamedTuple):
+    token_cost: Optional[float]
+    token_percent: Optional[float]
+    error: str = ""
+
+
+def week_start(today: datetime.date) -> datetime.date:
+    return today - datetime.timedelta(days=today.weekday())
+
+
+def sum_since_monday(daily: List[dict], today: datetime.date) -> float:
+    """Sum finite, non-negative daily costs from this Monday through today.
+
+    ccusage output is external, untrusted input. Non-dicts, malformed dates,
+    future rows and NaN/Infinity/negative costs are ignored rather than allowed
+    to crash GTK or produce a misleading progress bar.
+    """
+    monday = week_start(today)
+    total = 0.0
+    for entry in daily:
+        if not isinstance(entry, dict):
+            continue
+        raw = entry.get("date") or entry.get("day") or ""
+        try:
+            day = datetime.date.fromisoformat(str(raw)[:10])
+            cost = float(entry.get("totalCost"))
+        except (TypeError, ValueError):
+            continue
+        if monday <= day <= today and math.isfinite(cost) and cost >= 0:
+            total += cost
+    return total
+
+
+def parse_daily(text: str) -> Optional[List[dict]]:
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError):
+        return None
+    days = data.get("daily") if isinstance(data, dict) else None
+    return days if isinstance(days, list) else None
+
+
+def ccusage_argv(
+    which: Callable[[str], Optional[str]] = shutil.which,
+) -> Optional[List[str]]:
+    """Use only an already-installed executable resolved to an absolute path.
+
+    There is intentionally no npx fallback: merely opening cc_navigator or
+    enabling a display option must never download and execute remote code.
+    """
+    executable = which("ccusage")
+    if not executable:
+        return None
+    return [str(pathlib.Path(executable).resolve()), "claude", "daily", "--json"]
+
+
+def _run_ccusage(
+    argv_for: Callable[[], Optional[List[str]]] = ccusage_argv,
+) -> Tuple[Optional[str], str]:
+    argv = argv_for()
+    if not argv:
+        return None, ERR_CCUSAGE_NOT_INSTALLED
+    try:
+        done = subprocess.run(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=CCUSAGE_TIMEOUT,
+            universal_newlines=True,
+            shell=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None, ERR_CCUSAGE_FAILED
+    if done.returncode != 0:
+        return None, ERR_CCUSAGE_FAILED
+    return done.stdout, ""
+
+
+def fetch_token_usage(
+    budget: float = WEEKLY_BUDGET_DOLLARS,
+    today: Optional[datetime.date] = None,
+    run: Callable[[], Tuple[Optional[str], str]] = _run_ccusage,
+) -> TokenUsage:
+    """Read the optional local estimate; never install, network-fetch, or raise."""
+    try:
+        text, error = run()
+    except Exception:  # an injected/third-party runner is still untrusted
+        return TokenUsage(None, None, ERR_CCUSAGE_FAILED)
+    if text is None:
+        return TokenUsage(None, None, error or ERR_CCUSAGE_FAILED)
+    daily = parse_daily(text)
+    if daily is None:
+        return TokenUsage(None, None, ERR_CCUSAGE_SHAPE)
+    today = today or datetime.date.today()
+    cost = sum_since_monday(daily, today)
+    try:
+        valid_budget = math.isfinite(float(budget)) and float(budget) > 0
+    except (TypeError, ValueError):
+        valid_budget = False
+    if not valid_budget:
+        return TokenUsage(None, None, ERR_CCUSAGE_SHAPE)
+    return TokenUsage(cost, cost / float(budget) * 100.0, "")

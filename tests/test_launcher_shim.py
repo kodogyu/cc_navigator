@@ -24,6 +24,11 @@ class LauncherShimTest(unittest.TestCase):
     def env(self):
         env = dict(os.environ)
         env["DISPLAY"] = ":99"  # not a live display -- see module docstring
+        # Isolate the runtime dir so the single-instance lock is this test's own,
+        # never the live panel's: otherwise a running cc_navigator holds the lock
+        # and the launcher takes its raise-existing-and-exit-0 path, which would
+        # mask the display failure this test asserts on.
+        env["XDG_RUNTIME_DIR"] = self._elsewhere.name
         return env
 
     def invoke(self, command):

@@ -115,3 +115,8 @@ weekly — each with a bar, a percentage, and when it resets. It reads the OAuth
 from `~/.claude/.credentials.json` and calls Anthropic's **undocumented internal**
 `/api/oauth/usage` endpoint (the one Claude Code's own `/usage` uses), so it may stop
 working after a Claude Code update — the popover then says so and the panel carries on.
+
+**External-tool warning:** the weekly token-cost estimate runs only after you explicitly
+enable **"ccusage token-cost calculation"** in Settings. `ccusage` is a separate program
+that reads local Claude conversation logs. cc_navigator never installs it or downloads it
+through `npx`; verify its source and install it separately if you choose to use it.

@@ -19,7 +19,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, model, updater, usage, wiring  # noqa: E402
+from . import config, model, themes, updater, usage, wiring  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -35,6 +35,11 @@ EMPTY_HINT = (
 )
 EVAL_UNAVAILABLE_HINT = "GNOME Shell Eval을 쓸 수 없어 '이동'이 비활성화되었습니다."
 UNREACHABLE_HINT = "tmux %d곳에 연결하지 못해 일부 세션이 목록에서 빠졌을 수 있습니다."
+
+# How long a transient status message (reply/jump outcome) stays before it
+# auto-clears, so a one-off notice does not sit on screen indefinitely.
+_STATUS_CLEAR_SECONDS = 10
+
 
 # Resolved once, at import, so it costs nothing per row. Tests inject their own
 # via the `hostname` parameter rather than depending on this machine's name.
@@ -313,12 +318,12 @@ def _title_markup(row: model.Row) -> str:
 
 
 def _secondary_markup(row: model.Row) -> str:
-    return ('<small><span foreground="#77767b">%s</span></small>'
+    return ('<small><span foreground="#9aa0b4">%s</span></small>'
             % GLib.markup_escape_text(_oneline(secondary_line(row))))
 
 
 def _path_markup(row: model.Row) -> str:
-    return ('<small><span foreground="#77767b">%s</span></small>'
+    return ('<small><span foreground="#9aa0b4">%s</span></small>'
             % GLib.markup_escape_text(_oneline(row.cwd)))
 
 
@@ -328,7 +333,7 @@ def _prompt_markup(prompt: str) -> str:
 
 def _meta_markup(row: model.Row) -> str:
     state_line = _oneline(row.state + (" · " + row.reason if row.reason else ""))
-    return ('<small><span foreground="#77767b">%s</span></small>'
+    return ('<small><span foreground="#9aa0b4">%s</span></small>'
             % GLib.markup_escape_text(state_line))
 
 
@@ -394,7 +399,7 @@ def _row_signature(row: model.Row):
     (main state carried forward), and the second icon must still refresh."""
     return (row.session_id, row.socket, row.pane, row.tmux_session, row.title,
             row.state, row.reason, row.message, row.cwd, row.last_prompt,
-            row.subagent_ids)
+            row.subagent_ids, row.kind, row.claude_pid)
 
 
 # Drag targets (within this app only). A dragged SESSION reorders a row / moves it
@@ -525,6 +530,7 @@ class NavigatorWindow(Gtk.Window):
         self._sticky = ""
         self._hint = ""
         self._transient = ""
+        self._status_clear_source = 0  # GLib timeout id that auto-clears _transient
         # None so the very first set_rows always renders; thereafter it holds the
         # signature of the rows on screen so an unchanged tick is a no-op.
         self._signature = None
@@ -667,12 +673,39 @@ class NavigatorWindow(Gtk.Window):
         self._status = Gtk.Label(xalign=0.0)
         self._status.set_line_wrap(True)
         # Empty almost all the time (it only speaks up on a failed jump/send or an
-        # unreachable socket), and an empty label still claims a full row. Drive its
-        # visibility from its text -- see _render_status -- so the bottom strip costs
-        # only what it actually shows. no_show_all keeps a later window.show_all()
-        # from reviving the empty row.
+        # unreachable socket), and an empty label still claims a full row.
         self._status.set_no_show_all(True)
         self._status.set_visible(False)
+
+        # Optional local token-cost estimate. This row stays hidden unless the
+        # explicit ccusage setting is enabled and Application supplies a result.
+        self._token_cap = Gtk.Label(xalign=0.0)
+        self._token_cap.set_markup('<b>Token Usage</b>')
+        self._token_bar = Gtk.ProgressBar()
+        self._token_bar.set_valign(Gtk.Align.CENTER)
+        self._token_bar.get_style_context().add_class("token-bar")
+        self._token_value = Gtk.Label()
+        self._token_value.set_halign(Gtk.Align.CENTER)
+        self._token_value.set_valign(Gtk.Align.CENTER)
+        self._token_value.get_style_context().add_class("token-bar-text")
+        self._token_overlay = Gtk.Overlay()
+        self._token_overlay.add(self._token_bar)
+        self._token_overlay.add_overlay(self._token_value)
+        self._token_overlay.show_all()
+        self._token_error = Gtk.Label(xalign=0.0)
+        self._token_error.set_line_wrap(True)
+        self._token_error.set_max_width_chars(42)
+
+        self._token_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._token_row.set_margin_start(10)
+        self._token_row.set_margin_end(10)
+        self._token_row.set_margin_bottom(4)
+        self._token_row.pack_start(self._token_cap, False, False, 0)
+        self._token_row.pack_start(self._token_overlay, True, True, 0)
+        self._token_row.pack_start(self._token_error, True, True, 0)
+        self._token_row.show_all()
+        self._token_row.set_no_show_all(True)
+        self._token_row.set_visible(False)
 
         # "Sort by" selector: status sections vs project groups. In group mode
         # the list is arranged manually by drag; the "자동 정렬" button re-groups
@@ -730,6 +763,7 @@ class NavigatorWindow(Gtk.Window):
         box.pack_start(sort_row, False, False, 0)
         box.pack_start(scroller, True, True, 0)
         box.pack_start(self._status, False, False, 4)
+        box.pack_start(self._token_row, False, False, 0)
         box.pack_end(self._usage_button, False, False, 0)  # flush to the bottom edge
         self._content = box
 
@@ -810,6 +844,8 @@ class NavigatorWindow(Gtk.Window):
                 self._geometry_applied = True
         Gtk.Widget.set_opacity(self, settings.opacity)
         self._apply_css(settings)
+        if not settings.ccusage_enabled:
+            self.set_token_usage(None)
 
     def _apply_geometry(self, settings: "config.Settings") -> None:
         """Pin the window to the chosen corner of the primary monitor.
@@ -842,13 +878,11 @@ class NavigatorWindow(Gtk.Window):
         self.move(x, y)
 
     def _apply_css(self, settings: "config.Settings") -> None:
-        """Scale the panel's font and tint its background via the scoped provider.
-        Both are optional: font_size 0 and bg_color "" each omit their rule, and
-        an empty provider restores the theme. Scoped to .ccnav so no other app is
-        touched."""
-        parts = []
-        if settings.bg_color:
-            parts.append(".ccnav { background-color: %s; }" % settings.bg_color)
+        """Build the chosen theme's stylesheet (with the user's bg/dark colour
+        overrides folded into its palette) and apply it, then append the font-size
+        rule. Scoped to .ccnav so no other app is touched."""
+        palette = themes.resolve(settings.theme, settings.bg_color, settings.dark_color)
+        parts = [themes.build_css(palette)]
         if settings.font_size > 0:
             parts.append(".ccnav, .ccnav * { font-size: %dpt; }" % settings.font_size)
         self._css.load_from_data("\n".join(parts).encode("utf-8"))
@@ -1379,7 +1413,14 @@ class NavigatorWindow(Gtk.Window):
         no Apply/Cancel to get out of sync with what is on screen. Closing it
         just dismisses it -- the settings are already saved."""
         s = self._settings
-        dialog = Gtk.Dialog(title="cc_navigator 설정", transient_for=self, modal=True)
+        # use_header_bar: give the dialog a CSD header bar (like the panel) so its
+        # top is a themed dark bar, not a light server-side titlebar.
+        dialog = Gtk.Dialog(title="cc_navigator 설정", transient_for=self,
+                            modal=True, use_header_bar=1)
+        # The theme CSS is scoped to .ccnav; the settings dialog is a separate
+        # toplevel, so without this class it renders in the default (light) theme
+        # while the panel is dark. Tag it too so both match.
+        dialog.get_style_context().add_class("ccnav")
         dialog.add_button("닫기", Gtk.ResponseType.CLOSE)
         content = dialog.get_content_area()
         content.set_spacing(8)
@@ -1458,32 +1499,51 @@ class NavigatorWindow(Gtk.Window):
         grid.attach(font_box, 1, row, 1, 1)
         row += 1
 
-        # Background colour: a colour button plus a "테마 그대로" clear button.
-        add_label("배경색")
-        color_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        color_btn = Gtk.ColorButton()
-        if s.bg_color:
-            rgba = Gdk.RGBA()
-            rgba.parse(s.bg_color)
-            color_btn.set_rgba(rgba)
+        # Colour theme. Switching resets the two colour overrides below so the
+        # chosen theme shows in its own colours (then the user can re-tweak).
+        add_label("테마")
+        theme_combo = Gtk.ComboBoxText()
+        for tid, name in themes.theme_choices():
+            theme_combo.append(tid, name)
+        theme_combo.set_active_id(s.theme)
 
-        def on_color(btn):
+        def on_theme(combo):
+            tid = combo.get_active_id()
+            if tid and tid != self._settings.theme:
+                self._commit_settings(config.with_updates(
+                    self._settings, theme=tid, bg_color="", dark_color=""))
+
+        theme_combo.connect("changed", on_theme)
+        grid.attach(theme_combo, 1, row, 1, 1)
+        row += 1
+
+        def _hex_of(btn):
             rgba = btn.get_rgba()
-            hexcolor = "#%02x%02x%02x" % (
+            return "#%02x%02x%02x" % (
                 int(round(rgba.red * 255)), int(round(rgba.green * 255)),
                 int(round(rgba.blue * 255)))
-            self._commit_settings(config.with_updates(self._settings, bg_color=hexcolor))
 
-        clear_btn = Gtk.Button(label="테마 그대로")
+        def color_override_row(label_text, field, current):
+            add_label(label_text)
+            box_ = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+            btn = Gtk.ColorButton()
+            if current:
+                rgba = Gdk.RGBA()
+                rgba.parse(current)
+                btn.set_rgba(rgba)
+            btn.connect("color-set", lambda b: self._commit_settings(
+                config.with_updates(self._settings, **{field: _hex_of(b)})))
+            clear = Gtk.Button(label="테마 그대로")
+            clear.connect("clicked", lambda _b: self._commit_settings(
+                config.with_updates(self._settings, **{field: ""})))
+            box_.pack_start(btn, False, False, 0)
+            box_.pack_start(clear, False, False, 0)
+            grid.attach(box_, 1, row, 1, 1)
 
-        def on_clear(_b):
-            self._commit_settings(config.with_updates(self._settings, bg_color=""))
-
-        color_btn.connect("color-set", on_color)
-        clear_btn.connect("clicked", on_clear)
-        color_box.pack_start(color_btn, False, False, 0)
-        color_box.pack_start(clear_btn, False, False, 0)
-        grid.attach(color_box, 1, row, 1, 1)
+        # Background and header ("dark") colour overrides on top of the theme.
+        color_override_row("배경색", "bg_color", s.bg_color)
+        row += 1
+        color_override_row("진한 색 (헤더)", "dark_color", s.dark_color)
         row += 1
 
         # Opacity.
@@ -1519,6 +1579,38 @@ class NavigatorWindow(Gtk.Window):
         notifications.connect("toggled", lambda w: self._commit_settings(
             config.with_updates(self._settings, notifications=w.get_active())))
         grid.attach(notifications, 1, row, 1, 1)
+        row += 1
+
+        # External programs are a separate trust boundary, so this is opt-in and
+        # the consequence is stated next to the switch rather than hidden in docs.
+        add_label("외부 사용량 도구")
+        ccusage_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        ccusage_toggle = Gtk.CheckButton(label="ccusage 토큰 비용 계산 사용")
+        ccusage_toggle.set_active(s.ccusage_enabled)
+        ccusage_toggle.set_tooltip_text(
+            "설치된 외부 프로그램 ccusage를 실행해 로컬 Claude 로그를 분석합니다")
+        ccusage_toggle.connect("toggled", lambda w: self._commit_settings(
+            config.with_updates(self._settings, ccusage_enabled=w.get_active())))
+        ccusage_warning = Gtk.Label(xalign=0.0)
+        ccusage_warning.set_line_wrap(True)
+        ccusage_warning.set_max_width_chars(48)
+        ccusage_warning.set_markup(
+            "<small><b>주의:</b> ccusage는 별도 설치가 필요한 외부 프로그램입니다. "
+            "이 옵션을 켜면 설치된 ccusage를 5분마다 실행해 로컬 Claude 대화 로그를 "
+            "읽습니다. cc_navigator는 ccusage를 자동 설치하거나 npx로 다운로드하지 "
+            "않습니다.</small>")
+        ccusage_box.pack_start(ccusage_toggle, False, False, 0)
+        ccusage_box.pack_start(ccusage_warning, False, False, 0)
+        grid.attach(ccusage_box, 1, row, 1, 1)
+        row += 1
+
+        click_jump = Gtk.CheckButton(label="클릭하면 바로 세션으로 이동")
+        click_jump.set_active(s.click_to_jump)
+        click_jump.set_tooltip_text(
+            "행을 한 번 클릭하면 펼치지 않고 곧바로 세션 창으로 이동합니다")
+        click_jump.connect("toggled", lambda w: self._commit_settings(
+            config.with_updates(self._settings, click_to_jump=w.get_active())))
+        grid.attach(click_jump, 1, row, 1, 1)
         row += 1
 
         from . import __version__
@@ -1605,7 +1697,9 @@ class NavigatorWindow(Gtk.Window):
     def _render_status(self) -> None:
         text = compose_status(self._sticky, self._hint, self._transient)
         self._status.set_text(text)
-        self._status.set_visible(bool(text))  # an empty label must not reserve a row
+        # Collapse the status line when empty so it does not reserve a blank row
+        # above the usage area (the "too much whitespace" report).
+        self._status.set_visible(bool(text))
 
     def set_eval_available(self, available: bool) -> None:
         self._eval_available = available
@@ -1622,6 +1716,52 @@ class NavigatorWindow(Gtk.Window):
     def set_status(self, text: str) -> None:
         self._transient = text
         self._render_status()
+        # Transient messages (reply/jump outcomes, the VSCode "no reply" notice)
+        # should not linger forever -- auto-clear after a few seconds. Any new
+        # status resets the timer; a cleared/empty status cancels it.
+        if self._status_clear_source:
+            GLib.source_remove(self._status_clear_source)
+            self._status_clear_source = 0
+        if text:
+            self._status_clear_source = GLib.timeout_add_seconds(
+                _STATUS_CLEAR_SECONDS, self._clear_transient)
+
+    def _clear_transient(self) -> bool:
+        self._status_clear_source = 0
+        self._transient = ""
+        self._render_status()
+        return False  # one-shot
+
+    def set_token_usage(self, snapshot) -> None:
+        """Render the opt-in local ccusage estimate, or hide it when disabled."""
+        if snapshot is None:
+            self._token_overlay.set_visible(False)
+            self._token_error.set_visible(False)
+            self._token_row.set_visible(False)
+            return
+
+        self._token_cap.set_visible(True)
+        if snapshot.error:
+            self._token_overlay.set_visible(False)
+            self._token_error.set_text(snapshot.error)
+            self._token_error.set_visible(True)
+            self._token_row.set_visible(True)
+            return
+
+        if snapshot.token_percent is None or snapshot.token_cost is None:
+            self._token_row.set_visible(False)
+            return
+
+        self._token_error.set_visible(False)
+        self._token_bar.set_fraction(max(0.0, min(1.0, snapshot.token_percent / 100.0)))
+        cost = snapshot.token_cost
+        self._token_value.set_markup(
+            '<small>%d%%  $%d</small>' % (round(snapshot.token_percent), round(cost)))
+        self._token_overlay.set_tooltip_text(
+            "이번 주 토큰 사용액 $%.2f / $%d (월요일 기준 누적)"
+            % (cost, int(usage.WEEKLY_BUDGET_DOLLARS)))
+        self._token_overlay.set_visible(True)
+        self._token_row.set_visible(True)
 
     def set_unreachable(self, count: int) -> None:
         """The hint slot: a poll found `count` sockets that held sessions but did
@@ -2020,7 +2160,7 @@ class NavigatorWindow(Gtk.Window):
         header_row.ccnav_title_label.set_markup(
             "<b>%s</b>" % GLib.markup_escape_text(_STATUS_LABELS.get(bucket, bucket)))
         header_row.ccnav_count_label.set_markup(
-            '<small><span foreground="#77767b">%d</span></small>'
+            '<small><span foreground="#9aa0b4">%d</span></small>'
             % self._status_counts.get(bucket, 0))
 
     def _on_status_toggle(self, _button, bucket: str) -> None:
@@ -2088,7 +2228,7 @@ class NavigatorWindow(Gtk.Window):
         # too). An EventBox gives the label an input window to start the drag from.
         grip = Gtk.EventBox()
         grip_label = Gtk.Label()
-        grip_label.set_markup('<span foreground="#77767b">⠿</span>')
+        grip_label.set_markup('<span foreground="#9aa0b4">⠿</span>')
         grip.add(grip_label)
         grip.set_tooltip_text("드래그해서 그룹 순서 변경")
         grip.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, _GROUP_DRAG_TARGETS, Gdk.DragAction.MOVE)
@@ -2111,7 +2251,7 @@ class NavigatorWindow(Gtk.Window):
         names.pack_start(name, False, False, 0)
         if group_key:  # a blank cwd shows just "~"; no empty path line under it
             path = Gtk.Label(xalign=0.0)
-            path.set_markup('<small><span foreground="#77767b">%s</span></small>'
+            path.set_markup('<small><span foreground="#9aa0b4">%s</span></small>'
                             % GLib.markup_escape_text(_oneline(group_key)))
             path.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
             names.pack_start(path, False, False, 0)
@@ -2300,7 +2440,7 @@ class NavigatorWindow(Gtk.Window):
         # not the row.
         grip = Gtk.EventBox()
         grip_label = Gtk.Label()
-        grip_label.set_markup('<span foreground="#77767b">⠿</span>')
+        grip_label.set_markup('<span foreground="#9aa0b4">⠿</span>')
         grip.add(grip_label)
         grip.set_tooltip_text("드래그해서 순서 변경 / 그룹 이동")
         grip.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, _DRAG_TARGETS, Gdk.DragAction.MOVE)
@@ -2331,6 +2471,7 @@ class NavigatorWindow(Gtk.Window):
         entry.connect("activate", self._on_entry_activate, list_row)
 
         jump = Gtk.Button(label="세션으로 이동")
+        jump.get_style_context().add_class("ccnav-jump")
         jump.set_sensitive(self._eval_available)
         jump.connect("clicked", self._on_jump_clicked, list_row)
 
@@ -2418,7 +2559,15 @@ class NavigatorWindow(Gtk.Window):
         """A click on the row that was ALREADY selected collapses it (deselects).
         row-selected has by now moved the selection onto `activated`, so compare
         against the pre-press selection, not the live one, or every first click
-        would collapse the row it just opened."""
+        would collapse the row it just opened.
+
+        In click-to-jump mode a click on a session row jumps straight to it and
+        leaves the row collapsed instead of expanding the reply/detail area."""
+        if (self._settings.click_to_jump and self._eval_available
+                and hasattr(activated, "ccnav_row")):
+            self._on_jump(activated.ccnav_row)
+            listbox.unselect_row(activated)  # don't leave it expanded
+            return
         if activated is self._pre_press_selected:
             listbox.unselect_row(activated)
 
