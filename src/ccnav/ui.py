@@ -779,8 +779,9 @@ class NavigatorWindow(Gtk.Window):
         self._usage_button = Gtk.Button(label="사용량 확인")
         self._usage_button.set_relief(Gtk.ReliefStyle.NONE)
         self._usage_button.set_tooltip_text("Claude Code와 Codex 계정의 사용량(한도) 보기")
-        # Bottom-RIGHT and only as wide as it needs to be: a full-width button ate a
-        # third of the panel's bottom edge for a control the user presses rarely.
+        # Share the bottom line with the optional Token Usage meter.  The meter
+        # expands on the left; this control stays at its natural width on the
+        # right instead of claiming a separate row below it.
         self._usage_button.set_halign(Gtk.Align.END)
         self._usage_button.connect("clicked", self._on_usage_clicked)
         self._usage_popover = Gtk.Popover.new(self._usage_button)
@@ -805,12 +806,15 @@ class NavigatorWindow(Gtk.Window):
         self._usage_body.set_margin_end(12)
         self._usage_popover.add(self._usage_body)
 
+        self._bottom_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        self._bottom_bar.pack_start(self._token_row, True, True, 0)
+        self._bottom_bar.pack_end(self._usage_button, False, False, 0)
+
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.pack_start(sort_row, False, False, 0)
         box.pack_start(scroller, True, True, 0)
         box.pack_start(self._status, False, False, 4)
-        box.pack_start(self._token_row, False, False, 0)
-        box.pack_end(self._usage_button, False, False, 0)  # flush to the bottom edge
+        box.pack_end(self._bottom_bar, False, False, 0)
         self._content = box
 
         # A Stack holds the full panel and a minimal "docked" bar. Attach mode
