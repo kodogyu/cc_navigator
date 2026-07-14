@@ -23,6 +23,9 @@ class DefaultsTest(unittest.TestCase):
     def test_notifications_default_on(self):
         self.assertTrue(config.Settings().notifications)
 
+    def test_external_ccusage_is_default_off(self):
+        self.assertFalse(config.Settings().ccusage_enabled)
+
 
 class NotificationsSettingTest(unittest.TestCase):
     def test_notifications_round_trips(self):
@@ -39,8 +42,10 @@ class FromDictCoercionTest(unittest.TestCase):
         raw = {
             "poll_seconds": 2.5, "corner": "bottom-left", "width": 500,
             "height": 600, "keep_above": False, "all_workspaces": False,
-            "font_size": 14, "opacity": 0.8, "bg_color": "#101010",
+            "font_size": 14, "opacity": 0.8, "theme": "nord",
+            "bg_color": "#101010", "dark_color": "#080808",
             "sort_mode": "group", "notifications": False,
+            "ccusage_enabled": True, "click_to_jump": True,
         }
         self.assertEqual(config.from_dict(raw).to_dict(), raw)
 
@@ -77,6 +82,10 @@ class FromDictCoercionTest(unittest.TestCase):
         self.assertTrue(config.from_dict({"keep_above": "false"}).keep_above)  # default kept
         self.assertTrue(config.from_dict({"keep_above": []}).keep_above)  # default kept
         self.assertFalse(config.from_dict({"keep_above": False}).keep_above)  # real bool wins
+
+    def test_only_a_real_bool_enables_the_external_tool(self):
+        self.assertFalse(config.from_dict({"ccusage_enabled": "true"}).ccusage_enabled)
+        self.assertTrue(config.from_dict({"ccusage_enabled": True}).ccusage_enabled)
 
     def test_font_size_zero_means_default(self):
         self.assertEqual(config.from_dict({"font_size": 0}).font_size, 0)

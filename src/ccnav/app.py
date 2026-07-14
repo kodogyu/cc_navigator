@@ -11,7 +11,10 @@ GTK code at all times").
 """
 from __future__ import annotations
 
+import fcntl
+import os
 import pathlib
+import time
 import threading
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set
@@ -19,15 +22,19 @@ from typing import Callable, Dict, List, Optional, Set
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gio, GLib, Gtk  # noqa: E402
+gi.require_version("Gdk", "3.0")
+from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import (codexsession, config, gnome, model, notify, paths, proc,
-               statestore, tmuxctl, ui)  # noqa: E402
+               procstat, statestore, tmuxctl, ui, usage, wiring)  # noqa: E402
 
 # Fallback only: the live interval comes from self._settings.poll_seconds. Kept
 # so a bare Application built in a test (which does not load config) still polls
 # at a sane rate before a settings object is attached.
 POLL_SECONDS = 1
+
+# The optional local ccusage estimate changes slowly and runs in its own thread.
+USAGE_POLL_SECONDS = 300
 
 # Eval("1+1") is a local D-Bus round trip and answers in milliseconds. The probe
 # runs before the window is mapped, so it cannot freeze a live window -- but on a
@@ -57,6 +64,29 @@ class Collected:
     unreachable: int
 
 
+def _vscode_pids(records: List[Dict[str, object]]) -> Set[object]:
+    """Process identity keys carried by VSCode records.
+
+    New records use (pid, kernel-start-time); old records remain integer-only
+    until a hook refreshes them. The tuple prevents same-name PID reuse.
+    """
+    pids = set()  # type: Set[object]
+    for rec in records:
+        if str(rec.get("kind") or "") != "vscode":
+            continue
+        try:
+            pid = int(rec.get("claude_pid", 0))
+        except (TypeError, ValueError):
+            continue
+        if pid > 0:
+            try:
+                started = int(rec.get("claude_start_time", 0))
+            except (TypeError, ValueError):
+                started = 0
+            pids.add((pid, started) if started > 0 else pid)
+    return pids
+
+
 def collect_rows(
     state_dir: pathlib.Path,
     read_all: Callable[[pathlib.Path], List[Dict[str, object]]] = statestore.read_all,
@@ -68,13 +98,20 @@ def collect_rows(
         tmuxctl.pane_processes_by_pane),
     find_codex: Callable[[int], Optional[codexsession.CodexProcess]] = (
         codexsession.find_codex_process),
+    live_pids_for: Callable[[Set[object]], Set[object]] = procstat.live_claude_pids,
 ) -> Collected:
     records = read_all(state_dir)
     recorded_sockets = {
         str(r.get("tmux_socket") or "") for r in records if r.get("tmux_socket")
     }
+    # Codex currently emits its first lifecycle hook only after the first
+    # submitted prompt, so also inspect same-user tmux sockets for a real Codex
+    # process. Claude/VSCode records continue to provide their own addresses.
     sockets = sorted(recorded_sockets | set(socket_candidates()))
-    if not sockets:
+    observed_pids = _vscode_pids(records)
+    if not sockets and not observed_pids:
+        # Nothing to observe: no tmux candidate and no VSCode session. Return
+        # before touching tmux or prune -- an empty directory must cost nothing.
         return Collected([], 0)
     # sessions_for reports (ok, panes): ok is False when tmux did not answer
     # (dead socket, or a timed-out slow one). Only sockets that DID answer may
@@ -83,7 +120,6 @@ def collect_rows(
     sessions = {socket: panes for socket, (_ok, panes) in results.items()}
     observed = {socket for socket, (ok, _panes) in results.items() if ok}
     titles = {socket: titles_for(socket) for socket in sockets}
-
     # Codex's first SessionStart is deferred until the first submitted prompt in
     # current TUI releases.  Discover a real Codex process before that hook and
     # append a non-persistent candidate record.  model._newest_per_pane chooses
@@ -100,8 +136,18 @@ def collect_rows(
             if process is not None and pane in sessions.get(socket, {}):
                 records.append(codexsession.provisional_record(socket, pane, process))
 
-    prune(state_dir, model.live_pane_keys(sessions), observed)
-    rows = model.build_rows(records, sessions, titles)
+    # Kernel liveness for the VSCode sessions: same "observed vs live" split tmux
+    # uses, so prune never reaps a pid it did not actually check this tick.
+    live_pids = live_pids_for(observed_pids)
+    prune(
+        state_dir,
+        model.live_pane_keys(sessions),
+        observed,
+        live_pids=live_pids,
+        observed_pids=observed_pids,
+    )
+    rows = model.build_rows(
+        records, sessions, titles, live_pids=live_pids, now=int(time.time()))
     return Collected(rows, len(set(sockets) - observed))
 
 
@@ -140,18 +186,33 @@ def send_status(result: tmuxctl.SendResult) -> str:
     return ""
 
 
+def _default_activate_vscode(row: model.Row) -> gnome.ActivationResult:
+    """A VSCode row is addressed by its session id (tab-precise), with the
+    workspace folder as the focus-verification target and window fallback."""
+    return gnome.activate_vscode_session(row.session_id, row.vscode_folder)
+
+
 def perform_jump(
     row: model.Row,
     select_pane: Callable[[str, str], None],
     activate: Callable[[str], gnome.ActivationResult],
+    activate_vscode: Callable[[model.Row], gnome.ActivationResult] = _default_activate_vscode,
 ) -> str:
-    """select_pane must run before activate: tmux needs the pane selected
-    before the window is raised, or the user lands on the wrong pane.
+    """Raise the session's window (VSCode: its tab) and report the outcome.
 
-    select_pane ignores tmux's exit codes by design (Task 6), so there is
-    nothing to branch on here -- activate always runs, even when the pane
-    selection failed.
+    A VSCode session has no tmux pane to select -- its address is the editor tab,
+    reached by session id -- so it skips select_pane. A tmux session selects its
+    pane before activating: tmux needs the pane selected before the window is
+    raised, or the user lands on the wrong pane. select_pane ignores tmux's exit
+    codes by design (Task 6), so there is nothing to branch on there -- activate
+    always runs, even when selection failed.
     """
+    if row.is_vscode:
+        result = activate_vscode(row)
+        # Label the status with the session's own headline when it has one, so a
+        # failure names the specific session, not just its (shared) folder.
+        label = row.title or row.vscode_folder
+        return jump_status(result, "%s (VS Code)" % label)
     select_pane(row.socket, row.pane)
     result = activate(row.window_title)
     return jump_status(result, row.window_title)
@@ -162,10 +223,14 @@ class Application:
         self,
         collect: Callable[[pathlib.Path], List[model.Row]] = collect_rows,
         probe_eval: Callable[[], bool] = probe_eval_available,
+        usage_fetch: Optional[Callable[[], object]] = None,
     ) -> None:
         # `collect` is injectable so the poll loop's error handling can be
         # tested with a collector that raises, without GTK or a real tmux.
         self._collect = collect
+        # The worker exists independently of the account-usage button. Calls to
+        # this external-tool seam are still gated by Settings.ccusage_enabled.
+        self._usage_fetch = usage_fetch
         self.state_dir = paths.ensure_state_dir()
         self._settings = config.load()
         self.window = ui.NavigatorWindow(
@@ -193,8 +258,41 @@ class Application:
 
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self._usage_wake = threading.Event()
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
+
+        # Usage runs on its OWN thread, not the 1s poll loop: ccusage takes ~1s
+        # and the weekly total barely moves, so it fetches on a slow cadence.
+        self._usage_thread = None
+        if self._usage_fetch is not None:
+            self._usage_thread = threading.Thread(target=self._usage_loop, daemon=True)
+            self._usage_thread.start()
+
+    # -- optional external usage tool -------------------------------------
+
+    def _usage_loop(self) -> None:
+        """Run ccusage only after explicit opt-in, never merely at startup."""
+        while not self._stop.is_set():
+            snapshot = None
+            if self._settings.ccusage_enabled:
+                try:
+                    snapshot = self._usage_fetch()
+                except Exception:  # a broken external tool must not end the thread
+                    snapshot = usage.TokenUsage(None, None, usage.ERR_CCUSAGE_FAILED)
+            # A user can disable the option while a subprocess is in flight. Do
+            # not re-show its result after consent has been withdrawn.
+            if not self._settings.ccusage_enabled:
+                snapshot = None
+            GLib.idle_add(self._apply_token_usage, snapshot)
+            if self._stop.is_set():
+                break
+            self._usage_wake.wait(USAGE_POLL_SECONDS)
+            self._usage_wake.clear()
+
+    def _apply_token_usage(self, snapshot) -> bool:
+        self.window.set_token_usage(snapshot)
+        return False  # one-shot idle source
 
     # -- polling ----------------------------------------------------------
 
@@ -284,8 +382,11 @@ class Application:
         already applied the visual part; here we only adopt the new interval and
         wake the poll thread so it does not wait out the old period first. The
         window itself persisted the file, so there is nothing to save here."""
+        ccusage_changed = self._settings.ccusage_enabled != settings.ccusage_enabled
         self._settings = settings
         self._wake.set()
+        if ccusage_changed:
+            self._usage_wake.set()
 
     def refresh(self) -> None:
         """Force an immediate poll: wake the poll thread so collect_rows re-runs
@@ -302,7 +403,12 @@ class Application:
         """
         self._stop.set()
         self._wake.set()
+        self._usage_wake.set()
         self._poll_thread.join()
+        # Wake and join the optional tool scheduler too. A subprocess already in
+        # flight remains bounded by usage.CCUSAGE_TIMEOUT.
+        if self._usage_thread is not None:
+            self._usage_thread.join(timeout=1.0)
 
     # -- jump ---------------------------------------------------------------
 
@@ -314,7 +420,11 @@ class Application:
 
         def worker() -> None:
             try:
-                status = perform_jump(row, tmuxctl.select_pane, gnome.activate_window_titled)
+                status = perform_jump(
+                    row,
+                    tmuxctl.select_pane,
+                    gnome.activate_window_titled,
+                )
             except Exception as exc:  # noqa: BLE001 -- the button must come back regardless
                 status = "이동 중 예기치 않은 오류가 발생했습니다: %s" % exc
             GLib.idle_add(self._on_jump_done, row.session_id, status)
@@ -330,6 +440,16 @@ class Application:
     # -- send -----------------------------------------------------------
 
     def send(self, row: model.Row, text: str) -> None:
+        if row.is_vscode:
+            # A VSCode session has no pane to type into; only the window jump is
+            # supported. Say so plainly instead of routing an empty socket/pane
+            # into tmux, which would fail with a misleading "could not confirm
+            # delivery" message.
+            self.window.set_status(
+                "VS Code 세션은 답장을 지원하지 않습니다. '세션으로 이동'만 가능합니다."
+            )
+            return
+
         def worker() -> None:
             try:
                 result = tmuxctl.send_text(row.socket, row.pane, text)
@@ -345,6 +465,30 @@ class Application:
         return False
 
 
+# Held open for the whole process lifetime so the flock below is not released.
+# Closing the fd (or the process dying) frees the lock; that is exactly the
+# lifetime we want, so this is never explicitly closed.
+_instance_lock_fd = None  # type: Optional[int]
+
+
+def acquire_single_instance(lock_path: pathlib.Path) -> Optional[int]:
+    """Take an exclusive, non-blocking flock. Return the held fd, or None if
+    another live instance already holds it. The lock is tied to the open file
+    description, so a crash releases it automatically -- no stale pidfile to
+    reap. Returns -1 (a truthy sentinel, not None) if the lock file itself can't
+    be opened, so a locking failure never blocks the app from starting."""
+    try:
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError:
+        return -1
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
 def main(argv=None) -> int:
     import sys
     from . import __version__
@@ -352,7 +496,32 @@ def main(argv=None) -> int:
     if "--version" in argv:
         print("cc-navigator %s" % __version__)
         return 0
-    application = Application()
+    # Give the window a unique, stable WM_CLASS (res_name via prgname, res_class
+    # via program_class) equal to the launcher's basename/StartupWMClass, so GNOME
+    # binds the running window to the installed .desktop -- otherwise it inherits
+    # a generic "python3" class and the dock shows a stray unnamed icon instead of
+    # this app's. Must run before the window is created (below), so WM_CLASS is set
+    # when it is realized.
+    GLib.set_prgname(wiring.APP_ID)
+    Gdk.set_program_class(wiring.APP_ID)
+
+    # Single instance: the panel is a skip-taskbar utility window, so GNOME does
+    # not track it as a running app -- clicking the dock launcher would otherwise
+    # spawn a SECOND panel instead of focusing the one already open. Guard with an
+    # flock: if another instance holds it, raise that window (matched by the
+    # WM_CLASS we set above) and exit, so the launcher click reads as "focus the
+    # running panel". A lock error returns the -1 sentinel and we start normally.
+    global _instance_lock_fd
+    try:
+        lock_path = paths.ensure_state_dir() / "instance.lock"
+        _instance_lock_fd = acquire_single_instance(lock_path)
+    except OSError:
+        _instance_lock_fd = -1
+    if _instance_lock_fd is None:
+        gnome.activate_window_by_class(wiring.APP_ID)
+        return 0
+
+    application = Application(usage_fetch=usage.fetch_token_usage)
     # Wired here, not in NavigatorWindow: this is where the main loop exists.
     application.window.connect("destroy", Gtk.main_quit)
     application.window.show_all()

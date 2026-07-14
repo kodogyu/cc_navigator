@@ -5,6 +5,32 @@ from ccnav import hookstate, model
 SOCK = "/tmp/tmux-1000/default"
 
 
+class StaleWorkingTest(unittest.TestCase):
+    def _row(self, state, updated_at):
+        return {
+            "session_id": "s", "cwd": "/p", "tmux_socket": SOCK, "tmux_pane": "%1",
+            "state": state, "reason": "", "message": "", "updated_at": updated_at,
+        }
+
+    def test_a_long_untouched_working_row_reads_as_idle(self):
+        rec = self._row(hookstate.WORKING, updated_at=0)
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}},
+                                now=10_000, stale_seconds=900)
+        self.assertEqual(rows[0].state, hookstate.WAITING)
+        self.assertEqual(rows[0].reason, hookstate.STOP_IDLE)  # green/reported
+
+    def test_a_recently_updated_working_row_stays_working(self):
+        rec = self._row(hookstate.WORKING, updated_at=9_950)
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}},
+                                now=10_000, stale_seconds=900)
+        self.assertEqual(rows[0].state, hookstate.WORKING)
+
+    def test_without_now_staleness_is_not_applied(self):
+        rec = self._row(hookstate.WORKING, updated_at=0)
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].state, hookstate.WORKING)
+
+
 def record(session_id, pane, state=hookstate.WAITING, updated_at=100, socket=SOCK):
     return {
         "session_id": session_id,

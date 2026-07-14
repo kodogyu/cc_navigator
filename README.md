@@ -123,3 +123,8 @@ provider failing never hides the other. Claude Code still uses Anthropic's
 **undocumented internal** `/api/oauth/usage` endpoint with the token from
 `~/.claude/.credentials.json`. Codex uses the local `codex app-server` method
 `account/rateLimits/read`, so cc_navigator never reads or sends the Codex auth token.
+
+**External-tool warning:** the weekly token-cost estimate runs only after you explicitly
+enable **"ccusage token-cost calculation"** in Settings. `ccusage` is a separate program
+that reads local Claude conversation logs. cc_navigator never installs it or downloads it
+through `npx`; verify its source and install it separately if you choose to use it.

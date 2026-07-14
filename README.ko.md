@@ -114,6 +114,11 @@ set -g set-titles-string 'ccnav:#{session_name}'
 보여줍니다. 한쪽 계정이 없거나 실패해도 다른 쪽 결과는 그대로 표시됩니다.
 
 - Claude Code는 `~/.claude/.credentials.json`의 OAuth 토큰으로 Anthropic의 **비공식 내부**
-  `/api/oauth/usage` 엔드포인트를 호출하므로 업데이트로 동작을 멈출 수 있습니다.
+  `/api/oauth/usage` 엔드포인트를 호출하므로 Claude Code 업데이트로 동작을 멈출 수 있습니다.
 - Codex는 로컬 `codex app-server`의 `account/rateLimits/read`를 사용합니다. cc_navigator가
   Codex 인증 토큰을 직접 읽거나 전송하지 않습니다.
+
+**외부 도구 주의:** 이번 주 토큰 비용 추정은 설정에서 **"ccusage 토큰 비용 계산
+사용"**을 직접 켠 경우에만 동작합니다. `ccusage`는 cc_navigator에 포함되지 않은 외부
+프로그램이며 로컬 Claude 대화 로그를 읽습니다. cc_navigator는 이를 자동 설치하거나
+`npx`로 다운로드하지 않으므로, 사용하려면 출처를 확인한 뒤 별도로 설치해야 합니다.

@@ -390,3 +390,68 @@ class CombinedReportTest(unittest.TestCase):
         self.assertIsNone(report.sections[0].usage)
         self.assertIn("로그인", report.sections[0].error)
         self.assertIs(report.sections[1].usage, codex)
+
+
+class OptionalCcusageTest(unittest.TestCase):
+    def setUp(self):
+        self.today = datetime.date(2026, 7, 14)
+
+    def test_week_starts_on_monday(self):
+        self.assertEqual(
+            usage.week_start(self.today), datetime.date(2026, 7, 13))
+
+    def test_external_rows_are_treated_as_untrusted(self):
+        rows = [
+            {"date": "2026-07-13", "totalCost": 10},
+            {"date": "2026-07-14", "totalCost": 5.5},
+            {"date": "2026-07-15", "totalCost": 999},  # future
+            {"date": "2026-07-14", "totalCost": -4},
+            {"date": "2026-07-14", "totalCost": float("nan")},
+            "not a dict",
+        ]
+        self.assertEqual(usage.sum_since_monday(rows, self.today), 15.5)
+
+    def test_no_installed_binary_means_no_npx_or_download_fallback(self):
+        looked_up = []
+
+        def which(name):
+            looked_up.append(name)
+            return None
+
+        self.assertIsNone(usage.ccusage_argv(which=which))
+        self.assertEqual(looked_up, ["ccusage"])
+
+    def test_installed_binary_is_invoked_by_absolute_path_without_a_shell(self):
+        self.assertEqual(
+            usage.ccusage_argv(which=lambda name: "/opt/bin/ccusage"),
+            ["/opt/bin/ccusage", "claude", "daily", "--json"],
+        )
+
+    def test_missing_tool_is_an_actionable_nonfatal_result(self):
+        result = usage.fetch_token_usage(
+            today=self.today,
+            run=lambda: (None, usage.ERR_CCUSAGE_NOT_INSTALLED),
+        )
+        self.assertIsNone(result.token_cost)
+        self.assertIn("직접 설치", result.error)
+
+    def test_valid_output_produces_the_local_estimate(self):
+        payload = json.dumps({"daily": [
+            {"date": "2026-07-13", "totalCost": 10},
+            {"date": "2026-07-14", "totalCost": 5},
+        ]})
+        result = usage.fetch_token_usage(
+            budget=100, today=self.today, run=lambda: (payload, ""))
+        self.assertEqual(result.token_cost, 15)
+        self.assertEqual(result.token_percent, 15)
+        self.assertEqual(result.error, "")
+
+    def test_bad_output_and_runner_exceptions_never_escape(self):
+        malformed = usage.fetch_token_usage(run=lambda: ("not json", ""))
+        self.assertEqual(malformed.error, usage.ERR_CCUSAGE_SHAPE)
+
+        def boom():
+            raise RuntimeError("external failure")
+
+        failed = usage.fetch_token_usage(run=boom)
+        self.assertEqual(failed.error, usage.ERR_CCUSAGE_FAILED)

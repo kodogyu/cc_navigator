@@ -275,6 +275,55 @@ class RoundedRegionTest(unittest.TestCase):
 
 
 @unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
+class ClickToJumpTest(unittest.TestCase):
+    def _session_child(self, window):
+        return next(c for c in window._listbox.get_children()
+                    if not getattr(c, "ccnav_is_header", False))
+
+    def test_a_row_click_jumps_when_the_setting_is_on(self):
+        from ccnav import config
+        jumped = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: jumped.append(r), on_send=lambda r, t: None,
+            settings=config.Settings(click_to_jump=True))
+        try:
+            window.set_eval_available(True)
+            window.set_rows([row(session_id="a")])
+            window._on_row_activated(window._listbox, self._session_child(window))
+            self.assertEqual([r.session_id for r in jumped], ["a"])
+        finally:
+            window.destroy()
+
+    def test_a_row_click_does_not_jump_when_the_setting_is_off(self):
+        from ccnav import config
+        jumped = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: jumped.append(r), on_send=lambda r, t: None,
+            settings=config.Settings(click_to_jump=False))
+        try:
+            window.set_eval_available(True)
+            window.set_rows([row(session_id="a")])
+            window._on_row_activated(window._listbox, self._session_child(window))
+            self.assertEqual(jumped, [])
+        finally:
+            window.destroy()
+
+    def test_click_to_jump_is_suppressed_when_eval_is_unavailable(self):
+        from ccnav import config
+        jumped = []
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: jumped.append(r), on_send=lambda r, t: None,
+            settings=config.Settings(click_to_jump=True))
+        try:
+            window.set_eval_available(False)  # jump disabled -> click must not fire it
+            window.set_rows([row(session_id="a")])
+            window._on_row_activated(window._listbox, self._session_child(window))
+            self.assertEqual(jumped, [])
+        finally:
+            window.destroy()
+
+
+@unittest.skipUnless(os.environ.get("DISPLAY"), "needs an X11 display")
 class NavigatorWindowTest(unittest.TestCase):
     def test_constructs_and_accepts_rows(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
@@ -1911,10 +1960,34 @@ class SettingsUiTest(unittest.TestCase):
             # assert the round-tripped decimal form rather than the hex text.
             self.assertIn("rgb(18,52,86)", css)
             self.assertIn("background-color", css)
-            # Clearing both means an empty provider.
+            # Clearing both drops the USER overrides but leaves the built-in
+            # theme: the custom colour and font size are gone, yet the provider
+            # still carries the theme (which always sets a background-color).
             window.apply_settings(config.Settings(font_size=0, bg_color=""))
-            self.assertNotIn("pt", window._css.to_string())
-            self.assertNotIn("background-color", window._css.to_string())
+            cleared = window._css.to_string()
+            self.assertNotIn("15pt", cleared)
+            self.assertNotIn("rgb(18,52,86)", cleared)  # the user's custom bg is gone
+            self.assertIn("background-color", cleared)   # theme background remains
+        finally:
+            window.destroy()
+
+    def test_transient_status_arms_and_clears(self):
+        from ccnav import config
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            settings=config.Settings(),
+        )
+        try:
+            window.set_status("답장을 지원하지 않습니다")
+            self.assertEqual(window._transient, "답장을 지원하지 않습니다")
+            self.assertNotEqual(window._status_clear_source, 0, "a clear timer must be armed")
+            window._clear_transient()
+            self.assertEqual(window._transient, "")
+            self.assertEqual(window._status_clear_source, 0)
+            # An empty status cancels any pending timer rather than arming one.
+            window.set_status("x")
+            window.set_status("")
+            self.assertEqual(window._status_clear_source, 0)
         finally:
             window.destroy()
 
@@ -2452,4 +2525,64 @@ class UsagePopoverDismissTest(unittest.TestCase):
             self.assertFalse(window._usage_popover.get_visible())
             self.assertEqual(len(loads), 1, "closing must not re-fetch")
         finally:
+            window.destroy()
+
+
+class OptionalCcusageUiTest(unittest.TestCase):
+    @staticmethod
+    def _widgets(root, cls):
+        found = []
+
+        def walk(widget):
+            if isinstance(widget, cls):
+                found.append(widget)
+            if isinstance(widget, Gtk.Container):
+                for child in widget.get_children():
+                    walk(child)
+
+        walk(root)
+        return found
+
+    def test_token_row_is_hidden_by_default_and_after_disable(self):
+        from ccnav import usage
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            self.assertFalse(window._token_row.get_visible())
+            window.set_token_usage(usage.TokenUsage(10.0, 5.0, ""))
+            self.assertTrue(window._token_row.get_visible())
+            window.set_token_usage(None)
+            self.assertFalse(window._token_row.get_visible())
+            self.assertFalse(window._token_overlay.get_visible())
+        finally:
+            window.destroy()
+
+    def test_missing_external_tool_is_shown_without_stale_progress(self):
+        from ccnav import usage
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_token_usage(usage.TokenUsage(10.0, 5.0, ""))
+            window.set_token_usage(
+                usage.TokenUsage(None, None, usage.ERR_CCUSAGE_NOT_INSTALLED))
+            self.assertTrue(window._token_row.get_visible())
+            self.assertFalse(window._token_overlay.get_visible())
+            self.assertIn("직접 설치", window._token_error.get_text())
+        finally:
+            window.destroy()
+
+    def test_settings_names_the_external_program_and_its_privacy_boundary(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        dialog = window._build_settings_dialog()
+        try:
+            labels = " ".join(
+                widget.get_text() for widget in self._widgets(dialog, Gtk.Label))
+            checks = " ".join(
+                widget.get_label() or ""
+                for widget in self._widgets(dialog, Gtk.CheckButton))
+            self.assertIn("ccusage 토큰 비용 계산 사용", checks)
+            self.assertIn("별도 설치", labels)
+            self.assertIn("로컬 Claude 대화 로그", labels)
+            self.assertIn("자동 설치", labels)
+            self.assertIn("npx", labels)
+        finally:
+            dialog.destroy()
             window.destroy()

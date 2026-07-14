@@ -1,10 +1,18 @@
 """Join state files with live tmux panes into the rows the UI renders."""
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Dict, List, Set, Tuple
+from dataclasses import dataclass, replace
+from typing import Dict, List, Optional, Set, Tuple
 
 from . import hookstate
+
+# A "working" session updates its record on every tool event (PreToolUse /
+# PostToolUse), and Claude Code's foreground bash tops out at ~10 min, so a real
+# working session refreshes at least that often. A record left at "working" with
+# NO update for this long is almost certainly a session whose finishing "Stop"
+# hook was missed (or a turn that was aborted): it is shown as idle rather than
+# spinning forever. Generous enough that a long single operation is not misread.
+STALE_WORKING_SECONDS = 900
 
 
 @dataclass(frozen=True)
@@ -23,10 +31,27 @@ class Row:
     subagent_ids: Tuple[str, ...] = ()
     provider: str = "claude"
     provisional: bool = False
+    kind: str = "tmux"
+    claude_pid: int = 0
+    ai_title: str = ""
 
     @property
     def waiting(self) -> bool:
         return self.state == hookstate.WAITING
+
+    @property
+    def is_vscode(self) -> bool:
+        """A VSCode extension-hosted session: no tmux pane, addressed by raising
+        its editor window instead. Reply is unavailable for these; a jump maps to
+        focusing the workspace's VSCode window (see gnome.activate_vscode_window)."""
+        return self.kind == "vscode"
+
+    @property
+    def vscode_folder(self) -> str:
+        """The workspace folder name a VSCode window's title carries
+        ('... - <folder> - Visual Studio Code') -- the cwd's last path segment,
+        which is how a jump finds the right editor window."""
+        return group_label(self.cwd)
 
     @property
     def subagent_active(self) -> bool:
@@ -87,12 +112,54 @@ def _newest_per_pane(records):
     return newest
 
 
+def _newest_vscode(records):
+    """Newest record per session_id among the VSCode (non-tmux) records.
+
+    tmux records are keyed (socket, pane); a VSCode session has neither, so it
+    is keyed by its own session_id -- which is stable across a session's whole
+    life. Two sessions open on the same workspace folder keep distinct rows
+    because their session_ids differ."""
+    newest = {}  # type: Dict[str, dict]
+    for rec in records:
+        if str(rec.get("kind") or "") != "vscode":
+            continue
+        sid = str(rec.get("session_id") or "")
+        if not sid:
+            continue
+        current = newest.get(sid)
+        if current is None or _as_int(rec.get("updated_at", 0)) > _as_int(
+            current.get("updated_at", 0)
+        ):
+            newest[sid] = rec
+    return newest
+
+
+def _destale(row: Row, now: int, stale_seconds: int) -> Row:
+    """Present a long-untouched 'working' row as idle/reported instead. Only a
+    real hook-backed working row can go stale (a waiting one is already
+    terminal). A provisional Codex row is rebuilt from a process that was
+    positively observed alive this tick, so its process start time must not be
+    mistaken for a missed Stop hook timestamp."""
+    if (row.state == hookstate.WORKING and not row.provisional and stale_seconds > 0
+            and (now - row.updated_at) > stale_seconds):
+        return replace(row, state=hookstate.WAITING, reason=hookstate.STOP_IDLE)
+    return row
+
+
 def build_rows(
     records: List[Dict[str, object]],
     sessions_by_socket: Dict[str, Dict[str, str]],
     titles_by_socket: Dict[str, Dict[str, str]],
+    live_pids: Set[object] = frozenset(),
+    now: Optional[int] = None,
+    stale_seconds: int = STALE_WORKING_SECONDS,
 ) -> List[Row]:
-    """A row exists iff its state file's pane is currently live in tmux."""
+    """A tmux row exists iff its pane is live in tmux; a VSCode row exists iff
+    its process identity is in `live_pids` (the poller's kernel liveness check).
+
+    When `now` is given, a 'working' row untouched for longer than `stale_seconds`
+    is shown as idle (see _destale). `now` is None for callers that do not want
+    that (existing tests), so staleness is opt-in per call."""
     rows = []  # type: List[Row]
     for (socket, pane), rec in _newest_per_pane(records).items():
         sessions = sessions_by_socket.get(socket, {})
@@ -117,6 +184,41 @@ def build_rows(
                 provisional=(rec.get("provisional") is True),
             )
         )
+    for sid, rec in _newest_vscode(records).items():
+        pid = _as_int(rec.get("claude_pid", 0))
+        started = _as_int(rec.get("claude_start_time", 0))
+        process_key = (pid, started) if started > 0 else pid
+        if process_key not in live_pids:
+            continue  # the owning claude process is gone -> the session ended
+        cwd = str(rec.get("cwd") or "")
+        # Headline priority for a VSCode session: its AI-generated tab title (the
+        # name the user sees in VSCode), then the last real prompt, then -- via
+        # ui.primary_line's fallback to tmux_session -- the workspace folder. The
+        # folder alone cannot tell two sessions in one workspace apart; the title
+        # can, and matches what VSCode shows.
+        ai_title = str(rec.get("ai_title") or "")
+        last_prompt = str(rec.get("last_prompt") or "")
+        rows.append(
+            Row(
+                session_id=sid,
+                socket="",
+                pane="",
+                tmux_session=group_label(cwd),
+                title=ai_title or last_prompt,
+                state=str(rec.get("state") or ""),
+                reason=str(rec.get("reason") or ""),
+                message=str(rec.get("message") or ""),
+                cwd=cwd,
+                updated_at=_as_int(rec.get("updated_at", 0)),
+                last_prompt=last_prompt,
+                subagent_ids=_subagent_ids(rec.get("subagent_ids")),
+                kind="vscode",
+                claude_pid=pid,
+                ai_title=ai_title,
+            )
+        )
+    if now is not None:
+        rows = [_destale(row, now, stale_seconds) for row in rows]
     rows.sort(key=sort_key)
     return rows
 

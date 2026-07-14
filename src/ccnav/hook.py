@@ -9,9 +9,15 @@ import json
 import os
 import sys
 import time
-from typing import Dict, Mapping, Optional
+from typing import Callable, Dict, Mapping, Optional
 
-from . import hookstate, paths, statestore
+from . import hookstate, paths, procstat, statestore
+
+# The entrypoint Claude Code exports when a session runs inside the VSCode
+# extension (verified in the running process's environ). It is the one non-tmux
+# session cc_navigator can still address: no pty/pane, but the editor window can
+# be focused and the `claude` process gives liveness.
+VSCODE_ENTRYPOINT = "claude-vscode"
 
 MESSAGE_LIMIT = 200
 PROMPT_LIMIT = 300
@@ -49,6 +55,68 @@ def _next_subagent_ids(
     return ids
 
 
+# Prefixes of the synthetic "user" turns the IDE/CLI injects, which must never
+# become a session's visible headline. A real prompt can legitimately start with
+# '<' (a pasted XML snippet), so this matches the specific known wrappers rather
+# than every '<'.
+_SYNTHETIC_PROMPT_PREFIXES = (
+    "<ide_opened_file",
+    "<ide_selection",
+    "<command-name",
+    "<command-message",
+    "<local-command-stdout",
+    "<system-reminder",
+)
+
+
+def _is_synthetic_prompt(flattened: str) -> bool:
+    """True if `flattened` (already whitespace-collapsed) is an injected turn, not
+    something the user typed -- see _SYNTHETIC_PROMPT_PREFIXES."""
+    return flattened.startswith(_SYNTHETIC_PROMPT_PREFIXES)
+
+
+# How much of the transcript's tail to scan for the session's AI title. The
+# `ai-title` records recur throughout the file, so the most recent one is always
+# near the end; a bounded tail read keeps this cheap enough for the hook (which
+# must never be slow) even on a multi-megabyte transcript.
+_AI_TITLE_TAIL_BYTES = 65536
+
+
+def _last_ai_title(transcript_path: str, tail_bytes: int = _AI_TITLE_TAIL_BYTES) -> str:
+    """The session's AI-generated title -- what VSCode shows on the session tab --
+    read from the last `ai-title` record in the transcript's tail. Returns "" for
+    a missing/short/unreadable transcript or before any title has been generated.
+
+    This is the ONE good per-session name for a VSCode session: it has no tmux
+    pane title, and the last user prompt is a poor headline (and identical across
+    sessions that opened the same file). A bytes tail-read tolerates a partial
+    first line (we may seek into the middle of one) -- json.loads just fails on it
+    and it is skipped."""
+    if not transcript_path:
+        return ""
+    try:
+        with open(transcript_path, "rb") as handle:
+            handle.seek(0, 2)
+            size = handle.tell()
+            handle.seek(max(0, size - tail_bytes))
+            tail = handle.read()
+    except OSError:
+        return ""
+    title = ""
+    for raw in tail.splitlines():
+        if b'"ai-title"' not in raw:  # cheap prefilter before the JSON parse
+            continue
+        try:
+            obj = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and obj.get("type") == "ai-title":
+            value = obj.get("aiTitle")
+            if isinstance(value, str) and value.strip():
+                title = value  # keep scanning; the LAST one wins (most recent)
+    return _flatten(title, PROMPT_LIMIT)
+
+
 def _flatten(value: object, limit: int) -> str:
     """Collapse a free-text field to a single bounded line: every whitespace run
     (newlines, tabs) becomes one space, then truncate. A prompt or message can
@@ -70,11 +138,38 @@ def build_record(
     payload: Dict[str, object], env: Mapping[str, str], now: int,
     previous: Optional[Dict[str, object]] = None,
     provider: str = "claude",
+    find_claude_pid: Optional[Callable[[], int]] = None,
+    find_claude_start_time: Optional[Callable[[int], int]] = None,
 ) -> Optional[Dict[str, object]]:
     pane = env.get("TMUX_PANE")
     socket = tmux_socket_from_env(env)
+    kind = "tmux"
+    claude_pid = 0
+    claude_start_time = 0
     if not pane or not socket:
-        return None  # not in tmux: the session can never be addressed
+        # Not in tmux. The ONLY non-tmux session we can still address is a VSCode
+        # extension-hosted one: it has no pane, but its editor window can be
+        # focused and its `claude` process supplies liveness. Everything else
+        # stays unaddressable and returns None exactly as before.
+        if env.get("CLAUDE_CODE_ENTRYPOINT") != VSCODE_ENTRYPOINT:
+            return None
+        if find_claude_pid is None:
+            find_claude_pid = lambda: procstat.find_claude_ancestor(os.getpid())
+        claude_pid = find_claude_pid()
+        if not claude_pid:
+            return None  # cannot locate the owning claude process -> no liveness
+        start_reader = find_claude_start_time or procstat.process_start_time
+        claude_start_time = start_reader(claude_pid)
+        kind = "vscode"
+        socket = ""
+        pane = ""
+
+    # A VSCode session's headline: its AI-generated tab title. Read only for
+    # VSCode sessions -- a tmux session already has its pane title, and this is a
+    # file read we should not add to that path.
+    ai_title = ""
+    if kind == "vscode":
+        ai_title = _last_ai_title(str(payload.get("transcript_path") or ""))
 
     session_id = str(payload.get("session_id") or "")
     if not statestore.is_safe_session_id(session_id):
@@ -119,7 +214,17 @@ def build_record(
             prompt = payload.get("user_prompt")
             if not isinstance(prompt, str):
                 prompt = payload.get("prompt")
-            last_prompt = _flatten(prompt, PROMPT_LIMIT)
+            flattened = _flatten(prompt, PROMPT_LIMIT)
+            # The IDE injects synthetic "user" turns -- <ide_opened_file>, a
+            # <command-name> run, a <local-command-stdout> echo -- that are not
+            # something the user typed. Letting one become last_prompt makes it
+            # the row's headline, which for a VSCode session (whose only headline
+            # IS the last prompt) reads as garbage and, worse, hides which session
+            # it is. Keep the previous real prompt instead of overwriting with one.
+            if _is_synthetic_prompt(flattened):
+                last_prompt = _flatten((previous or {}).get("last_prompt"), PROMPT_LIMIT)
+            else:
+                last_prompt = flattened
         else:
             last_prompt = _flatten((previous or {}).get("last_prompt"), PROMPT_LIMIT)
         # A reported/idle (green) session is not blocking on anything, so it must
@@ -137,6 +242,10 @@ def build_record(
         "session_id": session_id,
         "provider": "codex" if provider == "codex" else "claude",
         "cwd": cwd,
+        "kind": kind,
+        "claude_pid": claude_pid,
+        "claude_start_time": claude_start_time,
+        "ai_title": ai_title,
         "tmux_socket": socket,
         "tmux_pane": pane,
         "state": state,

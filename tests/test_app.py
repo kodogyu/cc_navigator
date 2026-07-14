@@ -60,6 +60,57 @@ class VersionTest(unittest.TestCase):
         self.assertIn(__version__, buf.getvalue())
 
 
+class SingleInstanceLockTest(unittest.TestCase):
+    def test_second_acquire_of_the_same_lock_is_denied(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        lock = d / "instance.lock"
+        fd1 = app.acquire_single_instance(lock)
+        self.addCleanup(lambda: os.close(fd1))
+        self.assertIsNotNone(fd1)
+        self.assertNotEqual(fd1, -1)
+        # A second instance sees the held lock and is denied (-> raise+exit path).
+        self.assertIsNone(app.acquire_single_instance(lock))
+
+    def test_lock_frees_when_the_holder_closes_it(self):
+        d = pathlib.Path(tempfile.mkdtemp())
+        lock = d / "instance.lock"
+        fd1 = app.acquire_single_instance(lock)
+        os.close(fd1)  # the "first instance" exits
+        fd2 = app.acquire_single_instance(lock)  # a later launch can now acquire
+        self.addCleanup(lambda: os.close(fd2))
+        self.assertTrue(fd2 and fd2 != -1)
+
+    def test_unopenable_lock_path_returns_the_start_anyway_sentinel(self):
+        # A directory that does not exist can't hold a lock file; rather than
+        # block startup, acquire returns -1 (truthy) so main() proceeds.
+        self.assertEqual(
+            app.acquire_single_instance(pathlib.Path("/no/such/dir/instance.lock")), -1
+        )
+
+
+class ActivateByClassTest(unittest.TestCase):
+    def test_js_matches_on_wm_class(self):
+        js = gnome.activate_class_js("io.github.kodogyu.CcNavigator")
+        self.assertIn("io.github.kodogyu.CcNavigator", js)
+        self.assertIn("get_wm_class", js)
+        self.assertIn("Main.activateWindow", js)
+
+    def test_activate_by_class_confirms_via_xprop(self):
+        cls = "io.github.kodogyu.CcNavigator"
+
+        def run(argv):
+            if argv and argv[0] == "gdbus":
+                return 0, "(true, '\"matched=1\"')"
+            if "WM_CLASS" in argv:
+                return 0, 'WM_CLASS(STRING) = "%s", "%s"' % (cls, cls)
+            if "_NET_ACTIVE_WINDOW" in argv:
+                return 0, "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x1"
+            return 1, ""
+        result = gnome.activate_window_by_class(cls, run=run, sleep=lambda _s: None, timeout=0.05)
+        self.assertTrue(result.ok)
+        self.assertEqual(result.matched, 1)
+
+
 class CollectRowsTest(unittest.TestCase):
     def test_queries_only_the_sockets_the_state_files_mention(self):
         asked = []
@@ -73,7 +124,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [record()],
             sessions_for=sessions_for,
             titles_for=lambda s: {"%1": "t"},
-            prune=lambda d, live, observed: 0,
+            prune=lambda d, live, observed, **_: 0,
             socket_candidates=lambda: [],
             pane_processes_for=lambda s: {},
         )
@@ -85,7 +136,7 @@ class CollectRowsTest(unittest.TestCase):
     def test_prunes_using_the_live_pane_set(self):
         seen = {}
 
-        def fake_prune(directory, live, observed):
+        def fake_prune(directory, live, observed, **_):
             seen["live"] = live
             seen["observed"] = observed
             return 0
@@ -109,7 +160,7 @@ class CollectRowsTest(unittest.TestCase):
         # waiting session that will never re-announce itself.
         seen = {}
 
-        def fake_prune(directory, live, observed):
+        def fake_prune(directory, live, observed, **_):
             seen["live"] = live
             seen["observed"] = observed
             return 0
@@ -137,7 +188,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [],
             sessions_for=explode,
             titles_for=explode,
-            prune=lambda d, live, observed: 0,
+            prune=lambda d, live, observed, **_: 0,
             socket_candidates=lambda: [],
             pane_processes_for=explode,
         )
@@ -149,7 +200,7 @@ class CollectRowsTest(unittest.TestCase):
         # observe. In that case even prune must stay untouched: calling it with
         # an empty live set would be wasted work and could delete files that
         # appeared between read_all and this point.
-        def explode(directory, live, observed):
+        def explode(directory, live, observed, **_):
             raise AssertionError("must not prune when there is nothing to prune")
 
         result = app.collect_rows(
@@ -169,7 +220,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [],
             sessions_for=lambda s: (True, {"%7": "fresh"}),
             titles_for=lambda s: {"%7": "cc_navigator"},
-            prune=lambda d, live, observed: 0,
+            prune=lambda d, live, observed, **_: 0,
             socket_candidates=lambda: [SOCK],
             pane_processes_for=lambda s: {
                 "%7": tmuxctl.PaneProcess(pid=123, command="node")},
@@ -190,7 +241,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [],
             sessions_for=lambda s: (True, {"%7": "node-app"}),
             titles_for=lambda s: {},
-            prune=lambda d, live, observed: 0,
+            prune=lambda d, live, observed, **_: 0,
             socket_candidates=lambda: [SOCK],
             pane_processes_for=lambda s: {
                 "%7": tmuxctl.PaneProcess(pid=123, command="node")},
@@ -205,7 +256,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [actual],
             sessions_for=lambda s: (True, {"%1": "demo"}),
             titles_for=lambda s: {},
-            prune=lambda d, live, observed: 0,
+            prune=lambda d, live, observed, **_: 0,
             socket_candidates=lambda: [],
             pane_processes_for=lambda s: {
                 "%1": tmuxctl.PaneProcess(pid=123, command="node")},
@@ -223,7 +274,7 @@ class CollectRowsTest(unittest.TestCase):
             read_all=lambda d: [stale],
             sessions_for=lambda s: (True, {"%1": "demo"}),
             titles_for=lambda s: {},
-            prune=lambda d, live, observed: 0,
+            prune=lambda d, live, observed, **_: 0,
             socket_candidates=lambda: [],
             pane_processes_for=lambda s: {
                 "%1": tmuxctl.PaneProcess(pid=123, command="node")},
@@ -366,6 +417,10 @@ class _FakeWindow:
         self.status = None
         self.rows = None
         self.unreachable = None
+        self.usage = "unset"
+
+    def set_token_usage(self, usage):
+        self.usage = usage
 
     def set_row_jump_sensitive(self, session_id, sensitive):
         self.sensitivity[session_id] = sensitive
@@ -517,6 +572,74 @@ class SendStatusTest(unittest.TestCase):
         )
         self.assertIn("Enter", not_submitted)
         self.assertNotIn("Enter", not_delivered)
+
+
+class ApplicationUsageTest(unittest.TestCase):
+    def test_apply_usage_forwards_to_the_window(self):
+        from ccnav import usage
+        snap = usage.TokenUsage(token_cost=168.31, token_percent=12.8)
+        instance = _bare_application()
+        instance._apply_token_usage(snap)
+        self.assertEqual(instance.window.usage, snap)
+        instance._apply_token_usage(None)  # disabled hides it
+        self.assertIsNone(instance.window.usage)
+
+    def test_usage_loop_fetches_only_after_opt_in(self):
+        from ccnav import usage
+        snap = usage.TokenUsage(token_cost=10.0, token_percent=0.76)
+        instance = _bare_application()
+        instance._stop = threading.Event()
+        instance._usage_wake = threading.Event()
+        instance._settings = config.with_updates(
+            config.Settings(), ccusage_enabled=True)
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            instance._stop.set()  # run exactly one iteration
+            return snap
+
+        instance._usage_fetch = fetch
+        worker = threading.Thread(target=instance._usage_loop)
+        worker.start()
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        _pump_until(lambda: instance.window.usage != "unset")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(instance.window.usage, snap)
+
+    def test_usage_loop_never_calls_the_external_tool_while_disabled(self):
+        instance = _bare_application()
+        instance._stop = threading.Event()
+        instance._usage_wake = threading.Event()
+        instance._settings = config.Settings()  # secure default: disabled
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return None
+
+        instance._usage_fetch = fetch
+        # Let one disabled iteration post its hidden state, then stop it.
+        instance._usage_wake.set()
+        worker = threading.Thread(target=instance._usage_loop)
+        worker.start()
+        _pump_until(lambda: instance.window.usage is None)
+        instance._stop.set()
+        instance._usage_wake.set()
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(calls, [])
+
+    def test_enabling_the_external_tool_wakes_its_scheduler(self):
+        instance = _bare_application()
+        instance._settings = config.Settings()
+        instance._wake = threading.Event()
+        instance._usage_wake = threading.Event()
+        enabled = config.with_updates(instance._settings, ccusage_enabled=True)
+        instance._on_settings_changed(enabled)
+        self.assertTrue(instance._wake.is_set())
+        self.assertTrue(instance._usage_wake.is_set())
 
 
 class ApplicationSendThreadingTest(unittest.TestCase):
