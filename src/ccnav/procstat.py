@@ -47,6 +47,29 @@ def parse_stat(data: bytes) -> Optional[Tuple[str, int]]:
     return comm, ppid
 
 
+def parse_start_time(data: bytes) -> Optional[int]:
+    """Kernel start-time ticks (field 22), used to distinguish PID reuse."""
+    right = data.rfind(b")")
+    if right < 0:
+        return None
+    # After comm, index 0 is field 3 (state), so field 22 is index 19.
+    fields = data[right + 1:].split()
+    if len(fields) <= 19:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None
+
+
+def process_start_time(pid: int, read_stat: StatReader = _default_read_stat) -> int:
+    try:
+        data = read_stat(int(pid))
+    except (OSError, TypeError, ValueError):
+        return 0
+    return parse_start_time(data) or 0
+
+
 def find_claude_ancestor(
     start_pid: int, read_stat: StatReader = _default_read_stat, max_depth: int = 32
 ) -> int:
@@ -79,7 +102,11 @@ def find_claude_ancestor(
     return 0
 
 
-def pid_is_claude(pid: int, read_stat: StatReader = _default_read_stat) -> bool:
+def pid_is_claude(
+    pid: int,
+    expected_start_time: int = 0,
+    read_stat: StatReader = _default_read_stat,
+) -> bool:
     """True iff /proc/<pid> exists AND names a process still called 'claude'.
 
     The comm check is what guards PID reuse. A state file records claude_pid at
@@ -100,14 +127,30 @@ def pid_is_claude(pid: int, read_stat: StatReader = _default_read_stat) -> bool:
     except OSError:
         return False
     parsed = parse_stat(data)
-    return parsed is not None and parsed[0] == "claude"
+    if parsed is None or parsed[0] != "claude":
+        return False
+    # Old state files have no start time and retain the previous name-only
+    # behaviour until the next hook refreshes them. New records require both.
+    if expected_start_time:
+        return parse_start_time(data) == expected_start_time
+    return True
 
 
 def live_claude_pids(
     pids, read_stat: StatReader = _default_read_stat
-) -> Set[int]:
-    """The subset of `pids` that are still a running 'claude'. The poller calls
-    this once per tick over the claude_pids its state files carry, then hands
-    the result to both build_rows (which rows to show) and prune (which files to
-    reap)."""
-    return {p for p in pids if pid_is_claude(p, read_stat=read_stat)}
+) -> Set[object]:
+    """Return the live subset of pid keys.
+
+    New records use ``(pid, start_time)`` keys, which distinguish a recycled PID
+    even when the new process is also named ``claude``. Legacy integer keys keep
+    the old name-only check until their next hook update.
+    """
+    live = set()  # type: Set[object]
+    for key in pids:
+        if isinstance(key, tuple) and len(key) == 2:
+            pid, started = key
+            if pid_is_claude(pid, expected_start_time=started, read_stat=read_stat):
+                live.add(key)
+        elif pid_is_claude(key, read_stat=read_stat):
+            live.add(key)
+    return live

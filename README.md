@@ -38,7 +38,7 @@ the standard library plus the system `gi` bindings only.
 | Display server | **X11** (not Wayland) |
 | Desktop | **GNOME Shell with `Eval` unlocked** (blocked from GNOME 41 on; developed on 3.36.9). Without it the app still runs — only the jump buttons are disabled. |
 | Multiplexer | **tmux ≥ 3.0** — one session per project, each in its own terminal window |
-| Interpreter | **`/usr/bin/python3` ≥ 3.8 + PyGObject** — `apt install python3-gi gir1.2-gtk-3.0` |
+| Interpreter | **`/usr/bin/python3` ≥ 3.8 + PyGObject** — `apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0` |
 | Also needed | `gdbus`, `xprop`, `notify-send` (libnotify) |
 
 ```sh
@@ -55,10 +55,23 @@ gear) → **통합 (Integration)** → **"Claude Code 훅 설정"**. That merges
 shim into `~/.claude/settings.json`; every Claude Code session started afterward
 shows up. The panel makes **zero** tmux calls until the first hook fires.
 
+**Jump also needs tmux to own the window title** — it is the only address the panel
+has. Put these in `~/.tmux.conf` (the doctor checks them):
+
+```tmux
+set -g set-titles on
+set -g set-titles-string 'ccnav:#{session_name}'
+```
+
 > **Run the doctor first.** Besides listing what's missing, it reproduces a tmux
 > 3.0a config pitfall — a `set`-family line without `-g`/`-q`/`-s` can silently
 > corrupt the server and crash every session the moment you send a space — on a
 > throwaway socket, so you find out before it touches your real tmux.
+
+**Update:** Settings ⚙ → **업데이트 확인** fast-forwards this checkout to the latest
+`master` and restarts (it refuses if you have local changes). What each version
+changes — including what it starts doing on your machine — is in
+[CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -95,3 +108,15 @@ it along, detach to restore).
 **Stay informed:** a desktop notification fires when a session becomes *your turn*
 (needs input, or finished). On by default — toggle it, opacity, colour, font, and
 more in **Settings**.
+
+**Check your usage:** the button at the bottom right (**"사용량 확인"**) shows the
+logged-in account's plan and its limits — session (5-hour), weekly, and per-model
+weekly — each with a bar, a percentage, and when it resets. It reads the OAuth token
+from `~/.claude/.credentials.json` and calls Anthropic's **undocumented internal**
+`/api/oauth/usage` endpoint (the one Claude Code's own `/usage` uses), so it may stop
+working after a Claude Code update — the popover then says so and the panel carries on.
+
+**External-tool warning:** the weekly token-cost estimate runs only after you explicitly
+enable **"ccusage token-cost calculation"** in Settings. `ccusage` is a separate program
+that reads local Claude conversation logs. cc_navigator never installs it or downloads it
+through `npx`; verify its source and install it separately if you choose to use it.

@@ -123,8 +123,8 @@ def prune(
     live_panes: Set[Tuple[str, str]],
     observed_sockets: Set[str],
     now: Optional[int] = None,
-    live_pids: Set[int] = frozenset(),
-    observed_pids: Set[int] = frozenset(),
+    live_pids: Set[object] = frozenset(),
+    observed_pids: Set[object] = frozenset(),
 ) -> int:
     """Delete state files whose pane is gone, that are stale, or that are junk.
 
@@ -176,7 +176,15 @@ def prune(
                 pid = int(record.get("claude_pid", 0))
             except (TypeError, ValueError):
                 pid = 0
-            gone_pid = pid <= 0 or (pid in observed_pids and pid not in live_pids)
+            try:
+                started = int(record.get("claude_start_time", 0))
+            except (TypeError, ValueError):
+                started = 0
+            process_key = (pid, started) if started > 0 else pid
+            gone_pid = (
+                pid <= 0
+                or (process_key in observed_pids and process_key not in live_pids)
+            )
             if gone_pid and _try_unlink(path):
                 removed += 1
             continue

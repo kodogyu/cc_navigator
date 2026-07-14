@@ -12,6 +12,7 @@ fatal/safe line was reproduced against real tmux 3.0a on a private -L socket
 import contextlib
 import io
 import os
+import pathlib
 import tempfile
 import unittest
 from unittest import mock
@@ -548,3 +549,53 @@ class MainExitCodeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PrerequisiteChecksTest(unittest.TestCase):
+    """The doctor's whole job is to be right about a machine it has never seen.
+
+    Two of these checks used to be theatre: `python3` only stat'd /usr/bin/python3
+    (present on every Debian box) while claiming to be "the interpreter with
+    PyGObject" -- so the single most likely fresh-user failure was the one case
+    guaranteed to print [ok]. And gdbus/notify-send, which the README lists as
+    requirements, were not checked at all.
+    """
+
+    def _checks(self, run):
+        return {c.name: c for c in doctor.run_all(
+            tmux_conf=pathlib.Path("/nonexistent"),
+            claude_settings=pathlib.Path("/nonexistent"),
+            hook_path="/x/bin/cc-navigator-hook",
+            run=run,
+        )}
+
+    def test_python3_check_actually_imports_gi_and_cairo(self):
+        seen = []
+
+        def run(argv, timeout=None):
+            seen.append(list(argv))
+            if argv[0] == "/usr/bin/python3":
+                return 1, ""      # PyGObject (or pycairo) is NOT importable
+            return 0, ""
+
+        check = self._checks(run)["python3"]
+        self.assertFalse(check.ok, "a box without python3-gi must FAIL this check")
+        probe = [a for a in seen if a[0] == "/usr/bin/python3"]
+        self.assertTrue(probe, "the check must actually run the interpreter")
+        self.assertIn("import gi", " ".join(probe[0]))
+        self.assertIn("cairo", " ".join(probe[0]), "ui.py imports cairo too")
+
+    def test_python3_check_passes_when_the_import_works(self):
+        check = self._checks(lambda argv, timeout=None: (0, ""))["python3"]
+        self.assertTrue(check.ok)
+
+    def test_gdbus_is_a_checked_prerequisite(self):
+        checks = self._checks(lambda argv, timeout=None: (0, ""))
+        self.assertIn("gdbus", checks, "the README lists gdbus; the doctor must check it")
+        self.assertTrue(checks["gdbus"].fix, "a failing check must tell the user what to install")
+
+    def test_notify_send_is_checked_but_optional(self):
+        checks = self._checks(lambda argv, timeout=None: (0, ""))
+        self.assertIn("notify-send", checks)
+        self.assertFalse(checks["notify-send"].required,
+                         "notifications are a feature, not a hard requirement")

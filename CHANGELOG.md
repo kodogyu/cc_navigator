@@ -1,42 +1,112 @@
 # Changelog
 
-## 0.2.0 — branch `cc_navigator_chan`
+cc_navigator has no build artifact: **Settings ⚙ → 업데이트 확인** fast-forwards your
+checkout to the latest `master` and restarts. So this file, not a download page, is how
+you find out what changed — and what a new version starts doing on your machine.
 
-`0.1.0`(master) 대비 아래 기능들을 추가합니다. (master 미변경)
+## 0.3.0-beta — Unreleased
 
-### VSCode 세션 지원
-- VSCode 확장(extension-hosted)으로 실행된 Claude 세션은 tmux pane이 없어 목록에
-  안 떴으나, 이제 표시됩니다. tmux 대신 **claude 프로세스 PID**로 생존을 판정
-  (`procstat.py`), PID 재사용까지 방어.
-- 감지 신호: `CLAUDE_CODE_ENTRYPOINT=claude-vscode`.
-- **세션 이름**: 트랜스크립트의 `ai-title`(Claude가 만든 세션 제목)을 읽어 헤드라인으로
-  사용 — 같은 워크스페이스의 여러 세션도 구분됨. `<ide_opened_file>` 같은 합성 프롬프트는
-  헤드라인에서 제외.
-- **탭 단위 이동**: 확장의 URI 핸들러
-  (`vscode://Anthropic.claude-code/open?session=<id>`)로 정확한 세션 탭으로 전환.
-  올바른 워크스페이스 창을 먼저 띄운 뒤(검증 가능) 탭을 전환(best-effort).
+### New
 
-### Ubuntu 독 통합
-- 런처(`.desktop`)에 앱 전용 아이콘과 `StartupWMClass` 추가, 창에 고유
-  `WM_CLASS`(`io.github.kodogyu.CcNavigator`) 설정 → 독에 고정한 아이콘이 실행 창과 연결됨.
-- **단일 인스턴스**: flock 잠금으로, 이미 실행 중일 때 독 아이콘을 누르면 새 창을 띄우지
-  않고 **기존 창을 포커스**하고 종료.
+- VS Code extension sessions now appear without a tmux pane, use their AI title as
+  the headline, and can jump to the matching editor tab.
+- Four selectable colour themes, custom background/header colours, a dock-integrated
+  launcher, and a single-instance guard.
+- An optional local token-cost estimate can be enabled in Settings. It uses the
+  separately installed `ccusage` executable every five minutes and is **off by
+  default**.
 
-### 사용량 표시 (패널 하단)
-- 5분마다 백그라운드로 갱신 (UI 비차단).
-- **주간 사용량 %** (주황): Claude 구독 API `/api/oauth/usage`의 `seven_day.utilization`.
-- **Token Usage 바** (초록): `ccusage`로 계산한 이번 주(월요일~오늘) 달러 사용액을 주간
-  예산 대비 %로. 바 안 가운데에 `NN%  $XXX` 표시.
+### Security and privacy
 
-### 테마
-- 선택 가능한 4가지 컬러 테마: **Midnight(민트) / Nord Dark / Graphite Terminal /
-  Clean Light** (`themes.py`, 팔레트 → `.ccnav` 스코프 CSS). 파생 색조는 알파 오버레이라
-  어떤 배경색에서도 동작.
-- 설정에서 **테마 선택** + **배경색 / 진한 색(헤더)** 커스텀 오버라이드.
-- **설정창 자체도 테마 적용** (헤더바, 체크박스, 슬라이더, 스핀버튼, 포커스 색 등) — 기존
-  기본 라이트 GTK 테마 탈피.
+- cc_navigator never installs `ccusage`, never falls back to `npx`, and never
+  downloads executable code when the option is enabled. The Settings warning states
+  that the external program reads local Claude conversation logs before consent is
+  given.
+- Account usage keeps the redirect-refusing HTTPS client from 0.2.x, so the OAuth
+  bearer token is sent only to the intended Anthropic endpoint.
+- VS Code tab URIs are sent only after one exact target window is independently
+  confirmed; failed or ambiguous window matches leave the editor untouched.
+- VS Code process liveness records both PID and kernel start time, preventing a stale
+  session from surviving PID reuse by another Claude process.
 
-### 기타
-- 모든 변경에 테스트 추가/갱신 (`test_vscode`, `test_procstat`, `test_usage`,
-  `test_themes` 신규 포함). 총 555개 통과.
-- 모든 기능은 `.ccnav` 스코프 CSS로 이 패널에만 적용되어 다른 GTK 앱/시스템 테마에 영향 없음.
+## 0.2.1-beta — 2026-07-14
+
+### Fixed
+
+- **The usage button no longer needs a second press.** A transient failure (a reset
+  connection, a blip) is now retried once automatically — the retry was already
+  happening, it was just being done by hand.
+- **Its error messages stop lying.** Every non-401 failure used to be reported as
+  "(네트워크)", so a rate limit or a server error sent you to check your wifi for our
+  problem. A 429 and a 5xx now say what they are.
+- **An expired token gives the advice that actually works.** The access token lives ~8h
+  and *Claude Code* refreshes it — cc_navigator only reads it. So the old "log in again"
+  was wrong: using any Claude Code session refreshes it. The panel now checks the expiry
+  in the credentials file, says so, and does not waste a request on a token it can see is
+  dead. (It deliberately does **not** refresh the token itself: the refresh token rotates,
+  and consuming it without atomically persisting the new one could break your real Claude
+  Code login. Not a risk a status panel gets to take.)
+
+## 0.2.0-beta — 2026-07-13
+
+First tagged release. **Beta** because of one known limitation (see below) that can put a
+row in front of you that no longer has a Claude session behind it.
+
+### New
+
+- **Desktop notifications, on by default.** When a session becomes *your turn* — it starts
+  waiting on your input, or it finishes its turn — a notification names that session, its
+  status, and a one-line summary. Toggle it off in Settings (**시스템 알림**). Needs
+  `notify-send` (`apt install libnotify-bin`); without it, nothing is notified and nothing
+  breaks.
+- **A usage button** at the bottom right shows the logged-in account's plan and its limits
+  (session / weekly / per-model weekly), each with a bar, a percentage, and when it resets.
+  It reads the OAuth token from `~/.claude/.credentials.json` and calls Anthropic's
+  **undocumented internal** `/api/oauth/usage` endpoint — the same one Claude Code's own
+  `/usage` uses. **It may stop working after any Claude Code update**; if it does, the
+  popover says so and the rest of the panel carries on. The token is sent only to
+  `api.anthropic.com` over TLS, is never logged or stored, and is not followed to a
+  redirect.
+- **Four collapsible status sections** (입력 필요 → 작업 중 → 보고 완료 → 확인 완료).
+  Clicking a green dot marks a session seen (a ✓) and files it under 확인 완료.
+- **Group view improvements:** per-group status counts, drag a group header to reorder,
+  and group order that stays put as sessions come and go.
+- **Docking is panel-aware:** the docked bar uses the monitor's work area, so it sits
+  *beside* a system panel/dock instead of under it.
+
+### Fixed
+
+- **Live sessions no longer disappear.** `prune` aged out any session whose state file was
+  more than 24h old — but an idle session fires no hooks, so a session you simply had not
+  talked to overnight was deleted from the panel while tmux still had it running. Liveness
+  now comes from tmux alone; age only reaps records tmux cannot vouch for.
+- **Detaching a docked panel restores its real size** instead of a ~150px stub, and no
+  longer emits a negative-width GTK warning.
+- **A missing binary no longer crashes anything.** `gdbus` absent used to take the doctor
+  down with a raw traceback (printing *zero* checks on the exact fresh machine it exists to
+  diagnose); a missing `notify-send` threw on a worker thread, invisibly, forever.
+- **A tmux stutter no longer bursts notifications.** A tick whose tmux query did not answer
+  is blind, not empty; it used to erase the notification baseline, so the next good tick
+  re-notified every waiting session.
+- Switching sort mode no longer moves the window.
+
+### Doctor
+
+- `python3` is now actually *probed* (it imports `gi`, `Gtk`, and `cairo`) instead of being
+  assumed present because `/usr/bin/python3` exists — the most common fresh-machine failure
+  used to print `[ok]`.
+- `gdbus` and `notify-send` are checked. **The documented `apt` line was incomplete**: it
+  now includes `python3-gi-cairo`, without which the app cannot start.
+
+### Known limitations
+
+- **Ghost rows.** If Claude Code dies without firing `SessionEnd` (a crash, a `kill`) while
+  its tmux pane survives, its row stays in the panel indefinitely — and typing a reply into
+  that row types into whatever is now in that pane (usually your shell). Ending the pane
+  clears it. The fix (asking tmux whether the pane still runs Claude) is the next release's
+  first job; it is the reason this one is a beta.
+- The usage endpoint is undocumented and may break, as described above.
+
+## 0.1.0
+
+Unreleased development history. See the git log.

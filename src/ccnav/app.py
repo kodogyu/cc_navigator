@@ -31,8 +31,7 @@ from . import config, gnome, model, notify, paths, proc, procstat, statestore, t
 # at a sane rate before a settings object is attached.
 POLL_SECONDS = 1
 
-# The usage total (ccusage over the week's transcripts) changes slowly and each
-# fetch costs ~1s, so it refreshes far less often than the session list.
+# The optional local ccusage estimate changes slowly and runs in its own thread.
 USAGE_POLL_SECONDS = 300
 
 # Eval("1+1") is a local D-Bus round trip and answers in milliseconds. The probe
@@ -63,10 +62,13 @@ class Collected:
     unreachable: int
 
 
-def _vscode_pids(records: List[Dict[str, object]]) -> Set[int]:
-    """The claude pids carried by the VSCode records -- the ones whose liveness
-    the poller checks against /proc each tick."""
-    pids = set()  # type: Set[int]
+def _vscode_pids(records: List[Dict[str, object]]) -> Set[object]:
+    """Process identity keys carried by VSCode records.
+
+    New records use (pid, kernel-start-time); old records remain integer-only
+    until a hook refreshes them. The tuple prevents same-name PID reuse.
+    """
+    pids = set()  # type: Set[object]
     for rec in records:
         if str(rec.get("kind") or "") != "vscode":
             continue
@@ -75,7 +77,11 @@ def _vscode_pids(records: List[Dict[str, object]]) -> Set[int]:
         except (TypeError, ValueError):
             continue
         if pid > 0:
-            pids.add(pid)
+            try:
+                started = int(rec.get("claude_start_time", 0))
+            except (TypeError, ValueError):
+                started = 0
+            pids.add((pid, started) if started > 0 else pid)
     return pids
 
 
@@ -85,7 +91,7 @@ def collect_rows(
     sessions_for: Callable[[str], "tuple"] = tmuxctl.sessions_by_pane_result,
     titles_for: Callable[[str], Dict[str, str]] = tmuxctl.titles_by_pane,
     prune: Callable[..., int] = statestore.prune,
-    live_pids_for: Callable[[Set[int]], Set[int]] = procstat.live_claude_pids,
+    live_pids_for: Callable[[Set[object]], Set[object]] = procstat.live_claude_pids,
 ) -> Collected:
     records = read_all(state_dir)
     sockets = sorted({str(r.get("tmux_socket") or "") for r in records if r.get("tmux_socket")})
@@ -193,9 +199,8 @@ class Application:
         # `collect` is injectable so the poll loop's error handling can be
         # tested with a collector that raises, without GTK or a real tmux.
         self._collect = collect
-        # usage_fetch is opt-in: its default None means no usage thread, so a
-        # test constructing Application never spawns ccusage. main() passes the
-        # real fetcher in.
+        # The worker exists independently of the account-usage button. Calls to
+        # this external-tool seam are still gated by Settings.ccusage_enabled.
         self._usage_fetch = usage_fetch
         self.state_dir = paths.ensure_state_dir()
         self._settings = config.load()
@@ -224,6 +229,7 @@ class Application:
 
         self._stop = threading.Event()
         self._wake = threading.Event()
+        self._usage_wake = threading.Event()
         self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
         self._poll_thread.start()
 
@@ -234,22 +240,29 @@ class Application:
             self._usage_thread = threading.Thread(target=self._usage_loop, daemon=True)
             self._usage_thread.start()
 
-    # -- usage ------------------------------------------------------------
+    # -- optional external usage tool -------------------------------------
 
     def _usage_loop(self) -> None:
-        """Fetch this week's usage now, then every USAGE_POLL_SECONDS. Off the
-        GTK thread (ccusage is a subprocess); results handed back via idle_add.
-        A raising fetch must not kill the thread -- degrade to 'no value'."""
+        """Run ccusage only after explicit opt-in, never merely at startup."""
         while not self._stop.is_set():
-            try:
-                usage = self._usage_fetch()
-            except Exception:  # noqa: BLE001 -- a broken fetch must not end the thread
-                usage = None
-            GLib.idle_add(self._apply_usage, usage)
-            self._stop.wait(USAGE_POLL_SECONDS)
+            snapshot = None
+            if self._settings.ccusage_enabled:
+                try:
+                    snapshot = self._usage_fetch()
+                except Exception:  # a broken external tool must not end the thread
+                    snapshot = usage.TokenUsage(None, None, usage.ERR_CCUSAGE_FAILED)
+            # A user can disable the option while a subprocess is in flight. Do
+            # not re-show its result after consent has been withdrawn.
+            if not self._settings.ccusage_enabled:
+                snapshot = None
+            GLib.idle_add(self._apply_token_usage, snapshot)
+            if self._stop.is_set():
+                break
+            self._usage_wake.wait(USAGE_POLL_SECONDS)
+            self._usage_wake.clear()
 
-    def _apply_usage(self, usage) -> bool:
-        self.window.set_usage(usage)
+    def _apply_token_usage(self, snapshot) -> bool:
+        self.window.set_token_usage(snapshot)
         return False  # one-shot idle source
 
     # -- polling ----------------------------------------------------------
@@ -294,14 +307,22 @@ class Application:
         # Surface an unreachable-tmux hint in its own status slot, so a wedged
         # socket is not silently indistinguishable from every session ending.
         self.window.set_unreachable(collected.unreachable)
-        self._maybe_notify(collected.rows)
+        self._maybe_notify(collected)
         return False  # one-shot idle source; True would re-run it forever
 
-    def _maybe_notify(self, rows: List[model.Row]) -> None:
+    def _maybe_notify(self, collected: Collected) -> None:
         """Fire a desktop notification for each session that just became 'your
         turn' (transitioned into input-needed or reported). Runs on the GTK main
         thread; the actual notify-send is dispatched to a worker thread."""
-        fires, new_status = notify.changed_rows(self._prev_status, rows)
+        # A tick with an unreachable socket is BLIND, not empty: a tmux query that
+        # did not answer makes build_rows drop every row on that socket (which is
+        # what `unreachable` exists to report). Rebaselining on that erased the
+        # baseline, so the next good tick saw every session as new and re-fired a
+        # popup for all of them; and a stuttered first tick spent the startup guard
+        # on an empty baseline and then burst. A blind tick must change nothing.
+        if collected.unreachable:
+            return
+        fires, new_status = notify.changed_rows(self._prev_status, collected.rows)
         self._prev_status = new_status
         # The first tick has no prior statuses, so every waiting session would
         # look 'new'. Seed the baseline silently and only notify from the second
@@ -332,8 +353,11 @@ class Application:
         already applied the visual part; here we only adopt the new interval and
         wake the poll thread so it does not wait out the old period first. The
         window itself persisted the file, so there is nothing to save here."""
+        ccusage_changed = self._settings.ccusage_enabled != settings.ccusage_enabled
         self._settings = settings
         self._wake.set()
+        if ccusage_changed:
+            self._usage_wake.set()
 
     def refresh(self) -> None:
         """Force an immediate poll: wake the poll thread so collect_rows re-runs
@@ -350,9 +374,10 @@ class Application:
         """
         self._stop.set()
         self._wake.set()
+        self._usage_wake.set()
         self._poll_thread.join()
-        # The usage thread waits on the same _stop event, so it is already
-        # unblocking; join it too so no ccusage subprocess outlives shutdown.
+        # Wake and join the optional tool scheduler too. A subprocess already in
+        # flight remains bounded by usage.CCUSAGE_TIMEOUT.
         if self._usage_thread is not None:
             self._usage_thread.join(timeout=1.0)
 
@@ -467,7 +492,7 @@ def main(argv=None) -> int:
         gnome.activate_window_by_class(wiring.APP_ID)
         return 0
 
-    application = Application(usage_fetch=usage.fetch_usage)
+    application = Application(usage_fetch=usage.fetch_token_usage)
     # Wired here, not in NavigatorWindow: this is where the main loop exists.
     application.window.connect("destroy", Gtk.main_quit)
     application.window.show_all()

@@ -1,10 +1,45 @@
 import os
+import time
 import unittest
 
 from ccnav import hookstate, model, ui
 
 # ui pins the Gtk version on import above, so this bare import is safe here.
-from gi.repository import GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+
+
+def pump_until(condition, timeout=10.0):
+    """Iterate the GTK main context until `condition()` holds.
+
+    Waiting a fixed 300ms and hoping is what made this suite flaky: the thing being
+    awaited -- a worker thread posting back through idle_add, a GTK timeout firing, the
+    WM answering a resize -- takes as long as the machine is busy, so under load the
+    test failed on a slow machine rather than on wrong code. (Reproduced by pinning
+    every core: the fixed-wait tests failed every run.) Poll the real condition instead,
+    with a ceiling generous enough that only a genuine hang trips it.
+    """
+    context = GLib.MainContext.default()
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise AssertionError("condition not met within %.1fs" % timeout)
+        if context.pending():
+            context.iteration(False)
+        else:
+            time.sleep(0.005)  # let wall-clock advance so GTK timeouts come due
+
+
+def pump_briefly(ms=50):
+    """Spin the loop for a moment where there is no condition to wait ON -- e.g. to let
+    GTK settle a layout before measuring it. Never use this to await async work: use
+    pump_until, which cannot lose a race."""
+    deadline = time.monotonic() + ms / 1000.0
+    context = GLib.MainContext.default()
+    while time.monotonic() < deadline:
+        if context.pending():
+            context.iteration(False)
+        else:
+            time.sleep(0.005)
 
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
@@ -455,9 +490,7 @@ class NavigatorWindowTest(unittest.TestCase):
             window.set_rows([row(session_id="a", state=hookstate.WORKING)])
             spinner = self._front(self._first_row(window))
             before = spinner.ccnav_angle
-            loop = GLib.MainLoop()
-            GLib.timeout_add(300, loop.quit)
-            loop.run()
+            pump_until(lambda: spinner.ccnav_angle != before)
             self.assertNotEqual(spinner.ccnav_angle, before)  # it spun
         finally:
             window.destroy()
@@ -679,9 +712,7 @@ class NavigatorWindowTest(unittest.TestCase):
                                  reason="permission_prompt", subagent_ids=("s1",))])
             back = self._back(child)
             before = back.ccnav_angle
-            loop = GLib.MainLoop()
-            GLib.timeout_add(300, loop.quit)
-            loop.run()
+            pump_until(lambda: back.ccnav_angle != before)
             self.assertNotEqual(back.ccnav_angle, before)  # started spinning in place
         finally:
             window.destroy()
@@ -746,13 +777,6 @@ class NavigatorWindowTest(unittest.TestCase):
         """All non-header child rows (the sessions), in display order."""
         return [c for c in window._listbox.get_children()
                 if not getattr(c, "ccnav_is_header", False)]
-
-    def _pump(self, ms):
-        """Run the GTK main loop for ms, so deferred timeouts fire and the WM
-        settles pending resizes -- window-size assertions need this to be real."""
-        loop = GLib.MainLoop()
-        GLib.timeout_add(ms, lambda: (loop.quit(), False)[1])
-        loop.run()
 
     def test_a_row_that_needs_input_jumps_above_working_rows(self):
         # The reconcile must keep the section priority sort live: updating a row in
@@ -974,15 +998,18 @@ class NavigatorWindowTest(unittest.TestCase):
         # must bring the full configured height back.
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
+            target = window._settings.height - 40
             window.set_rows([row(session_id="a"), row(session_id="b")])
             window.show_all()
-            self._pump(300)
+            pump_until(window.get_mapped)
             window._dock_to_edge("left")
-            self._pump(300)
+            pump_until(lambda: window.get_size()[0] < 120)  # shrunk to the thin bar
             window._undock()
-            self._pump(300)  # let the deferred restore (a short timeout) fire + settle
+            # The restore is deferred (a GTK timeout) and then WM-mediated, so wait for
+            # the height itself rather than for a guessed number of milliseconds.
+            pump_until(lambda: window.get_size()[1] >= target)
             _w, height = window.get_size()
-            self.assertGreaterEqual(height, window._settings.height - 40)
+            self.assertGreaterEqual(height, target)
         finally:
             window.destroy()
 
@@ -2068,9 +2095,10 @@ class SettingsUiTest(unittest.TestCase):
         try:
             window._build_settings_dialog()
             window._on_update_clicked(window._update_button)
-            loop = GLib.MainLoop()
-            GLib.timeout_add(300, loop.quit)
-            loop.run()
+            # The worker raises on a daemon thread and posts the failure back through
+            # idle_add; wait for THAT, not for an arbitrary 300ms (which a loaded
+            # machine misses -- this was the suite's worst flake).
+            pump_until(lambda: "실패" in window._update_status.get_text())
             self.assertEqual(restarted, [])  # a failure never re-execs
             self.assertIn("실패", window._update_status.get_text())
         finally:
@@ -2087,10 +2115,314 @@ class SettingsUiTest(unittest.TestCase):
             window._build_settings_dialog()
             window._on_update_clicked(window._update_button)
             # The worker runs on a daemon thread and posts back via idle_add.
-            loop = GLib.MainLoop()
-            GLib.timeout_add(300, loop.quit)
-            loop.run()
+            pump_until(lambda: window._update_button.get_sensitive())
             self.assertEqual(window._update_status.get_text(), "이미 최신 버전입니다.")
             self.assertTrue(window._update_button.get_sensitive())
         finally:
+            window.destroy()
+
+
+class UsageButtonTest(unittest.TestCase):
+    """The bottom usage button: it must live at the bottom of the content box, fetch
+    through the injected loader (never the network), guard against a double click, and
+    render either the limit rows or the failure message into its popover."""
+
+    def _widgets_of_type(self, root, cls):
+        """Depth-first in child order -- the order the user sees them stacked."""
+        found = []
+
+        def walk(w):
+            if isinstance(w, cls):
+                found.append(w)
+            if isinstance(w, Gtk.Container):
+                for child in w.get_children():
+                    walk(child)
+
+        walk(root)
+        return found
+
+    def _popover_text(self, window):
+        return " ".join(
+            (l.get_text() or "") for l in self._widgets_of_type(window._usage_popover, Gtk.Label))
+
+    def test_the_usage_button_is_the_last_widget_in_the_content_box(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            self.assertIs(window._content.get_children()[-1], window._usage_button)
+            self.assertIn("사용량", window._usage_button.get_label())
+        finally:
+            window.destroy()
+
+    def test_clicking_renders_a_row_per_limit_with_its_percent(self):
+        from ccnav import usage
+        result = usage.Usage(plan="Max 20x", entries=[
+            usage.Entry("세션 (5시간)", 26, "normal", ""),
+            usage.Entry("주간 (전체)", 7, "normal", ""),
+        ])
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            usage_load=lambda: (result, ""))
+        try:
+            window._usage_button.emit("clicked")
+            # The load runs on a worker thread and posts back via idle_add, which
+            # re-enables the button -- wait for that, not for a fixed delay.
+            pump_until(window._usage_button.get_sensitive)
+            text = self._popover_text(window)
+            self.assertIn("Max 20x", text)
+            self.assertIn("세션 (5시간)", text)
+            self.assertIn("26%", text)
+            self.assertIn("7%", text)
+            bars = self._widgets_of_type(window._usage_popover, Gtk.LevelBar)
+            self.assertEqual([int(b.get_value()) for b in bars], [26, 7])
+        finally:
+            window.destroy()
+
+    def test_a_failure_shows_the_message_instead_of_raising(self):
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            usage_load=lambda: (None, "인증이 만료되었습니다"))
+        try:
+            window._usage_button.emit("clicked")
+            pump_until(window._usage_button.get_sensitive)
+            self.assertIn("인증이 만료되었습니다", self._popover_text(window))
+        finally:
+            window.destroy()
+
+    def test_a_second_click_while_a_fetch_is_in_flight_does_not_start_another(self):
+        import threading
+        calls = []
+        release = threading.Event()
+
+        def slow_load():
+            calls.append(1)
+            release.wait(2.0)
+            return None, "네트워크"
+
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, usage_load=slow_load)
+        try:
+            window._usage_button.emit("clicked")
+            self.assertFalse(window._usage_button.get_sensitive(), "disabled while in flight")
+            window._usage_button.emit("clicked")  # the double click
+            release.set()
+            pump_until(window._usage_button.get_sensitive)
+            self.assertEqual(len(calls), 1, "the loader ran once")
+            self.assertTrue(window._usage_button.get_sensitive(), "re-enabled after")
+        finally:
+            window.destroy()
+
+
+class BottomBarLayoutTest(unittest.TestCase):
+    """The bottom strip must cost only what it shows: the usage button sits right-
+    aligned at about a third of the width, and the status label -- empty almost all
+    the time -- takes no vertical space until it actually has something to say."""
+
+    def test_the_usage_button_is_right_aligned_and_about_a_third_wide(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.resize(340, 420)
+            window.show_all()
+            # Wait for a real allocation, not for a guessed delay.
+            pump_until(lambda: window._usage_button.get_allocation().width > 1)
+            self.assertEqual(window._usage_button.get_halign(), Gtk.Align.END)
+            width = window._usage_button.get_allocation().width
+            self.assertLess(width, 340 // 2, "must not span the panel")
+            self.assertGreater(width, 40, "must still be clickable")
+        finally:
+            window.destroy()
+
+    def test_an_empty_status_label_takes_no_space(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.show_all()
+            pump_until(window.get_mapped)
+            self.assertEqual(window._status.get_text(), "")
+            self.assertFalse(window._status.get_visible(),
+                             "an empty status label must not reserve a row")
+        finally:
+            window.destroy()
+
+    def test_a_status_message_reveals_the_label(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.show_all()
+            pump_until(window.get_mapped)
+            window.set_status("이동하지 못했습니다")
+            self.assertTrue(window._status.get_visible())
+            self.assertIn("이동하지 못했습니다", window._status.get_text())
+            window.set_status("")  # and it hides again when cleared
+            self.assertFalse(window._status.get_visible())
+        finally:
+            window.destroy()
+
+    def test_show_all_does_not_reveal_an_empty_status_label(self):
+        # show_all() re-reveals every child by default -- the label must opt out, or
+        # the row comes back the first time the window is shown again.
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.show_all()
+            pump_until(window.get_mapped)
+            window.show_all()
+            self.assertFalse(window._status.get_visible())
+        finally:
+            window.destroy()
+
+
+class UsagePopoverDismissTest(unittest.TestCase):
+    """Once the popover is up, a click anywhere else must put it away -- the empty
+    strip beside the button, a session row, or the button itself (a toggle). It must
+    not depend on GTK's modal grab, which is why each path is asserted here."""
+
+    def _window(self):
+        from ccnav import usage
+        result = usage.Usage(plan="Max 20x",
+                             entries=[usage.Entry("세션 (5시간)", 26, "normal", "")])
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None,
+                                    usage_load=lambda: (result, ""))
+        window.show_all()
+        pump_until(window.get_mapped)
+        return window
+
+    def _open(self, window):
+        window._usage_button.emit("clicked")
+        # popup() is synchronous, but the fetch that fills it is not -- wait for the
+        # load to land so the popover is fully up before we try to dismiss it.
+        pump_until(lambda: window._usage_popover.get_visible()
+                   and window._usage_button.get_sensitive())
+        self.assertTrue(window._usage_popover.get_visible(), "precondition: popover is up")
+
+    def _closed(self, window):
+        pump_until(lambda: not window._usage_popover.get_visible())
+
+    def test_clicking_the_empty_space_beside_the_button_closes_the_popover(self):
+        window = self._window()
+        try:
+            self._open(window)
+            # A press that no child consumes bubbles to the toplevel -- the empty
+            # strip beside the button is exactly that.
+            window.emit("button-press-event",
+                        Gdk.Event.new(Gdk.EventType.BUTTON_PRESS))
+            self._closed(window)
+            self.assertFalse(window._usage_popover.get_visible())
+        finally:
+            window.destroy()
+
+    def test_the_popover_does_not_take_a_grab(self):
+        # A modal popover grabs the pointer, and while it holds that grab the click
+        # that should dismiss it never reaches our handlers -- which is exactly how it
+        # got stuck open. Dismissal is ours, so the grab must stay off.
+        window = self._window()
+        try:
+            self.assertFalse(window._usage_popover.get_modal())
+        finally:
+            window.destroy()
+
+    def test_the_window_actually_listens_for_button_presses(self):
+        # Emitting the signal by hand proves the handler works but NOT that a real
+        # click ever reaches it: a toplevel's default event mask has no BUTTON_PRESS,
+        # so without add_events the dead-space click is silently never delivered.
+        # (Found the hard way -- the handler was right and the clicks still did
+        # nothing.) Guard the routing, not just the handler.
+        window = self._window()
+        try:
+            mask = window.get_events()
+            self.assertTrue(mask & Gdk.EventMask.BUTTON_PRESS_MASK,
+                            "the toplevel must ask for button presses")
+        finally:
+            window.destroy()
+
+    def test_clicking_a_session_row_closes_the_popover(self):
+        window = self._window()
+        try:
+            window.set_rows([row(session_id="a")])
+            self._open(window)
+            window._listbox.emit("button-press-event",
+                                 Gdk.Event.new(Gdk.EventType.BUTTON_PRESS))
+            self._closed(window)
+            self.assertFalse(window._usage_popover.get_visible())
+        finally:
+            window.destroy()
+
+    def test_clicking_the_button_again_toggles_the_popover_shut(self):
+        loads = []
+
+        def load():
+            from ccnav import usage
+            loads.append(1)
+            return usage.Usage("Max 20x", [usage.Entry("세션 (5시간)", 26, "normal", "")]), ""
+
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None,
+                                    usage_load=load)
+        try:
+            window.show_all()
+            pump_until(window.get_mapped)
+            window._usage_button.emit("clicked")
+            pump_until(lambda: window._usage_popover.get_visible()
+                       and window._usage_button.get_sensitive())
+            self.assertTrue(window._usage_popover.get_visible())
+            window._usage_button.emit("clicked")   # the second press closes it
+            pump_until(lambda: not window._usage_popover.get_visible())
+            self.assertFalse(window._usage_popover.get_visible())
+            self.assertEqual(len(loads), 1, "closing must not re-fetch")
+        finally:
+            window.destroy()
+
+
+class OptionalCcusageUiTest(unittest.TestCase):
+    @staticmethod
+    def _widgets(root, cls):
+        found = []
+
+        def walk(widget):
+            if isinstance(widget, cls):
+                found.append(widget)
+            if isinstance(widget, Gtk.Container):
+                for child in widget.get_children():
+                    walk(child)
+
+        walk(root)
+        return found
+
+    def test_token_row_is_hidden_by_default_and_after_disable(self):
+        from ccnav import usage
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            self.assertFalse(window._token_row.get_visible())
+            window.set_token_usage(usage.TokenUsage(10.0, 5.0, ""))
+            self.assertTrue(window._token_row.get_visible())
+            window.set_token_usage(None)
+            self.assertFalse(window._token_row.get_visible())
+            self.assertFalse(window._token_overlay.get_visible())
+        finally:
+            window.destroy()
+
+    def test_missing_external_tool_is_shown_without_stale_progress(self):
+        from ccnav import usage
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_token_usage(usage.TokenUsage(10.0, 5.0, ""))
+            window.set_token_usage(
+                usage.TokenUsage(None, None, usage.ERR_CCUSAGE_NOT_INSTALLED))
+            self.assertTrue(window._token_row.get_visible())
+            self.assertFalse(window._token_overlay.get_visible())
+            self.assertIn("직접 설치", window._token_error.get_text())
+        finally:
+            window.destroy()
+
+    def test_settings_names_the_external_program_and_its_privacy_boundary(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        dialog = window._build_settings_dialog()
+        try:
+            labels = " ".join(
+                widget.get_text() for widget in self._widgets(dialog, Gtk.Label))
+            checks = " ".join(
+                widget.get_label() or ""
+                for widget in self._widgets(dialog, Gtk.CheckButton))
+            self.assertIn("ccusage 토큰 비용 계산 사용", checks)
+            self.assertIn("별도 설치", labels)
+            self.assertIn("로컬 Claude 대화 로그", labels)
+            self.assertIn("자동 설치", labels)
+            self.assertIn("npx", labels)
+        finally:
+            dialog.destroy()
             window.destroy()

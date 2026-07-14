@@ -40,6 +40,20 @@ def _alive():
     return tmux("list-sessions").returncode == 0
 
 
+def wait_until(condition, what, timeout=10.0):
+    """Poll `condition` until it holds. Everything this file waits on -- a shell
+    running a command, tmux recording an OSC title, a server finishing its death --
+    takes as long as the machine is busy. Sleeping a fixed 0.3-1.0s and hoping was
+    this suite's flakiness: pin every core and those tests failed every run, on a slow
+    machine rather than on wrong code. Poll the real thing instead.
+    """
+    deadline = time.monotonic() + timeout
+    while not condition():
+        if time.monotonic() >= deadline:
+            raise AssertionError("timed out after %.1fs waiting for: %s" % (timeout, what))
+        time.sleep(0.02)
+
+
 @unittest.skipUnless(shutil.which("tmux"), "needs tmux")
 class TmuxIntegrationTest(unittest.TestCase):
     def setUp(self):
@@ -80,7 +94,10 @@ class TmuxIntegrationTest(unittest.TestCase):
         pane = self._pane_id()
         title = "✳ 작업 중 (demo-project)"
         tmux("send-keys", "-t", pane, "printf '\\033]2;%s\\007'" % title, "Enter")
-        time.sleep(1.0)
+        # The shell has to actually run the printf and tmux has to parse the escape.
+        # Wait for the title tmux itself reports -- the very thing under test.
+        wait_until(lambda: tmuxctl.titles_by_pane(SOCKET).get(pane) == title,
+                   "tmux to record the pane title set by the OSC escape")
         self._write_state(pane)
 
         collected = app.collect_rows(self.state_dir)
@@ -96,15 +113,22 @@ class TmuxIntegrationTest(unittest.TestCase):
     def test_send_text_arrives_byte_exact_and_reports_success(self):
         pane = self._pane_id()
         got = pathlib.Path(self._tmp.name) / "got.txt"
+        ready = pathlib.Path(self._tmp.name) / "ready"
+        # The reader announces itself: it touches `ready` immediately before blocking on
+        # the read, so we can wait for the shell to actually be there instead of
+        # sleeping 0.6s and hoping it beat us to it.
         tmux(
             "send-keys", "-t", pane,
-            'IFS= read -r line < /dev/tty; printf %s "$line" > ' + str(got), "Enter",
+            "touch " + str(ready) + "; IFS= read -r line < /dev/tty; "
+            'printf %s "$line" > ' + str(got),
+            "Enter",
         )
-        time.sleep(0.6)
+        wait_until(ready.exists, "the shell to reach the read")
 
         payload = "yes; echo 'x' \"y\" $HOME \\ 한글 ✳ Enter C-c"
         result = tmuxctl.send_text(SOCKET, pane, payload)
-        time.sleep(0.8)
+        wait_until(lambda: got.exists() and got.read_text() == payload,
+                   "the reply to arrive byte-exact in the pane")
 
         self.assertEqual(got.read_text(), payload)
         self.assertTrue(result.ok, "a delivered+submitted reply must report success")
@@ -120,7 +144,7 @@ class TmuxIntegrationTest(unittest.TestCase):
         pane = self._pane_id()
         self._write_state(pane)
         tmux("kill-server")
-        time.sleep(0.3)
+        wait_until(lambda: not _alive(), "the tmux server to actually die")
         self.assertFalse(_alive(), "the server really is dead")
 
         collected = app.collect_rows(self.state_dir)
@@ -143,7 +167,10 @@ class TmuxIntegrationTest(unittest.TestCase):
         self._write_state(pane)
 
         tmux("kill-session", "-t", "proj")
-        time.sleep(0.3)
+        # Wait for the pane to actually leave tmux's list -- that absence is the whole
+        # premise of the assertions below.
+        wait_until(lambda: pane not in tmuxctl.sessions_by_pane_result(SOCKET)[1],
+                   "proj's pane to disappear from tmux")
         self.assertTrue(_alive(), "the server survives on the 'keep' session")
 
         collected = app.collect_rows(self.state_dir)

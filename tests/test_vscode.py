@@ -25,10 +25,13 @@ def vscode_payload(session_id="v1", cwd="/home/u/robotics/datamil"):
 class HookVscodeTest(unittest.TestCase):
     def test_records_a_vscode_session_with_its_claude_pid(self):
         rec = hook.build_record(
-            vscode_payload(), VSCODE_ENV, now=100, find_claude_pid=lambda: 4321
+            vscode_payload(), VSCODE_ENV, now=100,
+            find_claude_pid=lambda: 4321,
+            find_claude_start_time=lambda pid: 9876,
         )
         self.assertEqual(rec["kind"], "vscode")
         self.assertEqual(rec["claude_pid"], 4321)
+        self.assertEqual(rec["claude_start_time"], 9876)
         self.assertEqual(rec["tmux_socket"], "")
         self.assertEqual(rec["tmux_pane"], "")
         self.assertEqual(rec["cwd"], "/home/u/robotics/datamil")
@@ -129,14 +132,20 @@ class ModelVscodeTest(unittest.TestCase):
         rows = model.build_rows(recs, {}, {}, live_pids={1, 2})
         self.assertEqual({r.session_id for r in rows}, {"v1", "v2"})
 
+    def test_same_name_pid_reuse_does_not_keep_the_old_session(self):
+        rec = dict(self._rec(), claude_start_time=100)
+        self.assertEqual(
+            model.build_rows([rec], {}, {}, live_pids={(4321, 200)}), [])
+
 
 class PruneVscodeTest(unittest.TestCase):
     def setUp(self):
         self.dir = pathlib.Path(tempfile.mkdtemp())
 
-    def _write(self, session_id, pid):
+    def _write(self, session_id, pid, started=0):
         statestore.write(self.dir, {
             "session_id": session_id, "cwd": "/p", "kind": "vscode", "claude_pid": pid,
+            "claude_start_time": started,
             "tmux_socket": "", "tmux_pane": "", "state": "waiting", "reason": "idle",
             "message": "", "updated_at": 7,
         })
@@ -163,6 +172,14 @@ class PruneVscodeTest(unittest.TestCase):
             self.dir, set(), set(), live_pids=set(), observed_pids=set()
         )
         self.assertEqual(removed, 0)
+
+    def test_same_pid_with_a_new_start_time_reaps_the_old_session(self):
+        self._write("v1", 4321, started=100)
+        removed = statestore.prune(
+            self.dir, set(), set(),
+            live_pids={(4321, 200)}, observed_pids={(4321, 100), (4321, 200)},
+        )
+        self.assertEqual(removed, 1)
 
 
 class GnomeVscodeTest(unittest.TestCase):
@@ -306,6 +323,41 @@ class ActivateVscodeSessionTest(unittest.TestCase):
             open_session=lambda session_id, run: False,  # code absent
         )
         self.assertTrue(result.ok)  # landed on the right window regardless
+
+    def test_failed_window_activation_does_not_send_the_uri_elsewhere(self):
+        opened = []
+
+        def run(argv):
+            if argv and argv[0] == "gdbus":
+                return 0, "(true, '\"matched=0\"')"
+            if "_NET_WM_NAME" in argv:
+                return 0, '_NET_WM_NAME = "other - Visual Studio Code"'
+            return 0, "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x1"
+
+        result = gnome.activate_vscode_session(
+            "v1", "datamil", run=run, sleep=lambda _s: None, timeout=0,
+            open_session=lambda session_id, run: opened.append(session_id) or True,
+        )
+        self.assertFalse(result.ok)
+        self.assertEqual(opened, [])
+
+    def test_ambiguous_window_match_does_not_send_the_uri(self):
+        opened = []
+
+        def run(argv):
+            if argv and argv[0] == "gdbus":
+                return 0, "(true, '\"matched=2\"')"
+            if "_NET_WM_NAME" in argv:
+                return 0, '_NET_WM_NAME = "chat - datamil - Visual Studio Code"'
+            return 0, "_NET_ACTIVE_WINDOW(WINDOW): window id # 0x1"
+
+        result = gnome.activate_vscode_session(
+            "v1", "datamil", run=run, sleep=lambda _s: None, timeout=0,
+            open_session=lambda session_id, run: opened.append(session_id) or True,
+        )
+        self.assertTrue(result.ok)
+        self.assertEqual(result.matched, 2)
+        self.assertEqual(opened, [])
 
 
 class CollectRowsVscodeTest(unittest.TestCase):

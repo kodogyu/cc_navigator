@@ -4,9 +4,11 @@ import unittest
 from ccnav import procstat
 
 
-def stat_blob(comm, ppid, state="S"):
+def stat_blob(comm, ppid, state="S", start_time=12345):
     """A minimal but faithful /proc/<pid>/stat line: 'pid (comm) state ppid ...'."""
-    return ("999 (%s) %s %d 999 999 0" % (comm, state, ppid)).encode()
+    # After comm: field 3 is state, field 4 is ppid, field 22 is starttime.
+    fields = [state, str(ppid)] + ["0"] * 17 + [str(start_time)]
+    return ("999 (%s) %s" % (comm, " ".join(fields))).encode()
 
 
 class ParseStatTest(unittest.TestCase):
@@ -25,6 +27,9 @@ class ParseStatTest(unittest.TestCase):
 
     def test_non_numeric_ppid_is_none(self):
         self.assertIsNone(procstat.parse_stat(b"1 (x) S notapid 1 0"))
+
+    def test_reads_the_kernel_start_time(self):
+        self.assertEqual(procstat.parse_start_time(stat_blob("claude", 1, start_time=77)), 77)
 
 
 class FindClaudeAncestorTest(unittest.TestCase):
@@ -76,6 +81,11 @@ class PidIsClaudeTest(unittest.TestCase):
         read = lambda pid: stat_blob("bash", 1)
         self.assertFalse(procstat.pid_is_claude(123, read_stat=read))
 
+    def test_reused_pid_now_another_claude_is_false_when_start_time_changed(self):
+        read = lambda pid: stat_blob("claude", 1, start_time=200)
+        self.assertFalse(procstat.pid_is_claude(
+            123, expected_start_time=100, read_stat=read))
+
     def test_dead_pid_is_false(self):
         def read(pid):
             raise OSError("gone")
@@ -93,6 +103,12 @@ class PidIsClaudeTest(unittest.TestCase):
         self.assertEqual(
             procstat.live_claude_pids({10, 20, 30}, read_stat=read), {10, 30}
         )
+
+    def test_identity_keys_survive_only_with_the_same_start_time(self):
+        read = lambda pid: stat_blob("claude", 1, start_time=200)
+        keys = {(10, 100), (10, 200)}
+        self.assertEqual(
+            procstat.live_claude_pids(keys, read_stat=read), {(10, 200)})
 
 
 if __name__ == "__main__":

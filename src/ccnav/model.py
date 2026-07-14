@@ -128,10 +128,10 @@ def build_rows(
     records: List[Dict[str, object]],
     sessions_by_socket: Dict[str, Dict[str, str]],
     titles_by_socket: Dict[str, Dict[str, str]],
-    live_pids: Set[int] = frozenset(),
+    live_pids: Set[object] = frozenset(),
 ) -> List[Row]:
     """A tmux row exists iff its pane is live in tmux; a VSCode row exists iff
-    its claude_pid is in `live_pids` (the poller's kernel liveness check)."""
+    its process identity is in `live_pids` (the poller's kernel check)."""
     rows = []  # type: List[Row]
     for (socket, pane), rec in _newest_per_pane(records).items():
         sessions = sessions_by_socket.get(socket, {})
@@ -156,7 +156,9 @@ def build_rows(
         )
     for sid, rec in _newest_vscode(records).items():
         pid = _as_int(rec.get("claude_pid", 0))
-        if pid not in live_pids:
+        started = _as_int(rec.get("claude_start_time", 0))
+        process_key = (pid, started) if started > 0 else pid
+        if process_key not in live_pids:
             continue  # the owning claude process is gone -> the session ended
         cwd = str(rec.get("cwd") or "")
         # Headline priority for a VSCode session: its AI-generated tab title (the

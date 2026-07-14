@@ -19,8 +19,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango  # noqa: E402
 
-from . import config, model, themes, updater, wiring  # noqa: E402
-from . import usage as usage_mod  # noqa: E402
+from . import config, model, themes, updater, usage, wiring  # noqa: E402
 
 _CORNER_LABELS = {
     "top-right": "오른쪽 위",
@@ -499,11 +498,15 @@ class NavigatorWindow(Gtk.Window):
         on_send: Callable[[model.Row, str], None],
         settings: "config.Settings" = None,
         on_settings_changed: Callable[["config.Settings"], None] = None,
+        usage_load: Callable = None,
     ) -> None:
         super().__init__(title="cc_navigator")
         self._on_jump = on_jump
         self._on_send = on_send
         self._on_settings_changed = on_settings_changed
+        # Injected so tests drive the usage popover without touching the network.
+        self._usage_load = usage_load or usage.load
+        self._usage_in_flight = False
         self._settings = settings or config.Settings()
         # Section metadata for the two list views, recomputed on each set_rows
         # and read by the sort/header funcs. Initialised empty so those funcs are
@@ -664,24 +667,15 @@ class NavigatorWindow(Gtk.Window):
 
         self._status = Gtk.Label(xalign=0.0)
         self._status.set_line_wrap(True)
-        self._status.set_no_show_all(True)  # _render_status shows it only when non-empty
+        # Empty almost all the time (it only speaks up on a failed jump/send or an
+        # unreachable socket), and an empty label still claims a full row.
+        self._status.set_no_show_all(True)
         self._status.set_visible(False)
 
-        # Bottom usage line, one row (see usage.py): weekly % (orange, Claude API)
-        # beside the "Token Usage" ccusage bar, whose "NN%  $XXX" is drawn INSIDE
-        # the bar. Each piece is hidden until its own fetch delivers a value; a
-        # single widget with no children, so no_show_all + set_visible suffices.
-        self._weekly_label = Gtk.Label(xalign=0.0)
-        self._weekly_label.set_no_show_all(True)
-        # Same size and bold weight as the weekly label beside it, but white --
-        # matching the session titles above (no foreground -> inherits the theme's
-        # light text colour), not the orange of "사용량".
+        # Optional local token-cost estimate. This row stays hidden unless the
+        # explicit ccusage setting is enabled and Application supplies a result.
         self._token_cap = Gtk.Label(xalign=0.0)
         self._token_cap.set_markup('<b>Token Usage</b>')
-        self._token_cap.set_no_show_all(True)
-        # GtkProgressBar's own show_text draws the label ABOVE the bar in this GTK
-        # build, so instead overlay a centred label ON the bar to get "NN%  $XXX"
-        # truly inside it.
         self._token_bar = Gtk.ProgressBar()
         self._token_bar.set_valign(Gtk.Align.CENTER)
         self._token_bar.get_style_context().add_class("token-bar")
@@ -693,8 +687,20 @@ class NavigatorWindow(Gtk.Window):
         self._token_overlay.add(self._token_bar)
         self._token_overlay.add_overlay(self._token_value)
         self._token_overlay.show_all()
-        self._token_overlay.set_no_show_all(True)
-        self._token_overlay.set_visible(False)
+        self._token_error = Gtk.Label(xalign=0.0)
+        self._token_error.set_line_wrap(True)
+        self._token_error.set_max_width_chars(42)
+
+        self._token_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        self._token_row.set_margin_start(10)
+        self._token_row.set_margin_end(10)
+        self._token_row.set_margin_bottom(4)
+        self._token_row.pack_start(self._token_cap, False, False, 0)
+        self._token_row.pack_start(self._token_overlay, True, True, 0)
+        self._token_row.pack_start(self._token_error, True, True, 0)
+        self._token_row.show_all()
+        self._token_row.set_no_show_all(True)
+        self._token_row.set_visible(False)
 
         # "Sort by" selector: status sections vs project groups. In group mode
         # the list is arranged manually by drag; the "자동 정렬" button re-groups
@@ -716,20 +722,44 @@ class NavigatorWindow(Gtk.Window):
         sort_row.pack_start(sort_combo, False, False, 0)
         sort_row.pack_start(auto_sort, False, False, 0)
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        # The account's plan limits, on demand: the bottom button fetches them and shows
+        # them in a popover above itself. Fetching is a network call, so it never runs
+        # on the GTK main thread (see _on_usage_clicked).
+        self._usage_button = Gtk.Button(label="사용량 확인")
+        self._usage_button.set_relief(Gtk.ReliefStyle.NONE)
+        self._usage_button.set_tooltip_text("로그인된 계정의 사용량(한도) 보기")
+        # Bottom-RIGHT and only as wide as it needs to be: a full-width button ate a
+        # third of the panel's bottom edge for a control the user presses rarely.
+        self._usage_button.set_halign(Gtk.Align.END)
+        self._usage_button.connect("clicked", self._on_usage_clicked)
+        self._usage_popover = Gtk.Popover.new(self._usage_button)
+        self._usage_popover.set_position(Gtk.PositionType.TOP)
+        # Dismissal is OURS, not GTK's. A modal popover takes a pointer grab and is
+        # supposed to close itself on a click outside -- but in this window (a
+        # keep-above UTILITY toplevel the WM does not reliably focus) it did not, and
+        # while that grab is held the click never reaches our own handlers either, so
+        # the popover just sat there. Turning the grab off puts every click back on the
+        # normal path, where _dismiss_usage_popover can close it deterministically.
+        self._usage_popover.set_modal(False)
+        # A press on the empty strip beside the button (or any other dead space) is
+        # consumed by no child, so it bubbles up to the toplevel -- close the popover.
+        # A toplevel's default event mask has no BUTTON_PRESS, so without this the
+        # handler below is simply never called and dead-space clicks do nothing.
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.connect("button-press-event", self._dismiss_usage_popover)
+        self._usage_body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self._usage_body.set_margin_top(10)
+        self._usage_body.set_margin_bottom(10)
+        self._usage_body.set_margin_start(12)
+        self._usage_body.set_margin_end(12)
+        self._usage_popover.add(self._usage_body)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.pack_start(sort_row, False, False, 0)
         box.pack_start(scroller, True, True, 0)
-        box.pack_start(self._status, False, False, 0)
-        # Weekly % and the Token Usage bar share one bottom line, inset slightly
-        # from the window edges (left/right margins) and lifted off the very edge.
-        usage_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        usage_row.set_margin_start(10)
-        usage_row.set_margin_end(10)
-        usage_row.set_margin_bottom(4)
-        usage_row.pack_start(self._weekly_label, False, False, 0)
-        usage_row.pack_start(self._token_cap, False, False, 0)
-        usage_row.pack_start(self._token_overlay, True, True, 0)
-        box.pack_start(usage_row, False, False, 0)
+        box.pack_start(self._status, False, False, 4)
+        box.pack_start(self._token_row, False, False, 0)
+        box.pack_end(self._usage_button, False, False, 0)  # flush to the bottom edge
         self._content = box
 
         # A Stack holds the full panel and a minimal "docked" bar. Attach mode
@@ -809,6 +839,8 @@ class NavigatorWindow(Gtk.Window):
                 self._geometry_applied = True
         Gtk.Widget.set_opacity(self, settings.opacity)
         self._apply_css(settings)
+        if not settings.ccusage_enabled:
+            self.set_token_usage(None)
 
     def _apply_geometry(self, settings: "config.Settings") -> None:
         """Pin the window to the chosen corner of the primary monitor.
@@ -1211,6 +1243,101 @@ class NavigatorWindow(Gtk.Window):
         dialog.run()
         dialog.destroy()
 
+    # -- account usage --------------------------------------------------------
+
+    def _dismiss_usage_popover(self, *_args) -> bool:
+        """Put the usage popover away on a click elsewhere -- the empty strip beside
+        the button, a session row, anything. GTK's modal grab is supposed to do this,
+        but the panel cannot rely on it (it is a keep-above utility window that the WM
+        does not always focus), so dismissal is explicit. Returns False so the click
+        still does whatever it was going to do."""
+        if self._usage_popover.get_visible():
+            self._usage_popover.popdown()
+        return False
+
+    def _on_usage_clicked(self, _button) -> None:
+        """Open the popover on "불러오는 중…" and fetch off the GTK thread (it is a
+        network call). The in-flight flag makes a second click a no-op -- otherwise a
+        double click would fire two requests and race to fill the same popover."""
+        if self._usage_popover.get_visible():
+            self._usage_popover.popdown()  # a second press on the button toggles it shut
+            return
+        if self._usage_in_flight:
+            return
+        self._usage_in_flight = True
+        self._usage_button.set_sensitive(False)
+        self._render_usage(None, "불러오는 중…")
+        if self._usage_button.get_mapped():  # a popover on an unmapped widget cannot show
+            self._usage_popover.popup()
+
+        def worker() -> None:
+            try:
+                result, error = self._usage_load()
+            except Exception as exc:  # noqa: BLE001 -- the button must always come back
+                result, error = None, "사용량을 불러오지 못했습니다: %s" % exc
+            GLib.idle_add(self._on_usage_done, result, error)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_usage_done(self, result, error: str) -> bool:
+        self._usage_in_flight = False
+        self._usage_button.set_sensitive(True)
+        self._render_usage(result, error)
+        return False  # one-shot idle source
+
+    def _render_usage(self, result, message: str) -> None:
+        """Rebuild the popover body: the plan, then one row per limit (label, bar,
+        percent, reset). A failure -- including an endpoint we can no longer read --
+        is just a message, so the panel never breaks on it."""
+        for child in self._usage_body.get_children():
+            self._usage_body.remove(child)
+
+        if result is None:
+            label = Gtk.Label(xalign=0.0)
+            label.set_line_wrap(True)
+            label.set_max_width_chars(32)
+            label.set_text(message)
+            self._usage_body.pack_start(label, False, False, 0)
+            self._usage_body.show_all()
+            return
+
+        if result.plan:
+            plan = Gtk.Label(xalign=0.0)
+            plan.set_markup("<b>%s</b>" % GLib.markup_escape_text(result.plan))
+            self._usage_body.pack_start(plan, False, False, 0)
+
+        for entry in result.entries:
+            row = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+            name = Gtk.Label(xalign=0.0, label=entry.label)
+            percent = Gtk.Label(xalign=1.0)
+            percent.set_markup("<b>%d%%</b>" % entry.percent)
+            top.pack_start(name, True, True, 0)
+            top.pack_end(percent, False, False, 0)
+
+            bar = Gtk.LevelBar.new_for_interval(0, 100)
+            bar.set_value(max(0, min(100, entry.percent)))
+            bar.set_size_request(220, 8)
+            # The endpoint's own severity drives the colour, so a limit it considers
+            # hot looks hot here too (GTK ships high/full offsets on a LevelBar).
+            if entry.severity in ("warning", "high"):
+                bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_HIGH, 100)
+            elif entry.severity in ("critical", "exceeded"):
+                bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_FULL, 100)
+
+            row.pack_start(top, False, False, 0)
+            row.pack_start(bar, False, False, 0)
+            reset = usage.describe_reset(entry.resets_at)
+            if reset:
+                hint = Gtk.Label(xalign=0.0)
+                hint.set_markup(
+                    '<small><span foreground="#77767b">%s</span></small>'
+                    % GLib.markup_escape_text(reset))
+                row.pack_start(hint, False, False, 0)
+            self._usage_body.pack_start(row, False, False, 0)
+
+        self._usage_body.show_all()
+
     def _on_update_clicked(self, button) -> None:
         """Fetch + fast-forward off the GTK thread (it touches the network and
         disk), then hand the result back with idle_add. On success the process
@@ -1449,6 +1576,29 @@ class NavigatorWindow(Gtk.Window):
         grid.attach(notifications, 1, row, 1, 1)
         row += 1
 
+        # External programs are a separate trust boundary, so this is opt-in and
+        # the consequence is stated next to the switch rather than hidden in docs.
+        add_label("외부 사용량 도구")
+        ccusage_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        ccusage_toggle = Gtk.CheckButton(label="ccusage 토큰 비용 계산 사용")
+        ccusage_toggle.set_active(s.ccusage_enabled)
+        ccusage_toggle.set_tooltip_text(
+            "설치된 외부 프로그램 ccusage를 실행해 로컬 Claude 로그를 분석합니다")
+        ccusage_toggle.connect("toggled", lambda w: self._commit_settings(
+            config.with_updates(self._settings, ccusage_enabled=w.get_active())))
+        ccusage_warning = Gtk.Label(xalign=0.0)
+        ccusage_warning.set_line_wrap(True)
+        ccusage_warning.set_max_width_chars(48)
+        ccusage_warning.set_markup(
+            "<small><b>주의:</b> ccusage는 별도 설치가 필요한 외부 프로그램입니다. "
+            "이 옵션을 켜면 설치된 ccusage를 5분마다 실행해 로컬 Claude 대화 로그를 "
+            "읽습니다. cc_navigator는 ccusage를 자동 설치하거나 npx로 다운로드하지 "
+            "않습니다.</small>")
+        ccusage_box.pack_start(ccusage_toggle, False, False, 0)
+        ccusage_box.pack_start(ccusage_warning, False, False, 0)
+        grid.attach(ccusage_box, 1, row, 1, 1)
+        row += 1
+
         from . import __version__
         # Bottom row: an update button + its status on the left, the version on
         # the right. Same version format as `cc-navigator --version` (app.main),
@@ -1553,39 +1703,36 @@ class NavigatorWindow(Gtk.Window):
         self._transient = text
         self._render_status()
 
-    def set_usage(self, snapshot) -> None:
-        """Render the two bottom usage readings from a usage.UsageSnapshot (or
-        None). Each part hides itself when its value is missing."""
+    def set_token_usage(self, snapshot) -> None:
+        """Render the opt-in local ccusage estimate, or hide it when disabled."""
         if snapshot is None:
-            self._weekly_label.set_visible(False)
-            self._token_cap.set_visible(False)
-            self._token_bar.set_visible(False)
+            self._token_overlay.set_visible(False)
+            self._token_error.set_visible(False)
+            self._token_row.set_visible(False)
             return
 
-        # Weekly usage % (Claude API), orange text.
-        if snapshot.weekly_percent is None:
-            self._weekly_label.set_visible(False)
-        else:
-            self._weekly_label.set_markup(
-                '<span foreground="#ffb454"><b>사용량 %d%%</b></span>'
-                % round(snapshot.weekly_percent))
-            self._weekly_label.set_visible(True)
-
-        # Token Usage (ccusage): the bar fills to the actual percent (fraction is
-        # percent/100), and "NN%  $XXX" is overlaid centred inside it.
-        if snapshot.token_percent is None:
-            self._token_cap.set_visible(False)
+        self._token_cap.set_visible(True)
+        if snapshot.error:
             self._token_overlay.set_visible(False)
-        else:
-            self._token_bar.set_fraction(max(0.0, min(1.0, snapshot.token_percent / 100.0)))
-            cost = snapshot.token_cost or 0.0
-            self._token_value.set_markup(
-                '<small>%d%%  $%d</small>' % (round(snapshot.token_percent), round(cost)))
-            self._token_overlay.set_tooltip_text(
-                "이번 주 토큰 사용액 $%.2f / $%d (월요일 기준 누적)"
-                % (cost, int(usage_mod.WEEKLY_BUDGET_DOLLARS)))
-            self._token_cap.set_visible(True)
-            self._token_overlay.set_visible(True)
+            self._token_error.set_text(snapshot.error)
+            self._token_error.set_visible(True)
+            self._token_row.set_visible(True)
+            return
+
+        if snapshot.token_percent is None or snapshot.token_cost is None:
+            self._token_row.set_visible(False)
+            return
+
+        self._token_error.set_visible(False)
+        self._token_bar.set_fraction(max(0.0, min(1.0, snapshot.token_percent / 100.0)))
+        cost = snapshot.token_cost
+        self._token_value.set_markup(
+            '<small>%d%%  $%d</small>' % (round(snapshot.token_percent), round(cost)))
+        self._token_overlay.set_tooltip_text(
+            "이번 주 토큰 사용액 $%.2f / $%d (월요일 기준 누적)"
+            % (cost, int(usage.WEEKLY_BUDGET_DOLLARS)))
+        self._token_overlay.set_visible(True)
+        self._token_row.set_visible(True)
 
     def set_unreachable(self, count: int) -> None:
         """The hint slot: a poll found `count` sockets that held sessions but did
@@ -2376,6 +2523,7 @@ class NavigatorWindow(Gtk.Window):
         selected so _on_row_activated can distinguish a re-click (collapse) from
         a first click (expand). Return False so the click is never swallowed."""
         self._pre_press_selected = listbox.get_selected_row()
+        self._dismiss_usage_popover()  # a click in the list puts the popover away
         return False
 
     def _on_row_activated(self, listbox, activated) -> None:

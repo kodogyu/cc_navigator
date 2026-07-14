@@ -58,6 +58,10 @@ class Settings:
     dark_color: str = ""  # "" = keep the theme's header/dark colour, else #rrggbb
     sort_mode: str = "status"  # "status" | "group"
     notifications: bool = True  # desktop notify when a session becomes "your turn"
+    # External tools are always opt-in. Enabling this permits cc_navigator to
+    # execute an already-installed `ccusage` binary against local Claude logs;
+    # it never downloads or installs the program itself.
+    ccusage_enabled: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +78,7 @@ class Settings:
             "dark_color": self.dark_color,
             "sort_mode": self.sort_mode,
             "notifications": self.notifications,
+            "ccusage_enabled": self.ccusage_enabled,
         }
 
 
@@ -109,6 +114,10 @@ def _coerce(raw: dict, base: Settings) -> Settings:
     all_ws = all_ws if isinstance(all_ws, bool) else base.all_workspaces
     notifications = raw.get("notifications")
     notifications = notifications if isinstance(notifications, bool) else base.notifications
+    ccusage_enabled = raw.get("ccusage_enabled")
+    ccusage_enabled = (
+        ccusage_enabled if isinstance(ccusage_enabled, bool) else base.ccusage_enabled
+    )
 
     font_raw = _as_number(raw.get("font_size"), base.font_size)
     font = 0 if font_raw <= 0 else int(_clamp(font_raw, FONT_MIN, FONT_MAX))
@@ -140,6 +149,7 @@ def _coerce(raw: dict, base: Settings) -> Settings:
         dark_color=dark,
         sort_mode=sort_mode,
         notifications=notifications,
+        ccusage_enabled=ccusage_enabled,
     )
 
 

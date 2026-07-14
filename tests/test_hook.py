@@ -44,6 +44,7 @@ class BuildRecordTest(unittest.TestCase):
                 "cwd": "/data/projects/demo_project",
                 "kind": "tmux",
                 "claude_pid": 0,
+                "claude_start_time": 0,
                 "ai_title": "",
                 "tmux_socket": "/tmp/tmux-1000/default",
                 "tmux_pane": "%12",

@@ -339,7 +339,7 @@ class _FakeWindow:
         self.unreachable = None
         self.usage = "unset"
 
-    def set_usage(self, usage):
+    def set_token_usage(self, usage):
         self.usage = usage
 
     def set_row_jump_sensitive(self, session_id, sensitive):
@@ -497,18 +497,21 @@ class SendStatusTest(unittest.TestCase):
 class ApplicationUsageTest(unittest.TestCase):
     def test_apply_usage_forwards_to_the_window(self):
         from ccnav import usage
-        snap = usage.UsageSnapshot(weekly_percent=24.0, token_cost=168.31, token_percent=12.8)
+        snap = usage.TokenUsage(token_cost=168.31, token_percent=12.8)
         instance = _bare_application()
-        instance._apply_usage(snap)
+        instance._apply_token_usage(snap)
         self.assertEqual(instance.window.usage, snap)
-        instance._apply_usage(None)  # no data hides it
+        instance._apply_token_usage(None)  # disabled hides it
         self.assertIsNone(instance.window.usage)
 
-    def test_usage_loop_fetches_applies_and_stops(self):
+    def test_usage_loop_fetches_only_after_opt_in(self):
         from ccnav import usage
-        snap = usage.UsageSnapshot(weekly_percent=24.0, token_cost=10.0, token_percent=0.76)
+        snap = usage.TokenUsage(token_cost=10.0, token_percent=0.76)
         instance = _bare_application()
         instance._stop = threading.Event()
+        instance._usage_wake = threading.Event()
+        instance._settings = config.with_updates(
+            config.Settings(), ccusage_enabled=True)
         calls = []
 
         def fetch():
@@ -520,9 +523,43 @@ class ApplicationUsageTest(unittest.TestCase):
         worker = threading.Thread(target=instance._usage_loop)
         worker.start()
         worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
         _pump_until(lambda: instance.window.usage != "unset")
         self.assertEqual(len(calls), 1)
         self.assertEqual(instance.window.usage, snap)
+
+    def test_usage_loop_never_calls_the_external_tool_while_disabled(self):
+        instance = _bare_application()
+        instance._stop = threading.Event()
+        instance._usage_wake = threading.Event()
+        instance._settings = config.Settings()  # secure default: disabled
+        calls = []
+
+        def fetch():
+            calls.append(1)
+            return None
+
+        instance._usage_fetch = fetch
+        # Let one disabled iteration post its hidden state, then stop it.
+        instance._usage_wake.set()
+        worker = threading.Thread(target=instance._usage_loop)
+        worker.start()
+        _pump_until(lambda: instance.window.usage is None)
+        instance._stop.set()
+        instance._usage_wake.set()
+        worker.join(timeout=2.0)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(calls, [])
+
+    def test_enabling_the_external_tool_wakes_its_scheduler(self):
+        instance = _bare_application()
+        instance._settings = config.Settings()
+        instance._wake = threading.Event()
+        instance._usage_wake = threading.Event()
+        enabled = config.with_updates(instance._settings, ccusage_enabled=True)
+        instance._on_settings_changed(enabled)
+        self.assertTrue(instance._wake.is_set())
+        self.assertTrue(instance._usage_wake.is_set())
 
 
 class ApplicationSendThreadingTest(unittest.TestCase):
@@ -745,24 +782,24 @@ class MaybeNotifyTest(unittest.TestCase):
 
     def test_the_first_tick_seeds_the_baseline_without_notifying(self):
         instance = self._app(seeded=False, prev={})
-        app.Application._maybe_notify(instance, [self._row()])
+        app.Application._maybe_notify(instance, app.Collected([self._row()], 0))
         self.assertEqual(self.captured, [])
         self.assertTrue(instance._notif_seeded)
         self.assertEqual(instance._prev_status, {"a": model.INPUT_NEEDED})
 
     def test_a_working_to_input_transition_fires_once(self):
         instance = self._app(prev={"a": model.WORKING_SECTION})
-        app.Application._maybe_notify(instance, [self._row(reason="permission_prompt")])
+        app.Application._maybe_notify(instance, app.Collected([self._row(reason="permission_prompt")], 0))
         self.assertEqual(self.captured, [("a", model.INPUT_NEEDED)])
 
     def test_an_unchanged_status_fires_nothing(self):
         instance = self._app(prev={"a": model.INPUT_NEEDED})
-        app.Application._maybe_notify(instance, [self._row(reason="permission_prompt")])
+        app.Application._maybe_notify(instance, app.Collected([self._row(reason="permission_prompt")], 0))
         self.assertEqual(self.captured, [])
 
     def test_notifications_off_fires_nothing_but_updates_the_baseline(self):
         instance = self._app(notifications=False, prev={"a": model.WORKING_SECTION})
-        app.Application._maybe_notify(instance, [self._row(reason="permission_prompt")])
+        app.Application._maybe_notify(instance, app.Collected([self._row(reason="permission_prompt")], 0))
         self.assertEqual(self.captured, [])
         self.assertEqual(instance._prev_status, {"a": model.INPUT_NEEDED})
 
@@ -770,7 +807,7 @@ class MaybeNotifyTest(unittest.TestCase):
         instance = app.Application.__new__(app.Application)
         instance.window = _FakeWindow()
         seen = []
-        instance._maybe_notify = lambda rows: seen.append(rows)
+        instance._maybe_notify = lambda collected: seen.append(collected.rows)
         rows = [self._row()]
         app.Application._apply_rows(instance, app.Collected(rows, 0))
         self.assertEqual(seen, [rows])
@@ -783,3 +820,54 @@ class MaybeNotifyTest(unittest.TestCase):
         app.Application._send_notification_async(instance, self._row(), model.INPUT_NEEDED)
         self.assertTrue(done.wait(2.0), "notify_send was never called")
         self.assertEqual(calls, [("a", model.INPUT_NEEDED)])
+
+
+class NotifyStutterTest(unittest.TestCase):
+    """A tmux query that does not answer is LOSSY, not empty: build_rows drops every
+    row on that socket, which is exactly why Collected.unreachable exists. Rebuilding
+    the notification baseline from such a tick erased it, so the next good tick saw
+    every session as 'new' and re-fired a popup for all of them -- and a stuttered
+    FIRST tick consumed the startup guard against an empty baseline, bursting on
+    tick two. An unreachable tick must change nothing."""
+
+    def _row(self, session_id="a", reason="permission_prompt"):
+        return model.Row(
+            session_id=session_id, socket=SOCK, pane="%1", tmux_session="demo",
+            title="t", state=hookstate.WAITING, reason=reason, message="m",
+            cwd="/proj", updated_at=5,
+        )
+
+    def _app(self, prev=None, seeded=True):
+        instance = app.Application.__new__(app.Application)
+        instance.window = _FakeWindow()
+        instance._settings = config.Settings()
+        instance._prev_status = dict(prev or {})
+        instance._notif_seeded = seeded
+        self.sent = []
+        instance._send_notification_async = lambda r, s: self.sent.append((r.session_id, s))
+        return instance
+
+    def test_a_stutter_does_not_erase_the_baseline_or_re_fire(self):
+        instance = self._app(prev={"a": model.INPUT_NEEDED})
+        # tmux did not answer: no rows came back, but the session is still there.
+        app.Application._apply_rows(instance, app.Collected([], unreachable=1))
+        self.assertEqual(self.sent, [], "a stutter must not notify")
+        self.assertEqual(instance._prev_status, {"a": model.INPUT_NEEDED},
+                         "the baseline must survive a tick that could not see the session")
+        # The session reappears unchanged on the next good tick -> still no notification.
+        app.Application._apply_rows(instance, app.Collected([self._row()], unreachable=0))
+        self.assertEqual(self.sent, [], "an unchanged session must not re-notify")
+
+    def test_a_stuttered_first_tick_does_not_consume_the_startup_guard(self):
+        instance = self._app(prev={}, seeded=False)
+        app.Application._apply_rows(instance, app.Collected([], unreachable=1))
+        self.assertFalse(instance._notif_seeded, "a blind tick cannot be the baseline")
+        # The first tick that can actually see the sessions seeds them silently.
+        app.Application._apply_rows(instance, app.Collected([self._row()], unreachable=0))
+        self.assertEqual(self.sent, [], "the first SEEING tick seeds, it does not burst")
+        self.assertTrue(instance._notif_seeded)
+
+    def test_a_real_transition_on_a_healthy_tick_still_fires(self):
+        instance = self._app(prev={"a": model.WORKING_SECTION})
+        app.Application._apply_rows(instance, app.Collected([self._row()], unreachable=0))
+        self.assertEqual(self.sent, [("a", model.INPUT_NEEDED)])

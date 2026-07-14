@@ -138,11 +138,13 @@ def build_record(
     payload: Dict[str, object], env: Mapping[str, str], now: int,
     previous: Optional[Dict[str, object]] = None,
     find_claude_pid: Optional[Callable[[], int]] = None,
+    find_claude_start_time: Optional[Callable[[int], int]] = None,
 ) -> Optional[Dict[str, object]]:
     pane = env.get("TMUX_PANE")
     socket = tmux_socket_from_env(env)
     kind = "tmux"
     claude_pid = 0
+    claude_start_time = 0
     if not pane or not socket:
         # Not in tmux. The ONLY non-tmux session we can still address is a VSCode
         # extension-hosted one: it has no pane, but its editor window can be
@@ -155,6 +157,8 @@ def build_record(
         claude_pid = find_claude_pid()
         if not claude_pid:
             return None  # cannot locate the owning claude process -> no liveness
+        start_reader = find_claude_start_time or procstat.process_start_time
+        claude_start_time = start_reader(claude_pid)
         kind = "vscode"
         socket = ""
         pane = ""
@@ -238,6 +242,7 @@ def build_record(
         "cwd": cwd,
         "kind": kind,
         "claude_pid": claude_pid,
+        "claude_start_time": claude_start_time,
         "ai_title": ai_title,
         "tmux_socket": socket,
         "tmux_pane": pane,

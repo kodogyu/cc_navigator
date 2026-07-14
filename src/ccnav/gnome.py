@@ -295,5 +295,9 @@ def activate_vscode_session(
     outcome, and its `matched` still warns when two windows share the folder.
     """
     result = activate_vscode_window(folder, run=run, sleep=sleep, timeout=timeout)
-    open_session(session_id, run=run)  # best-effort tab refinement within it
+    # The URI handler acts on whichever VSCode window is currently active. If we
+    # failed to prove one unambiguous target, sending it could open the session in
+    # an unrelated workspace. Fail closed and leave the user's editor untouched.
+    if result.ok and result.matched == 1:
+        open_session(session_id, run=run)
     return result
