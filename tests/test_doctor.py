@@ -413,6 +413,27 @@ class ProbeTmuxConfTest(unittest.TestCase):
             "kill-server must run in the finally after a raise",
         )
 
+    def test_removes_the_private_socket_after_killing_the_server(self):
+        fake = FakeTmux()
+        with mock.patch.object(
+            doctor.paths, "cleanup_tmux_probe_socket"
+        ) as cleanup:
+            doctor.probe_tmux_conf(self.conf, run=fake)
+
+        cleanup.assert_called_once()
+        name = cleanup.call_args.args[0]
+        self.assertTrue(doctor.paths.is_tmux_probe_socket_name(name))
+
+    def test_removes_the_private_socket_even_when_a_step_raises(self):
+        fake = FakeTmux(raise_on="send-keys")
+        with mock.patch.object(
+            doctor.paths, "cleanup_tmux_probe_socket"
+        ) as cleanup:
+            with self.assertRaises(RuntimeError):
+                doctor.probe_tmux_conf(self.conf, run=fake)
+
+        cleanup.assert_called_once()
+
     def test_without_tmux_it_says_it_could_not_run_not_that_its_fine(self):
         # Mutation 8: return ok=True when tmux is absent. "I could not check" is
         # not "it is fine".

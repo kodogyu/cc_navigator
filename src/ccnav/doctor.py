@@ -25,7 +25,7 @@ import shutil
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from . import gnome
+from . import gnome, paths
 from .proc import Runner, run_command
 
 TITLE_FORMAT = "ccnav:#{session_name}"
@@ -238,7 +238,7 @@ _PROBE_PAYLOAD = "a b"
 def _probe_socket_name() -> str:
     # Private, unique, and NEVER "default". os.getpid() keeps concurrent doctors
     # (and the test suite) from colliding on one socket.
-    return "ccnav_probe_%d" % os.getpid()
+    return paths.TMUX_PROBE_SOCKET_PREFIX + str(os.getpid())
 
 
 def probe_tmux_conf(
@@ -292,8 +292,13 @@ def probe_tmux_conf(
         run(base + ["send-keys", "-t", _PROBE_SESSION, "-l", "--", _PROBE_PAYLOAD])
         code, _ = run(base + ["list-sessions"])
     finally:
-        # A leaked server is a bug; this runs even if a step above raised.
-        run(base + ["kill-server"])
+        # A leaked server is a bug; this runs even if a step above raised. tmux
+        # 3.0a may leave the socket inode after kill-server, so remove only this
+        # PID-named, same-user socket after the server has been told to stop.
+        try:
+            run(base + ["kill-server"])
+        finally:
+            paths.cleanup_tmux_probe_socket(socket)
 
     if code == 0:
         return Check(name, True, "the config survives a space sent to a session", "")
