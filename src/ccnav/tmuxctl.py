@@ -7,6 +7,12 @@ from typing import Dict, List, Tuple
 from .proc import Runner, run_command
 
 
+@dataclass(frozen=True)
+class PaneProcess:
+    pid: int
+    command: str
+
+
 def parse_kv_lines(text: str) -> Dict[str, str]:
     """Split each line on its FIRST '='.
 
@@ -60,6 +66,26 @@ def titles_by_pane(socket: str, run: Runner = run_command) -> Dict[str, str]:
     # titles query costs at most a blank title, never a prune decision. Only
     # the sessions query gates pruning, so only it needs the _result variant.
     return _query_result(socket, "#{pane_id}=#{pane_title}", run)[1]
+
+
+def pane_processes_by_pane(
+    socket: str, run: Runner = run_command
+) -> Dict[str, PaneProcess]:
+    """Return each pane's root PID and foreground command in one tmux query."""
+    _ok, raw = _query_result(
+        socket, "#{pane_id}=#{pane_pid}\t#{pane_current_command}", run)
+    processes = {}
+    for pane, value in raw.items():
+        pid_text, separator, command = value.partition("\t")
+        if not separator:
+            continue
+        try:
+            pid = int(pid_text)
+        except ValueError:
+            continue
+        if pid > 0:
+            processes[pane] = PaneProcess(pid=pid, command=command)
+    return processes
 
 
 def select_argvs(socket: str, pane: str) -> List[List[str]]:

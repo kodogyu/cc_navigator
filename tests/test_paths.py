@@ -1,5 +1,6 @@
 import os
 import pathlib
+import socket
 import tempfile
 import unittest
 from unittest import mock
@@ -25,6 +26,54 @@ class StateDirTest(unittest.TestCase):
             self.assertEqual(
                 paths.state_dir(), pathlib.Path("/tmp/cc-navigator-%d" % os.getuid())
             )
+
+
+class TmuxSocketsTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.uid = os.getuid()
+        self.directory = pathlib.Path(self.temp.name) / ("tmux-%d" % self.uid)
+        self.directory.mkdir(mode=0o700)
+        self.open_sockets = []
+        self.addCleanup(self.close_sockets)
+
+    def unix_socket(self, path):
+        opened = socket.socket(socket.AF_UNIX)
+        opened.bind(str(path))
+        self.open_sockets.append(opened)
+        return path
+
+    def close_sockets(self):
+        for opened in self.open_sockets:
+            opened.close()
+
+    def test_lists_same_user_sockets_in_the_standard_tmux_directory(self):
+        default = self.unix_socket(self.directory / "default")
+        (self.directory / "not-a-socket").write_text("x")
+        self.assertEqual(
+            paths.tmux_sockets(
+                env={"TMUX_TMPDIR": self.temp.name}, uid=self.uid),
+            [str(default)],
+        )
+
+    def test_includes_an_inherited_explicit_socket(self):
+        explicit = self.unix_socket(pathlib.Path(self.temp.name) / "explicit.sock")
+        self.assertIn(
+            str(explicit),
+            paths.tmux_sockets(
+                env={"TMUX_TMPDIR": self.temp.name,
+                     "TMUX": str(explicit) + ",123,0"},
+                uid=self.uid),
+        )
+
+    def test_missing_socket_directory_is_empty(self):
+        self.assertEqual(
+            paths.tmux_sockets(
+                env={"TMUX_TMPDIR": str(pathlib.Path(self.temp.name) / "missing")},
+                uid=self.uid),
+            [],
+        )
 
 
 class EnsureStateDirTest(unittest.TestCase):

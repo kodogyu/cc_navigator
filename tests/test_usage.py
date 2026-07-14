@@ -365,3 +365,28 @@ class ExpiredTokenTest(unittest.TestCase):
                                  opener=lambda req, timeout=None: _FakeResponse(PAYLOAD))
         self.assertEqual(err, "")
         self.assertIsNotNone(result)
+
+
+class CombinedReportTest(unittest.TestCase):
+    def test_keeps_both_provider_results_in_named_sections(self):
+        claude = usage.Usage("Max 20x", [usage.Entry("세션", 10, "normal", "")])
+        codex = usage.Usage("Plus", [usage.Entry("주간", 20, "normal", "")])
+        report, error = usage.load_report(
+            claude_load=lambda: (claude, ""),
+            codex_load=lambda: (codex, ""),
+        )
+        self.assertEqual(error, "")
+        self.assertEqual([section.name for section in report.sections],
+                         ["Claude Code", "Codex"])
+        self.assertEqual(report.sections[0].usage.plan, "Max 20x")
+        self.assertEqual(report.sections[1].usage.plan, "Plus")
+
+    def test_one_provider_failure_does_not_hide_the_other(self):
+        codex = usage.Usage("Plus", [usage.Entry("주간", 20, "normal", "")])
+        report, _error = usage.load_report(
+            claude_load=lambda: (None, "Claude 로그인 없음"),
+            codex_load=lambda: (codex, ""),
+        )
+        self.assertIsNone(report.sections[0].usage)
+        self.assertIn("로그인", report.sections[0].error)
+        self.assertIs(report.sections[1].usage, codex)

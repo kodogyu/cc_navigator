@@ -2,7 +2,7 @@
 
 **English** · [한국어](README.ko.md)
 
-> An always-on-top panel that lists every live Claude Code session, flags the ones
+> An always-on-top panel that lists every live Claude Code and Codex session, flags the ones
 > waiting for you, and lets you **jump** to a session's terminal or **type a reply**
 > straight into it — so you never hunt through a dozen windows to find which session
 > a notification came from.
@@ -17,7 +17,7 @@
 
 ## Why
 
-You run many Claude Code sessions across many terminal windows. When one needs
+You run many Claude Code and Codex sessions across many terminal windows. When one needs
 input, a desktop notification fires — but it never says *which* session, and there
 is no quick way to reach it.
 
@@ -50,10 +50,18 @@ cd cc_navigator
 cc-navigator &                 # or ./bin/cc-navigator &
 ```
 
-Then, **to make sessions appear**, enable the hooks once: open **Settings** (the ⚙
-gear) → **통합 (Integration)** → **"Claude Code 훅 설정"**. That merges a tiny hook
-shim into `~/.claude/settings.json`; every Claude Code session started afterward
-shows up. The panel makes **zero** tmux calls until the first hook fires.
+Then, **to make sessions appear**, open **Settings** (the ⚙ gear) → **통합
+(Integration)** and enable the hook for each tool you use:
+
+- **Claude Code 훅 설정** merges into `~/.claude/settings.json`.
+- **Codex 훅 설정** merges into `$CODEX_HOME/hooks.json` (normally
+  `~/.codex/hooks.json`). Open `/hooks` in Codex afterward and trust
+  `cc-navigator-hook` once.
+
+Sessions appear after they start or resume. Codex rows carry a blue **Codex** badge.
+Current Codex releases defer their first lifecycle hook until the first prompt, so the
+panel also discovers the actual Codex process on same-user tmux sockets and shows a calm
+provisional row immediately; the first hook replaces it with the full live state.
 
 **Jump also needs tmux to own the window title** — it is the only address the panel
 has. Put these in `~/.tmux.conf` (the doctor checks them):
@@ -82,7 +90,7 @@ working directory, last prompt, a reply box, and a jump button.
 
 - 🔴 **red** — waiting on you (permission, question, plan). A title-bar badge counts these.
 - 🟢 **green** — finished its turn / idle. Click it to mark seen (a green check ✓).
-- ↻ **spinning** — Claude is working. A working session that spawned **subagents**
+- ↻ **spinning** — the agent is working. A working session that spawned **subagents**
   shows a calm **blue dot** with a second spinner behind it.
 
 Switch views with the **Sort by** dropdown:
@@ -109,9 +117,9 @@ it along, detach to restore).
 (needs input, or finished). On by default — toggle it, opacity, colour, font, and
 more in **Settings**.
 
-**Check your usage:** the button at the bottom right (**"사용량 확인"**) shows the
-logged-in account's plan and its limits — session (5-hour), weekly, and per-model
-weekly — each with a bar, a percentage, and when it resets. It reads the OAuth token
-from `~/.claude/.credentials.json` and calls Anthropic's **undocumented internal**
-`/api/oauth/usage` endpoint (the one Claude Code's own `/usage` uses), so it may stop
-working after a Claude Code update — the popover then says so and the panel carries on.
+**Check your usage:** the bottom-right **"사용량 확인"** button shows separate Claude
+Code and Codex sections, with plan, limit bars, percentages, and reset times. One
+provider failing never hides the other. Claude Code still uses Anthropic's
+**undocumented internal** `/api/oauth/usage` endpoint with the token from
+`~/.claude/.credentials.json`. Codex uses the local `codex app-server` method
+`account/rateLimits/read`, so cc_navigator never reads or sends the Codex auth token.

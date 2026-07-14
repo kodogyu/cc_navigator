@@ -90,6 +90,21 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(result, (hookstate.WAITING, "notification"))
         self.assertNotEqual(result[1], hookstate.STOP_IDLE)
 
+    def test_codex_permission_request_waits(self):
+        self.assertEqual(
+            hookstate.classify({"hook_event_name": "PermissionRequest"}),
+            (hookstate.WAITING, "permission"),
+        )
+
+    def test_codex_request_user_input_waits(self):
+        self.assertEqual(
+            hookstate.classify({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "request_user_input",
+            }),
+            (hookstate.WAITING, "question"),
+        )
+
     def test_subagent_events_carry_no_main_state(self):
         # SubagentStart/Stop drive the separate running-subagent count (see
         # hook.build_record); they never change the MAIN agent's state, so a red

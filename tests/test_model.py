@@ -30,6 +30,20 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(rows[0].title, "✳ 작업 중")
         self.assertEqual(rows[0].window_title, "ccnav:demo")
         self.assertTrue(rows[0].waiting)
+        self.assertEqual(rows[0].provider, "claude")
+
+    def test_codex_provider_is_carried_to_the_row(self):
+        rec = dict(record("a", "%1"), provider="codex")
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].provider, "codex")
+
+    def test_provisional_is_strictly_carried_to_the_row(self):
+        provisional = dict(record("a", "%1"), provider="codex", provisional=True)
+        rows = model.build_rows([provisional], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertTrue(rows[0].provisional)
+        not_boolean = dict(record("b", "%2"), provisional="true")
+        rows = model.build_rows([not_boolean], {SOCK: {"%2": "demo"}}, {SOCK: {}})
+        self.assertFalse(rows[0].provisional)
 
     def test_record_whose_pane_is_gone_produces_no_row(self):
         rows = model.build_rows([record("a", "%9")], {SOCK: {"%1": "demo"}}, {SOCK: {}})

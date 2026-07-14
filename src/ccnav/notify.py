@@ -12,7 +12,7 @@ from typing import Callable, Dict, List, NamedTuple, Optional, Sequence, Tuple
 
 from . import model, proc
 
-# The two "your turn" states. 'working' never notifies -- Claude is still busy.
+# The two "your turn" states. 'working' never notifies -- the agent is still busy.
 NOTIFY_STATUSES = (model.INPUT_NEEDED, model.REPORTED)
 
 _STATUS_GLYPH = {model.INPUT_NEEDED: "🔴", model.REPORTED: "🟢"}
@@ -57,6 +57,8 @@ def notification_for(row: "model.Row", status: str) -> Notification:
     glyph = _STATUS_GLYPH.get(status, "")
     name = _STATUS_NAME.get(status, status)
     title = row.title.strip() or row.session_id
+    if row.provider == "codex":
+        title = "Codex · " + title
     summary = ("%s %s" % (glyph, title)).strip()
     detail = _shorten((row.message or "").strip() or (row.last_prompt or "").strip(), _DETAIL_LIMIT)
     body = "%s — %s" % (name, detail) if detail else name

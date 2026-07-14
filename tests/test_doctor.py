@@ -295,6 +295,24 @@ class ClaudeHooksTest(unittest.TestCase):
             self.assertFalse(doctor.check_claude_hooks(junk, HOOK).ok)
 
 
+class CodexHooksTest(unittest.TestCase):
+    def test_detects_the_provider_qualified_hook(self):
+        settings = settings_with_hook(command=HOOK + " --provider codex")
+        check = doctor.check_codex_hooks(settings, HOOK)
+        self.assertTrue(check.ok)
+        self.assertIn("/hooks", check.detail)
+
+    def test_plain_claude_command_does_not_count_as_codex(self):
+        self.assertFalse(doctor.check_codex_hooks(settings_with_hook(), HOOK).ok)
+
+    def test_at_least_one_provider_satisfies_the_required_gate(self):
+        good = doctor.Check("claude", True, "", "", required=False)
+        bad = doctor.Check("codex", False, "", "", required=False)
+        self.assertTrue(doctor.check_any_agent_hooks(good, bad).ok)
+        self.assertTrue(doctor.check_any_agent_hooks(bad, good).ok)
+        self.assertFalse(doctor.check_any_agent_hooks(bad, bad).ok)
+
+
 # --------------------------------------------------------------------------
 # probe_tmux_conf -- the verdict (driven by a fake runner, no real tmux)
 # --------------------------------------------------------------------------
@@ -462,6 +480,8 @@ class RunAllTest(unittest.TestCase):
             "tmux.conf live probe",
             "tmux.conf set-titles",
             "claude hooks",
+            "codex hooks",
+            "session hooks",
             "gnome shell eval",
         ):
             self.assertIn(expected, names)

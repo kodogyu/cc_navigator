@@ -21,6 +21,8 @@ class Row:
     updated_at: int
     last_prompt: str = ""
     subagent_ids: Tuple[str, ...] = ()
+    provider: str = "claude"
+    provisional: bool = False
 
     @property
     def waiting(self) -> bool:
@@ -111,6 +113,8 @@ def build_rows(
                 updated_at=_as_int(rec.get("updated_at", 0)),
                 last_prompt=str(rec.get("last_prompt") or ""),
                 subagent_ids=_subagent_ids(rec.get("subagent_ids")),
+                provider=("codex" if rec.get("provider") == "codex" else "claude"),
+                provisional=(rec.get("provisional") is True),
             )
         )
     rows.sort(key=sort_key)
@@ -136,7 +140,7 @@ STATUS_SECTIONS = (INPUT_NEEDED, REPORTED, WORKING_SECTION)
 
 
 def status_key(row: "Row") -> str:
-    """Which Sort-by-Status section a row belongs to: 'input' (Claude is
+    """Which Sort-by-Status section a row belongs to: 'input' (the agent is
     blocking on the user), 'reported' (a finished Stop turn, idle), or
     'working'. Same three-way split the status dot/spinner uses."""
     if not row.waiting:

@@ -103,3 +103,37 @@ class MissingBinaryTest(unittest.TestCase):
         code, out = proc.run_command(["/tmp"])
         self.assertNotEqual(code, 0)
         self.assertEqual(out, "")
+
+
+class JsonLineRequestTest(unittest.TestCase):
+    def test_keeps_stdin_open_until_the_matching_response_arrives(self):
+        script = (
+            "import json,sys; "
+            "first=json.loads(sys.stdin.readline()); "
+            "print(json.dumps({'id':first['id'],'result':{}}), flush=True); "
+            "sys.stdin.readline(); second=json.loads(sys.stdin.readline()); "
+            "print(json.dumps({'method':'notice'}), flush=True); "
+            "print(json.dumps({'id':2,'result':{'ok':True}}), flush=True)"
+        )
+        code, payload = proc.request_json_line(
+            ["/usr/bin/python3", "-u", "-c", script],
+            [{"id": 1}, {"method": "initialized"}, {"id": 2}],
+            response_id=2, timeout=2.0, ready_id=1,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(payload["result"], {"ok": True})
+
+    def test_timeout_is_bounded_and_kills_the_child(self):
+        started = time.monotonic()
+        code, payload = proc.request_json_line(
+            ["sleep", "10"], [{"id": 1}], response_id=2, timeout=0.2,
+        )
+        self.assertEqual((code, payload), (124, None))
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_missing_binary_is_nonzero_not_an_exception(self):
+        code, payload = proc.request_json_line(
+            ["not-a-real-json-server-xyz"], [], response_id=2, timeout=0.1,
+        )
+        self.assertNotEqual(code, 0)
+        self.assertIsNone(payload)

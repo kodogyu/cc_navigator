@@ -4,6 +4,36 @@ cc_navigator has no build artifact: **Settings ⚙ → 업데이트 확인** fas
 checkout to the latest `master` and restarts. So this file, not a download page, is how
 you find out what changed — and what a new version starts doing on your machine.
 
+## 0.3.0-beta — 2026-07-14
+
+### New
+
+- **Codex sessions now appear alongside Claude Code sessions.** Settings → Integration
+  has a separate Codex hook toggle that safely merges lifecycle hooks into
+  `$CODEX_HOME/hooks.json` (normally `~/.codex/hooks.json`). Codex requires one explicit
+  trust review in `/hooks`; sessions then report working, approval/question waits,
+  completion, and subagent activity through the same tmux-backed model. A blue Codex
+  badge distinguishes their rows. Because Codex currently defers its first lifecycle
+  hook until the first prompt, cc_navigator also discovers the actual Codex process in
+  each tmux pane and shows a provisional row immediately at TUI startup.
+- **Usage now shows both providers independently.** Claude Code retains its existing
+  account-limit request. Codex limits come from the local authenticated app-server's
+  `account/rateLimits/read` method, so cc_navigator never handles Codex credentials.
+  The two loads run concurrently, and a failure or missing login on one side no longer
+  hides the other provider's result.
+
+### Fixed
+
+- Codex's Braille loading glyph in the pane title now animates locally at the same
+  80 ms cadence as the working arrow. Normal one-second tmux polling still handles
+  session data, but no longer makes the title spinner jump once per poll.
+
+### Compatibility
+
+- Existing state files without a provider remain Claude Code rows.
+- The hook installer still preserves unrelated commands and creates a raw backup before
+  changing either provider's JSON file.
+
 ## 0.2.1-beta — 2026-07-14
 
 ### Fixed

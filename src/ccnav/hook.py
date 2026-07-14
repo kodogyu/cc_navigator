@@ -1,4 +1,4 @@
-"""Entry point invoked by Claude Code hooks.
+"""Entry point invoked by Claude Code and Codex hooks.
 
 Contract: write one state file, exit 0. Never block, never raise, never make
 Claude Code wait on anything. cc_navigator not running is not an error.
@@ -69,6 +69,7 @@ def tmux_socket_from_env(env: Mapping[str, str]) -> Optional[str]:
 def build_record(
     payload: Dict[str, object], env: Mapping[str, str], now: int,
     previous: Optional[Dict[str, object]] = None,
+    provider: str = "claude",
 ) -> Optional[Dict[str, object]]:
     pane = env.get("TMUX_PANE")
     socket = tmux_socket_from_env(env)
@@ -134,6 +135,7 @@ def build_record(
 
     return {
         "session_id": session_id,
+        "provider": "codex" if provider == "codex" else "claude",
         "cwd": cwd,
         "tmux_socket": socket,
         "tmux_pane": pane,
@@ -146,7 +148,9 @@ def build_record(
     }
 
 
-def main() -> int:
+def main(argv=None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    provider = "codex" if "--provider" in argv and "codex" in argv else "claude"
     try:
         payload = json.load(sys.stdin)
     except Exception:
@@ -172,7 +176,9 @@ def main() -> int:
         state_dir = paths.ensure_state_dir()
         session_id = str(payload.get("session_id") or "")
         previous = statestore.read_one(state_dir, session_id)
-        record = build_record(payload, os.environ, int(time.time()), previous)
+        record = build_record(
+            payload, os.environ, int(time.time()), previous, provider=provider
+        )
         if record is None:
             return 0
         statestore.write(state_dir, record)

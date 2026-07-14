@@ -4,11 +4,11 @@ from ccnav import hookstate, model, notify
 
 
 def row(session_id="a", state=hookstate.WAITING, reason="permission_prompt",
-        message="Allow npm test?", last_prompt="", title="t-a"):
+        message="Allow npm test?", last_prompt="", title="t-a", provider="claude"):
     return model.Row(
         session_id=session_id, socket="/tmp/s", pane="%1", tmux_session="demo",
         title=title, state=state, reason=reason, message=message,
-        cwd="/proj", updated_at=1, last_prompt=last_prompt,
+        cwd="/proj", updated_at=1, last_prompt=last_prompt, provider=provider,
     )
 
 
@@ -70,6 +70,11 @@ class NotificationForTest(unittest.TestCase):
     def test_no_detail_leaves_just_the_status_name(self):
         n = notify.notification_for(reported_row(message="", last_prompt=""), model.REPORTED)
         self.assertEqual(n.body, "보고 완료")
+
+    def test_codex_notification_names_the_provider(self):
+        n = notify.notification_for(
+            input_row(provider="codex"), model.INPUT_NEEDED)
+        self.assertEqual(n.summary, "🔴 Codex · t-a")
 
     def test_a_long_detail_is_truncated(self):
         n = notify.notification_for(input_row(message="x" * 500), model.INPUT_NEEDED)

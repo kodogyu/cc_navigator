@@ -61,6 +61,24 @@ class QueryTest(unittest.TestCase):
         )
         self.assertEqual(calls[0][-1], "#{pane_id}=#{pane_title}")
 
+    def test_pane_processes_carry_pid_and_foreground_command(self):
+        calls = []
+
+        def fake_run(argv):
+            calls.append(list(argv))
+            return 0, "%0=123\tnode\n%1=456\tbash\n"
+
+        result = tmuxctl.pane_processes_by_pane("/tmp/s", run=fake_run)
+        self.assertEqual(result["%0"], tmuxctl.PaneProcess(123, "node"))
+        self.assertEqual(result["%1"], tmuxctl.PaneProcess(456, "bash"))
+        self.assertEqual(
+            calls[0][-1], "#{pane_id}=#{pane_pid}\t#{pane_current_command}")
+
+    def test_pane_processes_skip_malformed_pids(self):
+        result = tmuxctl.pane_processes_by_pane(
+            "/tmp/s", run=lambda a: (0, "%0=nope\tnode\n%1=0\tnode\n"))
+        self.assertEqual(result, {})
+
     def test_nonzero_exit_yields_empty_dict_even_with_output(self):
         # A dead tmux socket may still print a line to stdout. The exit-code
         # guard is what makes "no server" mean "no panes"; without it a dead

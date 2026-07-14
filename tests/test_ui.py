@@ -44,12 +44,14 @@ def pump_briefly(ms=50):
 
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
-        last_prompt="", pane="%1", socket="/tmp/s", updated_at=1, subagent_ids=()):
+        last_prompt="", pane="%1", socket="/tmp/s", updated_at=1, subagent_ids=(),
+        provider="claude", provisional=False):
     return model.Row(
         session_id=session_id, socket=socket, pane=pane, tmux_session="demo",
         title=title, state=state, reason=reason,
         message=message, cwd=cwd, updated_at=updated_at, last_prompt=last_prompt,
-        subagent_ids=tuple(subagent_ids),
+        subagent_ids=tuple(subagent_ids), provider=provider,
+        provisional=provisional,
     )
 
 
@@ -109,6 +111,24 @@ class PrimaryLineTest(unittest.TestCase):
         self.assertEqual(
             ui.primary_line(row(title="myhost.local"), hostname="myhost.local"), "demo"
         )
+
+    def test_codex_title_markup_has_a_visible_provider_badge(self):
+        markup = ui._title_markup(row(provider="codex", title="작업 중"))
+        self.assertIn("Codex", markup)
+        self.assertIn("작업 중", markup)
+
+    def test_codex_title_markup_can_replace_only_the_sampled_spinner_frame(self):
+        markup = ui._title_markup(
+            row(provider="codex", title="⠼ cc_navigator"), codex_spinner_frame="⠋")
+        self.assertIn("⠋ cc_navigator", markup)
+        self.assertNotIn("⠼", markup)
+
+    def test_codex_spinner_phase_is_not_a_visible_row_signature_change(self):
+        first = row(provider="codex", title="⠼ cc_navigator")
+        second = row(provider="codex", title="⠴ cc_navigator")
+        stopped = row(provider="codex", title="cc_navigator")
+        self.assertEqual(ui._row_signature(first), ui._row_signature(second))
+        self.assertNotEqual(ui._row_signature(first), ui._row_signature(stopped))
 
 
 class ComposeStatusTest(unittest.TestCase):
@@ -495,6 +515,21 @@ class NavigatorWindowTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_working_codex_title_spinner_advances_between_session_polls(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        window.show_all()
+        try:
+            window.set_rows([row(
+                provider="codex", title="⠼ cc_navigator", session_id="codex",
+                state=hookstate.WORKING)])
+            label = self._first_row(window).ccnav_title
+            before = label.get_label()
+            pump_until(lambda: label.get_label() != before)
+            self.assertTrue(label.ccnav_codex_spinning)
+            self.assertIn("cc_navigator", label.get_label())
+        finally:
+            window.destroy()
+
     def _dot_markup(self, child):
         for lbl in self._widgets_of_type(child, Gtk.Label):
             if "●" in lbl.get_label():
@@ -655,6 +690,20 @@ class NavigatorWindowTest(unittest.TestCase):
         self.assertEqual(
             ui.front_kind(row(state=hookstate.WAITING, reason="idle",
                               subagent_ids=("s1",))), "reported")
+
+    def test_a_provisional_codex_pane_uses_a_calm_blue_dot(self):
+        provisional = row(
+            provider="codex", provisional=True, state=hookstate.WORKING)
+        self.assertEqual(ui.front_kind(provisional), "orchestrating")
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([provisional])
+            child = self._first_row(window)
+            self.assertFalse(self._front_is_spinner(child))
+            self.assertIn("#3584e4", self._dot_markup(child))
+            self.assertFalse(self._back(child).ccnav_subagent)
+        finally:
+            window.destroy()
 
     def test_a_working_row_with_a_subagent_shows_a_calm_dot_over_a_back_spinner(self):
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
@@ -2013,6 +2062,25 @@ class SettingsUiTest(unittest.TestCase):
         finally:
             window.destroy()
 
+    def test_codex_hook_toggle_uses_its_own_hooks_file(self):
+        import tempfile, pathlib
+        from ccnav import config, wiring
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None, settings=config.Settings())
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        path = pathlib.Path(tmp.name) / ".codex" / "hooks.json"
+        window._wiring_codex_hooks_path = path
+        try:
+            window._set_codex_hooks(True)
+            self.assertTrue(wiring.hooks_installed(
+                window._codex_hook_command(), path, wiring.CODEX_RECOMMENDED_HOOKS))
+            window._set_codex_hooks(False)
+            self.assertFalse(wiring.hooks_installed(
+                window._codex_hook_command(), path, wiring.CODEX_RECOMMENDED_HOOKS))
+        finally:
+            window.destroy()
+
     def test_settings_dialog_survives_a_corrupt_autostart_file(self):
         # A non-UTF-8 autostart .desktop makes autostart_enabled's reader raise
         # if unguarded; make_toggle must swallow it so the ENTIRE dialog still
@@ -2181,6 +2249,29 @@ class UsageButtonTest(unittest.TestCase):
             window._usage_button.emit("clicked")
             pump_until(window._usage_button.get_sensitive)
             self.assertIn("인증이 만료되었습니다", self._popover_text(window))
+        finally:
+            window.destroy()
+
+    def test_combined_report_renders_codex_even_when_claude_fails(self):
+        from ccnav import usage
+        report = usage.UsageReport([
+            usage.UsageSection("Claude Code", None, "Claude 로그인 없음"),
+            usage.UsageSection("Codex", usage.Usage("Plus", [
+                usage.Entry("주간", 23, "normal", ""),
+            ]), ""),
+        ])
+        window = ui.NavigatorWindow(
+            on_jump=lambda r: None, on_send=lambda r, t: None,
+            usage_load=lambda: (report, ""))
+        try:
+            window._usage_button.emit("clicked")
+            pump_until(window._usage_button.get_sensitive)
+            text = self._popover_text(window)
+            self.assertIn("Claude Code", text)
+            self.assertIn("Claude 로그인 없음", text)
+            self.assertIn("Codex", text)
+            self.assertIn("Plus", text)
+            self.assertIn("23%", text)
         finally:
             window.destroy()
 

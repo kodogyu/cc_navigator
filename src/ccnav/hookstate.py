@@ -1,4 +1,4 @@
-"""Pure mapping from a Claude Code hook event to a session state.
+"""Pure mapping from a Claude Code/Codex hook event to a session state.
 
 Kept free of I/O so the whole state machine is testable from fixtures.
 """
@@ -51,10 +51,17 @@ def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:
             reason = "notification"
         return (WAITING, reason)
 
+    # Codex emits PermissionRequest before it pauses for an approval. Claude
+    # represents the same transition as a permission_prompt Notification.
+    if event == "PermissionRequest":
+        return (WAITING, "permission")
+
     if event == "PreToolUse":
         tool = str(payload.get("tool_name") or "")
         if tool in _WAITING_TOOLS:
             return (WAITING, _WAITING_TOOLS[tool])
+        if tool == "request_user_input":
+            return (WAITING, "question")
         return None
 
     if event == "PostToolUse":
