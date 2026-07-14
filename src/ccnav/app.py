@@ -25,7 +25,8 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import config, gnome, model, notify, paths, proc, procstat, statestore, tmuxctl, ui, usage, wiring  # noqa: E402
+from . import (codexsession, config, gnome, model, notify, paths, proc,
+               procstat, statestore, tmuxctl, ui, usage, wiring)  # noqa: E402
 
 # Fallback only: the live interval comes from self._settings.poll_seconds. Kept
 # so a bare Application built in a test (which does not load config) still polls
@@ -92,15 +93,25 @@ def collect_rows(
     sessions_for: Callable[[str], "tuple"] = tmuxctl.sessions_by_pane_result,
     titles_for: Callable[[str], Dict[str, str]] = tmuxctl.titles_by_pane,
     prune: Callable[..., int] = statestore.prune,
+    socket_candidates: Callable[[], List[str]] = paths.tmux_sockets,
+    pane_processes_for: Callable[[str], Dict[str, tmuxctl.PaneProcess]] = (
+        tmuxctl.pane_processes_by_pane),
+    find_codex: Callable[[int], Optional[codexsession.CodexProcess]] = (
+        codexsession.find_codex_process),
     live_pids_for: Callable[[Set[object]], Set[object]] = procstat.live_claude_pids,
 ) -> Collected:
     records = read_all(state_dir)
-    sockets = sorted({str(r.get("tmux_socket") or "") for r in records if r.get("tmux_socket")})
+    recorded_sockets = {
+        str(r.get("tmux_socket") or "") for r in records if r.get("tmux_socket")
+    }
+    # Codex currently emits its first lifecycle hook only after the first
+    # submitted prompt, so also inspect same-user tmux sockets for a real Codex
+    # process. Claude/VSCode records continue to provide their own addresses.
+    sockets = sorted(recorded_sockets | set(socket_candidates()))
     observed_pids = _vscode_pids(records)
     if not sockets and not observed_pids:
-        # Nothing to observe: no tmux socket and no VSCode session. Return before
-        # touching tmux or prune -- an empty directory must cost nothing and must
-        # not have every state file judged against an empty live set.
+        # Nothing to observe: no tmux candidate and no VSCode session. Return
+        # before touching tmux or prune -- an empty directory must cost nothing.
         return Collected([], 0)
     # sessions_for reports (ok, panes): ok is False when tmux did not answer
     # (dead socket, or a timed-out slow one). Only sockets that DID answer may
@@ -109,6 +120,22 @@ def collect_rows(
     sessions = {socket: panes for socket, (_ok, panes) in results.items()}
     observed = {socket for socket, (ok, _panes) in results.items() if ok}
     titles = {socket: titles_for(socket) for socket in sockets}
+    # Codex's first SessionStart is deferred until the first submitted prompt in
+    # current TUI releases.  Discover a real Codex process before that hook and
+    # append a non-persistent candidate record.  model._newest_per_pane chooses
+    # it over stale state from an older command, then chooses the first real hook
+    # over it by timestamp.  Short-listing on tmux's foreground command avoids
+    # walking unrelated pane process trees.
+    for socket in observed:
+        for pane, pane_process in pane_processes_for(socket).items():
+            command = pane_process.command.lower()
+            if (command not in ("node", "nodejs", "codex")
+                    and not command.startswith("codex")):
+                continue
+            process = find_codex(pane_process.pid)
+            if process is not None and pane in sessions.get(socket, {}):
+                records.append(codexsession.provisional_record(socket, pane, process))
+
     # Kernel liveness for the VSCode sessions: same "observed vs live" split tmux
     # uses, so prune never reaps a pid it did not actually check this tick.
     live_pids = live_pids_for(observed_pids)

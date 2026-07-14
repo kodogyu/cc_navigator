@@ -1,6 +1,6 @@
 #!/bin/sh
 # Put cc-navigator on PATH: symlink the launcher into ~/.local/bin. Idempotent.
-# The app-list launcher, login autostart, and Claude Code hook wiring are NOT
+# The app-list launcher, login autostart, and agent hook wiring are NOT
 # done here -- they are toggles inside the app's settings (see wiring.py).
 set -e
 here=$(cd "$(dirname "$0")" && pwd)

@@ -30,7 +30,7 @@ _CORNER_LABELS = {
 
 SECONDARY_LIMIT = 80
 EMPTY_HINT = (
-    "세션이 없습니다. tmux 안에서 실행 중이고 훅이 설치되었는지 "
+    "세션이 없습니다. tmux 안에서 실행 중이고 Claude/Codex 훅이 설치되었는지 "
     "확인하세요 (bin/cc-navigator-doctor)."
 )
 EVAL_UNAVAILABLE_HINT = "GNOME Shell Eval을 쓸 수 없어 '이동'이 비활성화되었습니다."
@@ -100,8 +100,8 @@ def _oneline(text: str) -> str:
 
 def dot_state(row: model.Row) -> str:
     """Which status indicator a row shows:
-    - 'working'  -- Claude is running a turn (shown as a spinner);
-    - 'input'    -- Claude is blocking on the user, a permission/question/plan
+    - 'working'  -- the agent is running a turn (shown as a spinner);
+    - 'input'    -- the agent is blocking on the user, a permission/question/plan
                     prompt (a red dot);
     - 'reported' -- Claude finished its turn and is idle, not blocking (green).
 
@@ -122,6 +122,12 @@ def front_kind(row: model.Row) -> str:
     that is the whole point of the two-icon split. A red 'input' wait or a green
     'reported' dot is unchanged and still shown in front, even with subagents."""
     base = dot_state(row)
+    if base == "working" and row.provider == "codex" and row.provisional:
+        # A discovered, pre-prompt Codex pane is ready but has not started a
+        # turn. Keep it visible with a calm blue dot; the first real hook clears
+        # provisional and swaps this to the working arrow without a false
+        # completion/input notification.
+        return "orchestrating"
     if base == "working" and row.subagent_active:
         return "orchestrating"
     return base
@@ -172,6 +178,16 @@ _WORKING_COLOUR = (0.208, 0.518, 0.894)  # #3584e4
 _WORKING_SIZE = 16
 _WORKING_PERIOD_MS = 80
 _WORKING_STEP = 0.30  # radians per tick
+
+# Codex prefixes its tmux pane title with a Braille spinner while it is
+# working (for example ``⠼ cc_navigator``).  pane_title arrives through the
+# normal session poll, which is intentionally only once a second by default;
+# rendering that sampled glyph verbatim therefore makes it appear to jump even
+# though the Cairo working arrow beside it is smooth.  Recognise the native
+# sequence and animate only that one character locally at the same cadence as
+# the arrow.  This avoids turning an inexpensive session poll into a 12.5 Hz
+# tmux query just for a cosmetic frame.
+_CODEX_TITLE_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
 
 
 def _draw_reload_spinner_at(cr, cx: float, cy: float, size: float, angle: float,
@@ -232,7 +248,7 @@ def _spin_tick(area) -> bool:
 
 
 def _build_working_arrow() -> Gtk.DrawingArea:
-    """Two curved arrows that spin while Claude works. A self-cleaning GLib
+    """Two curved arrows that spin while an agent works. A self-cleaning GLib
     timeout advances the rotation and drops itself the moment the widget is no
     longer inside a list -- covering BOTH the row being removed AND the indicator
     being swapped out for a dot in place. The current angle is exposed for tests."""
@@ -313,8 +329,31 @@ def _app_icon_pixbuf(size):
 # The per-field markup, shared by _build_row (first render) and _update_row
 # (in-place refresh). Keeping them in one place means a rebuilt row and an
 # updated row can never render the same field two different ways.
-def _title_markup(row: model.Row) -> str:
-    return "<b>%s</b>" % GLib.markup_escape_text(_oneline(primary_line(row)))
+def _codex_title_spinner(row: model.Row):
+    """Return ``(sampled_frame, title_without_frame)`` for a spinning Codex
+    pane title, else ``None``.  Requiring both the Codex provider and one of the
+    known native frames avoids treating an arbitrary Braille title as animated.
+    """
+    if row.provider != "codex":
+        return None
+    title = _oneline(primary_line(row))
+    if not title or title[0] not in _CODEX_TITLE_SPINNER_FRAMES:
+        return None
+    if len(title) > 1 and title[1] != " ":
+        return None
+    return title[0], title[1:].lstrip()
+
+
+def _title_markup(row: model.Row, codex_spinner_frame: str = None) -> str:
+    line = _oneline(primary_line(row))
+    spinner = _codex_title_spinner(row)
+    if spinner is not None and codex_spinner_frame is not None:
+        _sampled, rest = spinner
+        line = codex_spinner_frame + ((" " + rest) if rest else "")
+    title = "<b>%s</b>" % GLib.markup_escape_text(line)
+    if row.provider == "codex":
+        return ('<span foreground="#3584e4"><b>Codex</b></span>  ' + title)
+    return title
 
 
 def _secondary_markup(row: model.Row) -> str:
@@ -397,9 +436,16 @@ def _row_signature(row: model.Row):
     the hook never bumps a timestamp without also changing state or reason. The
     subagent set is included: a SubagentStart/Stop can change ONLY that field
     (main state carried forward), and the second icon must still refresh."""
-    return (row.session_id, row.socket, row.pane, row.tmux_session, row.title,
+    # Codex changes only the leading Braille frame many times per second.  Once
+    # local animation owns that frame, its sampled phase is not a visible data
+    # change and must not trigger a row refresh (which would reset/jump it).
+    codex_spinner = _codex_title_spinner(row)
+    title_signature = ((True, codex_spinner[1]) if codex_spinner is not None
+                       else (False, row.title))
+    return (row.session_id, row.socket, row.pane, row.tmux_session, title_signature,
             row.state, row.reason, row.message, row.cwd, row.last_prompt,
-            row.subagent_ids, row.kind, row.claude_pid)
+            row.subagent_ids, row.provider, row.provisional,
+            row.kind, row.claude_pid)
 
 
 # Drag targets (within this app only). A dragged SESSION reorders a row / moves it
@@ -509,7 +555,7 @@ class NavigatorWindow(Gtk.Window):
         self._on_send = on_send
         self._on_settings_changed = on_settings_changed
         # Injected so tests drive the usage popover without touching the network.
-        self._usage_load = usage_load or usage.load
+        self._usage_load = usage_load or usage.load_report
         self._usage_in_flight = False
         self._settings = settings or config.Settings()
         # Section metadata for the two list views, recomputed on each set_rows
@@ -539,6 +585,7 @@ class NavigatorWindow(Gtk.Window):
         self._wiring_apps_dir = None      # None -> wiring's default (~/.local/share)
         self._wiring_autostart_dir = None
         self._wiring_settings_path = None  # None -> ~/.claude/settings.json
+        self._wiring_codex_hooks_path = None  # None -> $CODEX_HOME/hooks.json
         # Seams so tests drive the update button without git or re-exec.
         self._updater_update = updater.update
         self._updater_restart = updater.restart
@@ -727,12 +774,11 @@ class NavigatorWindow(Gtk.Window):
         sort_row.pack_start(sort_combo, False, False, 0)
         sort_row.pack_start(auto_sort, False, False, 0)
 
-        # The account's plan limits, on demand: the bottom button fetches them and shows
-        # them in a popover above itself. Fetching is a network call, so it never runs
-        # on the GTK main thread (see _on_usage_clicked).
+        # Both agent accounts' plan limits, on demand. Claude performs a network
+        # request and Codex starts its local app-server, so neither runs on GTK.
         self._usage_button = Gtk.Button(label="사용량 확인")
         self._usage_button.set_relief(Gtk.ReliefStyle.NONE)
-        self._usage_button.set_tooltip_text("로그인된 계정의 사용량(한도) 보기")
+        self._usage_button.set_tooltip_text("Claude Code와 Codex 계정의 사용량(한도) 보기")
         # Bottom-RIGHT and only as wide as it needs to be: a full-width button ate a
         # third of the panel's bottom edge for a control the user presses rarely.
         self._usage_button.set_halign(Gtk.Align.END)
@@ -1261,9 +1307,7 @@ class NavigatorWindow(Gtk.Window):
         return False
 
     def _on_usage_clicked(self, _button) -> None:
-        """Open the popover on "불러오는 중…" and fetch off the GTK thread (it is a
-        network call). The in-flight flag makes a second click a no-op -- otherwise a
-        double click would fire two requests and race to fill the same popover."""
+        """Open on "불러오는 중…" and load both providers off the GTK thread."""
         if self._usage_popover.get_visible():
             self._usage_popover.popdown()  # a second press on the button toggles it shut
             return
@@ -1290,22 +1334,14 @@ class NavigatorWindow(Gtk.Window):
         self._render_usage(result, error)
         return False  # one-shot idle source
 
-    def _render_usage(self, result, message: str) -> None:
-        """Rebuild the popover body: the plan, then one row per limit (label, bar,
-        percent, reset). A failure -- including an endpoint we can no longer read --
-        is just a message, so the panel never breaks on it."""
-        for child in self._usage_body.get_children():
-            self._usage_body.remove(child)
+    def _usage_message(self, message: str) -> None:
+        label = Gtk.Label(xalign=0.0)
+        label.set_line_wrap(True)
+        label.set_max_width_chars(32)
+        label.set_text(message)
+        self._usage_body.pack_start(label, False, False, 0)
 
-        if result is None:
-            label = Gtk.Label(xalign=0.0)
-            label.set_line_wrap(True)
-            label.set_max_width_chars(32)
-            label.set_text(message)
-            self._usage_body.pack_start(label, False, False, 0)
-            self._usage_body.show_all()
-            return
-
+    def _usage_rows(self, result) -> None:
         if result.plan:
             plan = Gtk.Label(xalign=0.0)
             plan.set_markup("<b>%s</b>" % GLib.markup_escape_text(result.plan))
@@ -1323,8 +1359,6 @@ class NavigatorWindow(Gtk.Window):
             bar = Gtk.LevelBar.new_for_interval(0, 100)
             bar.set_value(max(0, min(100, entry.percent)))
             bar.set_size_request(220, 8)
-            # The endpoint's own severity drives the colour, so a limit it considers
-            # hot looks hot here too (GTK ships high/full offsets on a LevelBar).
             if entry.severity in ("warning", "high"):
                 bar.add_offset_value(Gtk.LEVEL_BAR_OFFSET_HIGH, 100)
             elif entry.severity in ("critical", "exceeded"):
@@ -1340,6 +1374,34 @@ class NavigatorWindow(Gtk.Window):
                     % GLib.markup_escape_text(reset))
                 row.pack_start(hint, False, False, 0)
             self._usage_body.pack_start(row, False, False, 0)
+
+    def _render_usage(self, result, message: str) -> None:
+        """Rebuild the popover, isolating Claude and Codex failures by section."""
+        for child in self._usage_body.get_children():
+            self._usage_body.remove(child)
+
+        if result is None:
+            self._usage_message(message)
+            self._usage_body.show_all()
+            return
+
+        sections = getattr(result, "sections", None)
+        if sections is None:  # backwards-compatible injected single-provider loader
+            self._usage_rows(result)
+        else:
+            for index, section in enumerate(sections):
+                if index:
+                    separator = Gtk.Separator(orientation=Gtk.Orientation.HORIZONTAL)
+                    self._usage_body.pack_start(separator, False, False, 2)
+                heading = Gtk.Label(xalign=0.0)
+                heading.set_markup(
+                    '<span foreground="#77767b"><b>%s</b></span>'
+                    % GLib.markup_escape_text(section.name))
+                self._usage_body.pack_start(heading, False, False, 0)
+                if section.usage is None:
+                    self._usage_message(section.error)
+                else:
+                    self._usage_rows(section.usage)
 
         self._usage_body.show_all()
 
@@ -1388,9 +1450,20 @@ class NavigatorWindow(Gtk.Window):
         return self._wiring_settings_path or (
             pathlib.Path(os.path.expanduser("~")) / ".claude" / "settings.json")
 
+    def _codex_hooks_path(self):
+        import pathlib
+        if self._wiring_codex_hooks_path is not None:
+            return self._wiring_codex_hooks_path
+        home = os.environ.get("CODEX_HOME")
+        return pathlib.Path(home) / "hooks.json" if home else (
+            pathlib.Path(os.path.expanduser("~")) / ".codex" / "hooks.json")
+
     def _hook_command(self) -> str:
         import pathlib
         return str(pathlib.Path(__file__).resolve().parents[2] / "bin" / "cc-navigator-hook")
+
+    def _codex_hook_command(self) -> str:
+        return self._hook_command() + " --provider codex"
 
     def _set_launcher(self, on: bool) -> None:
         if on:
@@ -1406,6 +1479,14 @@ class NavigatorWindow(Gtk.Window):
             wiring.install_hooks(self._hook_command(), self._settings_json_path())
         else:
             wiring.remove_hooks(self._hook_command(), self._settings_json_path())
+
+    def _set_codex_hooks(self, on: bool) -> None:
+        command = self._codex_hook_command()
+        path = self._codex_hooks_path()
+        if on:
+            wiring.install_hooks(command, path, wiring.CODEX_RECOMMENDED_HOOKS)
+        else:
+            wiring.remove_hooks(command, path)
 
     def _build_settings_dialog(self) -> Gtk.Dialog:
         """A live-apply settings dialog: every control writes straight through
@@ -1669,6 +1750,15 @@ class NavigatorWindow(Gtk.Window):
             "Claude Code 훅 설정",
             lambda: wiring.hooks_installed(self._hook_command(), self._settings_json_path()),
             self._set_hooks))
+        codex_toggle = make_toggle(
+            "Codex 훅 설정 (Codex /hooks에서 최초 1회 신뢰)",
+            lambda: wiring.hooks_installed(
+                self._codex_hook_command(), self._codex_hooks_path(),
+                wiring.CODEX_RECOMMENDED_HOOKS),
+            self._set_codex_hooks)
+        codex_toggle.set_tooltip_text(
+            "설치 후 Codex에서 /hooks를 열어 cc-navigator 훅을 신뢰해야 실행됩니다")
+        integ.add(codex_toggle)
         integ.add(integ_status)
 
         frame = Gtk.Frame(label="통합")
@@ -2415,6 +2505,7 @@ class NavigatorWindow(Gtk.Window):
                 _ensure_subagent_spinning(back)
 
         list_row.ccnav_title.set_markup(_title_markup(row))
+        self._ensure_codex_title_spinning(list_row)
         list_row.ccnav_secondary.set_markup(_secondary_markup(row))
         list_row.ccnav_path.set_markup(_path_markup(row))
         prompt = _oneline(row.last_prompt)
@@ -2422,13 +2513,55 @@ class NavigatorWindow(Gtk.Window):
         list_row.ccnav_prompt.set_visible(bool(prompt))
         list_row.ccnav_meta.set_markup(_meta_markup(row))
 
+    def _ensure_codex_title_spinning(self, list_row: Gtk.ListBoxRow) -> None:
+        """Start the lightweight, row-local Codex title animation when needed.
+
+        Like the working-arrow timer, this timer stops itself when the row is
+        detached or its current Row no longer represents a working Codex title.
+        Keeping the timer on the label prevents an old sampled tmux frame from
+        resetting the phase on every normal session poll.
+        """
+        label = list_row.ccnav_title
+        row = list_row.ccnav_row
+        spinner = _codex_title_spinner(row)
+        active = spinner is not None and model.status_key(row) == model.WORKING_SECTION
+        if not active:
+            label.ccnav_codex_spinning = False
+            return
+        if getattr(label, "ccnav_codex_spinning", False):
+            return
+
+        label.ccnav_codex_spinning = True
+        label.ccnav_codex_spin_index = _CODEX_TITLE_SPINNER_FRAMES.index(spinner[0])
+
+        def tick() -> bool:
+            try:
+                current = list_row.ccnav_row
+                if (label.get_ancestor(Gtk.ListBox) is None
+                        or not label.ccnav_codex_spinning
+                        or _codex_title_spinner(current) is None
+                        or model.status_key(current) != model.WORKING_SECTION):
+                    label.ccnav_codex_spinning = False
+                    return False
+                label.ccnav_codex_spin_index = (
+                    label.ccnav_codex_spin_index + 1
+                ) % len(_CODEX_TITLE_SPINNER_FRAMES)
+                label.set_markup(_title_markup(
+                    current, _CODEX_TITLE_SPINNER_FRAMES[label.ccnav_codex_spin_index]))
+                return True
+            except Exception:  # noqa: BLE001 -- row torn down mid-animation
+                label.ccnav_codex_spinning = False
+                return False
+
+        GLib.timeout_add(_WORKING_PERIOD_MS, tick)
+
     def _build_row(self, row: model.Row) -> Gtk.ListBoxRow:
         list_row = Gtk.ListBoxRow()
 
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         # Status at a glance, by colour/shape only (the old "Waiting input" text
-        # is gone): a rotating arrow while Claude works, a red dot when it needs
-        # an answer, a green dot when it has reported and is idle.
+        # is gone): a rotating arrow while the agent works, a red dot when it needs
+        # an answer, a green dot when the agent has reported and is idle.
         kind = front_kind(row)
         indicator = _build_indicator_area(
             kind, row.session_id in self._acknowledged, row.subagent_active)
@@ -2524,6 +2657,11 @@ class NavigatorWindow(Gtk.Window):
         list_row.ccnav_prompt = prompt_label  # type: ignore[attr-defined]
         list_row.ccnav_meta = meta  # type: ignore[attr-defined]
         list_row.ccnav_sig = _row_signature(row)  # type: ignore[attr-defined]
+
+        # Start after all row/widget references above exist.  The first timeout
+        # fires after insertion into the ListBox; subsequent updates reuse this
+        # same timer instead of creating competing animations.
+        self._ensure_codex_title_spinning(list_row)
 
         # Manual-mode drag-to-reorder: every row is a drop target; it is a drag
         # SOURCE only while in manual mode (toggled here and on mode change).

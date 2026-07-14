@@ -1,5 +1,5 @@
 #!/bin/sh
-# Claude Code hook entry point.
+# Claude Code / Codex hook entry point.
 # No `exec`: we want to swallow every failure and exit 0 unconditionally.
 # Resolve $0 through any symlinks first. `dirname "$0"` alone yields the
 # symlink's own directory, so a link on $PATH would point PYTHONPATH at a
@@ -8,5 +8,5 @@ target=$(readlink -f "$0" 2>/dev/null) || target=$0
 [ -n "$target" ] || target=$0
 here=$(cd "$(dirname "$target")" && pwd)
 PYTHONPATH="$here/../src${PYTHONPATH:+:$PYTHONPATH}" \
-    /usr/bin/python3 -m ccnav.hook 2>/dev/null
+    /usr/bin/python3 -m ccnav.hook "$@" 2>/dev/null
 exit 0

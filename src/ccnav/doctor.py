@@ -185,7 +185,9 @@ def _hook_commands(settings: Dict[str, object]) -> List[str]:
 
 def check_claude_hooks(settings: Dict[str, object], hook_path: str) -> Check:
     if any(hook_path in command for command in _hook_commands(settings)):
-        return Check("claude hooks", True, "cc-navigator-hook is installed", "")
+        return Check(
+            "claude hooks", True, "cc-navigator-hook is installed", "", required=False
+        )
     return Check(
         name="claude hooks",
         ok=False,
@@ -193,6 +195,37 @@ def check_claude_hooks(settings: Dict[str, object], hook_path: str) -> Check:
         fix="point the recommended hooks (Notification, Stop, PreToolUse, "
         "PostToolUse, SubagentStart, SubagentStop, SessionStart, SessionEnd, "
         "UserPromptSubmit) at %s in ~/.claude/settings.json" % hook_path,
+        required=False,
+    )
+
+
+def check_codex_hooks(settings: Dict[str, object], hook_path: str) -> Check:
+    command = hook_path + " --provider codex"
+    if command in _hook_commands(settings):
+        return Check(
+            "codex hooks",
+            True,
+            "cc-navigator-hook is configured (review trust in Codex /hooks)",
+            "",
+            required=False,
+        )
+    return Check(
+        name="codex hooks",
+        ok=False,
+        detail="Codex sessions started without the hook never appear in the list",
+        fix="install the Codex hook from Settings → Integration, then trust it in /hooks",
+        required=False,
+    )
+
+
+def check_any_agent_hooks(claude: Check, codex: Check) -> Check:
+    if claude.ok or codex.ok:
+        return Check("session hooks", True, "at least one agent integration is installed", "")
+    return Check(
+        "session hooks",
+        False,
+        "neither Claude Code nor Codex can report sessions",
+        "enable at least one hook in Settings → Integration",
     )
 
 
@@ -283,12 +316,15 @@ def _read(path: pathlib.Path) -> str:
 def run_all(
     tmux_conf: Optional[pathlib.Path] = None,
     claude_settings: Optional[pathlib.Path] = None,
+    codex_hooks: Optional[pathlib.Path] = None,
     hook_path: str = "",
     run: Runner = run_command,
 ) -> List[Check]:
     home = pathlib.Path(os.path.expanduser("~"))
     tmux_conf = tmux_conf or home / ".tmux.conf"
     claude_settings = claude_settings or home / ".claude" / "settings.json"
+    codex_home = pathlib.Path(os.environ.get("CODEX_HOME") or (home / ".codex"))
+    codex_hooks = codex_hooks or codex_home / "hooks.json"
     hook_path = hook_path or str(
         pathlib.Path(__file__).resolve().parents[2] / "bin" / "cc-navigator-hook"
     )
@@ -300,6 +336,15 @@ def run_all(
         settings = {}
     if not isinstance(settings, dict):
         settings = {}
+    try:
+        codex_settings = json.loads(_read(codex_hooks) or "{}")
+    except ValueError:
+        codex_settings = {}
+    if not isinstance(codex_settings, dict):
+        codex_settings = {}
+
+    claude_check = check_claude_hooks(settings, hook_path)
+    codex_check = check_codex_hooks(codex_settings, hook_path)
 
     # Ask the interpreter to actually import what the app imports, rather than
     # stat'ing /usr/bin/python3 -- which exists on every Debian box, while
@@ -347,7 +392,9 @@ def run_all(
         check_tmux_conf(conf_text),
         probe_tmux_conf(tmux_conf, run=run),
         check_tmux_titles(conf_text),
-        check_claude_hooks(settings, hook_path),
+        claude_check,
+        codex_check,
+        check_any_agent_hooks(claude_check, codex_check),
         Check(
             "gnome shell eval",
             gnome.eval_available(run=run),

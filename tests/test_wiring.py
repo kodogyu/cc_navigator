@@ -195,3 +195,33 @@ class HooksMergeTest(unittest.TestCase):
         wiring.install_hooks(self.cmd, self.path)        # already installed: no-op
         self.assertEqual(len(list(self.path.parent.glob("settings.json.bak-*"))), 1)
         self.assertEqual(json.loads(self.path.read_text()), first)
+
+
+class CodexHooksMergeTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.path = pathlib.Path(self._tmp.name) / ".codex" / "hooks.json"
+        self.cmd = "/repo/bin/cc-navigator-hook --provider codex"
+
+    def test_installs_only_codex_supported_events(self):
+        wiring.install_hooks(self.cmd, self.path, wiring.CODEX_RECOMMENDED_HOOKS)
+        data = json.loads(self.path.read_text())
+        self.assertEqual(set(data["hooks"]), set(wiring.CODEX_RECOMMENDED_HOOKS))
+        self.assertIn("PermissionRequest", data["hooks"])
+        self.assertNotIn("Notification", data["hooks"])
+        self.assertNotIn("SessionEnd", data["hooks"])
+        self.assertTrue(wiring.hooks_installed(
+            self.cmd, self.path, wiring.CODEX_RECOMMENDED_HOOKS))
+
+    def test_preserves_foreign_codex_hooks_and_removes_only_ours(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({"hooks": {"Stop": [{
+            "hooks": [{"type": "command", "command": "/other/codex-hook"}]
+        }]}}))
+        wiring.install_hooks(self.cmd, self.path, wiring.CODEX_RECOMMENDED_HOOKS)
+        self.assertTrue(wiring.remove_hooks(self.cmd, self.path))
+        data = json.loads(self.path.read_text())
+        commands = [hook["command"] for group in data["hooks"]["Stop"]
+                    for hook in group["hooks"]]
+        self.assertEqual(commands, ["/other/codex-hook"])

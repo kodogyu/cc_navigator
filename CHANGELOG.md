@@ -8,6 +8,19 @@ you find out what changed — and what a new version starts doing on your machin
 
 ### New
 
+- **Codex sessions now appear alongside Claude Code sessions.** Settings → Integration
+  has a separate Codex hook toggle that safely merges lifecycle hooks into
+  `$CODEX_HOME/hooks.json` (normally `~/.codex/hooks.json`). Codex requires one explicit
+  trust review in `/hooks`; sessions then report working, approval/question waits,
+  completion, and subagent activity through the same tmux-backed model. A blue Codex
+  badge distinguishes their rows. Because Codex currently defers its first lifecycle
+  hook until the first prompt, cc_navigator also discovers the actual Codex process in
+  each tmux pane and shows a provisional row immediately at TUI startup.
+- **Usage now shows both providers independently.** Claude Code retains its existing
+  account-limit request. Codex limits come from the local authenticated app-server's
+  `account/rateLimits/read` method, so cc_navigator never handles Codex credentials.
+  The two loads run concurrently, and a failure or missing login on one side no longer
+  hides the other provider's result.
 - VS Code extension sessions now appear without a tmux pane, use their AI title as
   the headline, and can jump to the matching editor tab.
 - Four selectable colour themes, custom background/header colours, a dock-integrated
@@ -18,6 +31,8 @@ you find out what changed — and what a new version starts doing on your machin
 
 ### Security and privacy
 
+- Codex limits come from the local authenticated `codex app-server`, so cc_navigator
+  does not read, copy, or send Codex credentials itself.
 - cc_navigator never installs `ccusage`, never falls back to `npx`, and never
   downloads executable code when the option is enabled. The Settings warning states
   that the external program reads local Claude conversation logs before consent is
@@ -31,12 +46,21 @@ you find out what changed — and what a new version starts doing on your machin
 
 ### Fixed
 
+- Codex's Braille loading glyph in the pane title now animates locally at the same
+  80 ms cadence as the working arrow. Normal one-second tmux polling still handles
+  session data, but no longer makes the title spinner jump once per poll.
 - Transient jump/send status messages clear automatically after ten seconds instead
   of occupying the panel indefinitely.
 - A working session with no hook update for fifteen minutes is presented as idle,
   recovering from a missed final `Stop` event without hiding the row.
 - Settings can optionally make a single row click jump immediately to that session;
   the safer expand-first interaction remains the default.
+
+### Compatibility
+
+- Existing state files without a provider remain Claude Code rows.
+- The hook installer still preserves unrelated commands and creates a raw backup before
+  changing either provider's JSON file.
 
 ## 0.2.1-beta — 2026-07-14
 

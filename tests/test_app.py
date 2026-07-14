@@ -8,7 +8,8 @@ from unittest import mock
 
 from gi.repository import Gio, GLib
 
-from ccnav import app, config, gnome, hookstate, model, notify, paths, tmuxctl
+from ccnav import (app, codexsession, config, gnome, hookstate, model, notify,
+                   paths, tmuxctl)
 
 SOCK = "/tmp/tmux-1000/default"
 
@@ -124,6 +125,8 @@ class CollectRowsTest(unittest.TestCase):
             sessions_for=sessions_for,
             titles_for=lambda s: {"%1": "t"},
             prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {},
         )
         self.assertEqual(asked, [SOCK])
         self.assertEqual(len(result.rows), 1)
@@ -144,6 +147,8 @@ class CollectRowsTest(unittest.TestCase):
             sessions_for=lambda s: (True, {"%1": "demo", "%2": "sandbox"}),
             titles_for=lambda s: {},
             prune=fake_prune,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {},
         )
         self.assertEqual(seen["live"], {(SOCK, "%1"), (SOCK, "%2")})
         self.assertEqual(seen["observed"], {SOCK})
@@ -166,13 +171,15 @@ class CollectRowsTest(unittest.TestCase):
             sessions_for=lambda s: (False, {}),  # the query did not answer
             titles_for=lambda s: {},
             prune=fake_prune,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {},
         )
         self.assertEqual(seen["observed"], set(), "a failed socket is not observed")
         self.assertEqual(seen["live"], set())
         self.assertEqual(result.rows, [], "with no live panes there is no row this tick")
         self.assertEqual(result.unreachable, 1, "the failed socket is reported to the UI")
 
-    def test_no_state_files_means_no_tmux_calls_and_no_rows(self):
+    def test_no_state_files_and_no_candidate_sockets_means_no_tmux_calls(self):
         def explode(socket):
             raise AssertionError("must not query tmux")
 
@@ -182,18 +189,17 @@ class CollectRowsTest(unittest.TestCase):
             sessions_for=explode,
             titles_for=explode,
             prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=explode,
         )
         self.assertEqual(result.rows, [])
         self.assertEqual(result.unreachable, 0)
 
-    def test_no_state_files_means_no_prune_either(self):
-        # Deriving `sockets` from records and looping over it already makes a
-        # tmux call structurally impossible when records is empty (the loop
-        # body never runs). The one thing an accidentally-removed early
-        # return *can* still change is calling prune with an empty live set
-        # -- wasted work, and on a real directory it would delete every state
-        # file present, which is exactly the bug "tmux is never called"
-        # exists to keep this function cheap enough to avoid.
+    def test_no_state_files_and_no_candidate_sockets_means_no_prune_either(self):
+        # No state and no discoverable same-user socket leaves nothing to
+        # observe. In that case even prune must stay untouched: calling it with
+        # an empty live set would be wasted work and could delete files that
+        # appeared between read_all and this point.
         def explode(directory, live, observed, **_):
             raise AssertionError("must not prune when there is nothing to prune")
 
@@ -203,8 +209,82 @@ class CollectRowsTest(unittest.TestCase):
             sessions_for=lambda s: (True, {}),
             titles_for=lambda s: {},
             prune=explode,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {},
         )
         self.assertEqual(result.rows, [])
+
+    def test_discovers_a_codex_pane_before_any_state_file_exists(self):
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [],
+            sessions_for=lambda s: (True, {"%7": "fresh"}),
+            titles_for=lambda s: {"%7": "cc_navigator"},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [SOCK],
+            pane_processes_for=lambda s: {
+                "%7": tmuxctl.PaneProcess(pid=123, command="node")},
+            find_codex=lambda pid: codexsession.CodexProcess(
+                pid=pid, started_at=20, cwd="/proj"),
+        )
+        self.assertEqual(len(result.rows), 1)
+        discovered = result.rows[0]
+        self.assertEqual(discovered.provider, "codex")
+        self.assertEqual(discovered.pane, "%7")
+        self.assertEqual(discovered.cwd, "/proj")
+        self.assertTrue(discovered.provisional)
+        self.assertEqual(discovered.state, hookstate.WORKING)
+
+    def test_a_non_codex_node_pane_is_not_discovered(self):
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [],
+            sessions_for=lambda s: (True, {"%7": "node-app"}),
+            titles_for=lambda s: {},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [SOCK],
+            pane_processes_for=lambda s: {
+                "%7": tmuxctl.PaneProcess(pid=123, command="node")},
+            find_codex=lambda pid: None,
+        )
+        self.assertEqual(result.rows, [])
+
+    def test_the_first_real_hook_replaces_the_provisional_row(self):
+        actual = dict(record(), provider="codex", updated_at=20)
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [actual],
+            sessions_for=lambda s: (True, {"%1": "demo"}),
+            titles_for=lambda s: {},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {
+                "%1": tmuxctl.PaneProcess(pid=123, command="node")},
+            find_codex=lambda pid: codexsession.CodexProcess(
+                pid=pid, started_at=20, cwd="/proj"),
+        )
+        self.assertEqual(len(result.rows), 1)
+        self.assertEqual(result.rows[0].session_id, "a")
+        self.assertFalse(result.rows[0].provisional)
+
+    def test_a_new_codex_process_beats_stale_state_from_a_reused_pane(self):
+        stale = dict(record(), updated_at=5)
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [stale],
+            sessions_for=lambda s: (True, {"%1": "demo"}),
+            titles_for=lambda s: {},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {
+                "%1": tmuxctl.PaneProcess(pid=123, command="node")},
+            find_codex=lambda pid: codexsession.CodexProcess(
+                pid=pid, started_at=20, cwd="/new-project"),
+        )
+        self.assertEqual(len(result.rows), 1)
+        self.assertTrue(result.rows[0].provisional)
+        self.assertEqual(result.rows[0].provider, "codex")
+        self.assertEqual(result.rows[0].cwd, "/new-project")
 
 
 class JumpStatusTest(unittest.TestCase):

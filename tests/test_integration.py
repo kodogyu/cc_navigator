@@ -100,7 +100,7 @@ class TmuxIntegrationTest(unittest.TestCase):
                    "tmux to record the pane title set by the OSC escape")
         self._write_state(pane)
 
-        collected = app.collect_rows(self.state_dir)
+        collected = app.collect_rows(self.state_dir, socket_candidates=lambda: [])
 
         self.assertEqual(len(collected.rows), 1)
         self.assertEqual(collected.rows[0].title, title)
@@ -147,7 +147,7 @@ class TmuxIntegrationTest(unittest.TestCase):
         wait_until(lambda: not _alive(), "the tmux server to actually die")
         self.assertFalse(_alive(), "the server really is dead")
 
-        collected = app.collect_rows(self.state_dir)
+        collected = app.collect_rows(self.state_dir, socket_candidates=lambda: [])
 
         self.assertEqual(collected.rows, [], "no live pane, so no row this tick")
         self.assertEqual(collected.unreachable, 1, "the dead socket is reported")
@@ -173,7 +173,7 @@ class TmuxIntegrationTest(unittest.TestCase):
                    "proj's pane to disappear from tmux")
         self.assertTrue(_alive(), "the server survives on the 'keep' session")
 
-        collected = app.collect_rows(self.state_dir)
+        collected = app.collect_rows(self.state_dir, socket_candidates=lambda: [])
 
         self.assertEqual(collected.rows, [], "proj's pane is genuinely gone")
         self.assertEqual(collected.unreachable, 0, "the socket answered")

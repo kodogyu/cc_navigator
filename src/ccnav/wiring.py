@@ -1,4 +1,4 @@
-"""System wiring: app-launcher, autostart, and Claude Code hook wiring.
+"""System wiring: app-launcher, autostart, and agent hook wiring.
 
 Each action reads and writes external state a settings toggle drives. Every
 path is injectable so the logic is tested without touching the real HOME.
@@ -30,7 +30,7 @@ _ICON_PATH = str(pathlib.Path(__file__).resolve().parents[2] / "icons" / "window
 _DESKTOP = """[Desktop Entry]
 Type=Application
 Name=cc-navigator
-Comment=Navigate Claude Code sessions
+Comment=Navigate Claude Code and Codex sessions
 Exec=%(exec)s
 Icon=%(icon)s
 StartupWMClass=%(wmclass)s
@@ -141,6 +141,19 @@ RECOMMENDED_HOOKS = {
     "SubagentStop": "",
 }
 
+# Codex supports the same command-hook envelope but a slightly different event
+# surface. In particular it has PermissionRequest and no Notification/SessionEnd.
+CODEX_RECOMMENDED_HOOKS = {
+    "SessionStart": "startup|resume|clear|compact",
+    "UserPromptSubmit": "",
+    "PermissionRequest": "",
+    "Stop": "",
+    "PreToolUse": "request_user_input|AskUserQuestion|ExitPlanMode",
+    "PostToolUse": "",
+    "SubagentStart": "",
+    "SubagentStop": "",
+}
+
 
 def _load_settings(settings_path: pathlib.Path) -> dict:
     try:
@@ -164,11 +177,18 @@ def _group_has(hook_command: str, group) -> bool:
     )
 
 
-def hooks_installed(hook_command: str, settings_path: pathlib.Path) -> bool:
+def hooks_installed(
+    hook_command: str,
+    settings_path: pathlib.Path,
+    recommended_hooks=None,
+) -> bool:
+    recommended_hooks = (
+        RECOMMENDED_HOOKS if recommended_hooks is None else recommended_hooks
+    )
     hooks = _load_settings(settings_path).get("hooks")
     if not isinstance(hooks, dict):
         return False
-    for event in RECOMMENDED_HOOKS:
+    for event in recommended_hooks:
         groups = hooks.get(event)
         if not isinstance(groups, list) or not any(
             _group_has(hook_command, g) for g in groups
@@ -207,13 +227,20 @@ def _write_settings(settings_path: pathlib.Path, data: dict) -> None:
     _atomic_write(settings_path, json.dumps(data, indent=2))
 
 
-def install_hooks(hook_command: str, settings_path: pathlib.Path) -> None:
+def install_hooks(
+    hook_command: str,
+    settings_path: pathlib.Path,
+    recommended_hooks=None,
+) -> None:
+    recommended_hooks = (
+        RECOMMENDED_HOOKS if recommended_hooks is None else recommended_hooks
+    )
     data = _load_settings(settings_path)
     hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
     changed = False
-    for event, matcher in RECOMMENDED_HOOKS.items():
+    for event, matcher in recommended_hooks.items():
         groups = hooks.get(event)
         if not isinstance(groups, list):
             groups = []

@@ -29,6 +29,8 @@ class Row:
     updated_at: int
     last_prompt: str = ""
     subagent_ids: Tuple[str, ...] = ()
+    provider: str = "claude"
+    provisional: bool = False
     kind: str = "tmux"
     claude_pid: int = 0
     ai_title: str = ""
@@ -134,9 +136,11 @@ def _newest_vscode(records):
 
 def _destale(row: Row, now: int, stale_seconds: int) -> Row:
     """Present a long-untouched 'working' row as idle/reported instead. Only a
-    working row can go stale (a waiting one is already terminal); the threshold
-    guards against flipping a session mid-operation."""
-    if (row.state == hookstate.WORKING and stale_seconds > 0
+    real hook-backed working row can go stale (a waiting one is already
+    terminal). A provisional Codex row is rebuilt from a process that was
+    positively observed alive this tick, so its process start time must not be
+    mistaken for a missed Stop hook timestamp."""
+    if (row.state == hookstate.WORKING and not row.provisional and stale_seconds > 0
             and (now - row.updated_at) > stale_seconds):
         return replace(row, state=hookstate.WAITING, reason=hookstate.STOP_IDLE)
     return row
@@ -176,6 +180,8 @@ def build_rows(
                 updated_at=_as_int(rec.get("updated_at", 0)),
                 last_prompt=str(rec.get("last_prompt") or ""),
                 subagent_ids=_subagent_ids(rec.get("subagent_ids")),
+                provider=("codex" if rec.get("provider") == "codex" else "claude"),
+                provisional=(rec.get("provisional") is True),
             )
         )
     for sid, rec in _newest_vscode(records).items():
@@ -236,7 +242,7 @@ STATUS_SECTIONS = (INPUT_NEEDED, REPORTED, WORKING_SECTION)
 
 
 def status_key(row: "Row") -> str:
-    """Which Sort-by-Status section a row belongs to: 'input' (Claude is
+    """Which Sort-by-Status section a row belongs to: 'input' (the agent is
     blocking on the user), 'reported' (a finished Stop turn, idle), or
     'working'. Same three-way split the status dot/spinner uses."""
     if not row.waiting:

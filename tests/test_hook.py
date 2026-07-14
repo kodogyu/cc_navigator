@@ -41,6 +41,7 @@ class BuildRecordTest(unittest.TestCase):
             result,
             {
                 "session_id": "11111111-2222-3333-4444-555555555555",
+                "provider": "claude",
                 "cwd": "/data/projects/demo_project",
                 "kind": "tmux",
                 "claude_pid": 0,
@@ -71,6 +72,11 @@ class BuildRecordTest(unittest.TestCase):
         rec = hook.build_record(PAYLOAD, ENV, now=1)  # PAYLOAD is a permission_prompt
         self.assertEqual(rec["reason"], "permission_prompt")
         self.assertEqual(rec["message"], "Allow Bash command: npm test?")
+
+    def test_codex_provider_is_persisted(self):
+        payload = dict(PAYLOAD, hook_event_name="SessionStart", model="gpt-5.6-sol")
+        rec = hook.build_record(payload, ENV, now=1, provider="codex")
+        self.assertEqual(rec["provider"], "codex")
 
     def test_outside_tmux_returns_none(self):
         self.assertIsNone(hook.build_record(PAYLOAD, {}, now=1))
@@ -263,6 +269,21 @@ class MainTest(unittest.TestCase):
         self.assertEqual(written["reason"], "idle")
         self.assertEqual(written["tmux_pane"], "%12")
         self.assertEqual(written["tmux_socket"], "/tmp/tmux-1000/default")
+
+    def test_codex_cli_flag_marks_the_written_record(self):
+        payload = {
+            "hook_event_name": "SessionStart",
+            "session_id": "codex-123",
+            "cwd": "/proj",
+            "model": "gpt-5.6-sol",
+        }
+        env = dict(ENV, XDG_RUNTIME_DIR=self.runtime_dir)
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(payload))):
+            with mock.patch.dict(os.environ, env, clear=True):
+                result = hook.main(["--provider", "codex"])
+        self.assertEqual(result, 0)
+        written = json.loads((self.state_dir / "codex-123.json").read_text())
+        self.assertEqual(written["provider"], "codex")
 
 
 class LastPromptTest(unittest.TestCase):

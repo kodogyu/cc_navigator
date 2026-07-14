@@ -4,10 +4,12 @@ from __future__ import annotations
 import errno
 import os
 import pathlib
+import stat
+from typing import List, Mapping, Optional
 
 
 def state_dir() -> pathlib.Path:
-    """Directory holding one JSON file per live Claude session.
+    """Directory holding one JSON file per live agent session.
 
     XDG_RUNTIME_DIR is tmpfs and is wiped at logout, which is exactly the
     lifetime we want. Fall back to a uid-scoped /tmp path when it is unset.
@@ -16,6 +18,47 @@ def state_dir() -> pathlib.Path:
     if base:
         return pathlib.Path(base) / "cc-navigator"
     return pathlib.Path("/tmp/cc-navigator-%d" % os.getuid())
+
+
+def tmux_sockets(
+    env: Optional[Mapping[str, str]] = None, uid: Optional[int] = None,
+) -> List[str]:
+    """Return same-user tmux sockets that may contain a pre-hook Codex pane.
+
+    State records still supply arbitrary ``tmux -S`` sockets.  This discovery
+    covers the standard tmux socket directory (including ``-L`` names), plus a
+    socket inherited through ``$TMUX`` when the navigator itself was launched
+    inside tmux.  Ownership and file type are checked before anything is handed
+    to the tmux client.
+    """
+    env = os.environ if env is None else env
+    uid = os.getuid() if uid is None else uid
+    candidates = set()
+    inherited = (env.get("TMUX") or "").split(",", 1)[0]
+    if inherited:
+        candidates.add(pathlib.Path(inherited))
+
+    base = pathlib.Path(env.get("TMUX_TMPDIR") or "/tmp")
+    directory = base / ("tmux-%d" % uid)
+    try:
+        directory_stat = directory.lstat()
+        if (not stat.S_ISDIR(directory_stat.st_mode)
+                or directory_stat.st_uid != uid
+                or directory.is_symlink()):
+            return []
+        candidates.update(directory.iterdir())
+    except OSError:
+        pass
+
+    sockets = []
+    for candidate in candidates:
+        try:
+            candidate_stat = candidate.lstat()
+        except OSError:
+            continue
+        if stat.S_ISSOCK(candidate_stat.st_mode) and candidate_stat.st_uid == uid:
+            sockets.append(str(candidate))
+    return sorted(set(sockets))
 
 
 def ensure_state_dir() -> pathlib.Path:

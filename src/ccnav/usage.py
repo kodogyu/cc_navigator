@@ -14,6 +14,7 @@ import datetime
 import json
 import math
 import pathlib
+import threading
 import shutil
 import subprocess
 import time
@@ -83,6 +84,16 @@ class Entry(NamedTuple):
 class Usage(NamedTuple):
     plan: str
     entries: List[Entry]
+
+
+class UsageSection(NamedTuple):
+    name: str
+    usage: Optional[Usage]
+    error: str
+
+
+class UsageReport(NamedTuple):
+    sections: List[UsageSection]
 
 
 def credentials_path() -> pathlib.Path:
@@ -284,6 +295,47 @@ def load(
     if not parsed.entries:  # a 200 we cannot read is still a broken endpoint
         return None, ERR_SHAPE
     return Usage(plan=plan_name(credentials), entries=parsed.entries), ""
+
+
+def load_report(
+    claude_load: Callable = load,
+    codex_load: Optional[Callable] = None,
+) -> Tuple[UsageReport, str]:
+    """Load Claude and Codex concurrently for the shared usage popover.
+
+    Each provider keeps its own failure message, so one unavailable account
+    never hides the other provider's useful limits.
+    """
+    if codex_load is None:
+        from . import codexusage
+        codex_load = codexusage.load
+
+    loaders = (("Claude Code", claude_load), ("Codex", codex_load))
+    results = [None, None]  # type: List[Optional[Tuple[Optional[Usage], str]]]
+
+    def run_one(index: int, loader: Callable, name: str) -> None:
+        try:
+            results[index] = loader()
+        except Exception as exc:  # noqa: BLE001 -- provider isolation is the contract
+            results[index] = (None, "%s 사용량을 불러오지 못했습니다: %s" % (name, exc))
+
+    threads = []
+    for index, (name, loader) in enumerate(loaders):
+        worker = threading.Thread(target=run_one, args=(index, loader, name), daemon=True)
+        worker.start()
+        threads.append(worker)
+    for worker in threads:
+        worker.join()
+
+    sections = []  # type: List[UsageSection]
+    for index, (name, _loader) in enumerate(loaders):
+        result = results[index]
+        if result is None:
+            sections.append(UsageSection(name, None, "%s 사용량을 가져오지 못했습니다" % name))
+        else:
+            provider_usage, error = result
+            sections.append(UsageSection(name, provider_usage, error))
+    return UsageReport(sections), ""
 
 
 # Optional local token-cost estimate -----------------------------------------

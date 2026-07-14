@@ -377,6 +377,10 @@ class CollectRowsVscodeTest(unittest.TestCase):
             sessions_for=explode_tmux,
             titles_for=explode_tmux,
             prune=lambda *a, **k: 0,
+            # Codex support independently scans discoverable tmux sockets for
+            # pre-hook TUIs. This test isolates the VSCode-only path by making
+            # that discovery seam empty.
+            socket_candidates=lambda: [],
             live_pids_for=lambda pids: {4321} if 4321 in pids else set(),
         )
         self.assertEqual(len(result.rows), 1)
