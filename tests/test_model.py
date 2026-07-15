@@ -25,6 +25,37 @@ class StaleWorkingTest(unittest.TestCase):
                                 now=10_000, stale_seconds=900)
         self.assertEqual(rows[0].state, hookstate.WORKING)
 
+    def test_a_live_claude_title_spinner_overrides_the_stale_timestamp(self):
+        for frame in model.CLAUDE_TITLE_SPINNER_FRAMES:
+            rec = self._row(hookstate.WORKING, updated_at=0)
+            rows = model.build_rows(
+                [rec], {SOCK: {"%1": "demo"}},
+                {SOCK: {"%1": frame + " long task"}},
+                now=10_000, stale_seconds=900,
+            )
+            self.assertEqual(rows[0].state, hookstate.WORKING, frame)
+
+    def test_a_live_codex_title_spinner_overrides_the_stale_timestamp(self):
+        rec = dict(
+            self._row(hookstate.WORKING, updated_at=0), provider="codex")
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}},
+            {SOCK: {"%1": "⠸ long task"}},
+            now=10_000, stale_seconds=900,
+        )
+        self.assertEqual(rows[0].state, hookstate.WORKING)
+
+    def test_a_spinner_title_does_not_promote_an_idle_hook_state(self):
+        rec = self._row(hookstate.WAITING, updated_at=0)
+        rec["reason"] = hookstate.STOP_IDLE
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}},
+            {SOCK: {"%1": "⠂ old title"}},
+            now=10_000, stale_seconds=900,
+        )
+        self.assertEqual(rows[0].state, hookstate.WAITING)
+        self.assertEqual(rows[0].reason, hookstate.STOP_IDLE)
+
     def test_without_now_staleness_is_not_applied(self):
         rec = self._row(hookstate.WORKING, updated_at=0)
         rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})

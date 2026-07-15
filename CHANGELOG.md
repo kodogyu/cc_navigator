@@ -79,7 +79,9 @@ you find out what changed — and what a new version starts doing on your machin
 - Transient jump/send status messages clear automatically after ten seconds instead
   of occupying the panel indefinitely.
 - A working session with no hook update for fifteen minutes is presented as idle,
-  recovering from a missed final `Stop` event without hiding the row.
+  recovering from a missed final `Stop` event without hiding the row. A live native
+  Claude/Codex spinner in the tmux pane title now overrides that timeout, so a
+  genuinely long-running turn stays marked as working.
 - Settings can optionally make a single row click jump immediately to that session;
   the safer expand-first interaction remains the default.
 

@@ -181,7 +181,7 @@ _WORKING_STEP = 0.30  # radians per tick
 # sequence and animate only that one character locally at the same cadence as
 # the arrow.  This avoids turning an inexpensive session poll into a 12.5 Hz
 # tmux query just for a cosmetic frame.
-_CODEX_TITLE_SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
+_CODEX_TITLE_SPINNER_FRAMES = model.CODEX_TITLE_SPINNER_FRAMES
 
 
 def _draw_reload_spinner_at(cr, cx: float, cy: float, size: float, angle: float,

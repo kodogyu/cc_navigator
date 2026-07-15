@@ -6,13 +6,21 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from . import hookstate
 
-# A "working" session updates its record on every tool event (PreToolUse /
-# PostToolUse), and Claude Code's foreground bash tops out at ~10 min, so a real
-# working session refreshes at least that often. A record left at "working" with
-# NO update for this long is almost certainly a session whose finishing "Stop"
-# hook was missed (or a turn that was aborted): it is shown as idle rather than
-# spinning forever. Generous enough that a long single operation is not misread.
+# Most working sessions update their record on every tool event (PreToolUse /
+# PostToolUse). A record left at "working" with no update for this long usually
+# means its final Stop hook was missed, so it is shown idle instead of spinning
+# forever. Exception: a native spinner in the live pane title proves that a long
+# operation is still progressing even though it has emitted no lifecycle event.
 STALE_WORKING_SECONDS = 900
+
+# Native pane-title activity frames. Claude alternates the two sparse Braille
+# glyphs while a turn is still progressing; Codex uses the ten-frame sequence.
+# A live frame is stronger evidence than an old hook timestamp: long-running
+# work can legitimately emit no lifecycle hook for longer than the stale limit.
+CLAUDE_TITLE_SPINNER_FRAMES = ("⠂", "⠐")
+CODEX_TITLE_SPINNER_FRAMES = (
+    "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
+)
 
 
 @dataclass(frozen=True)
@@ -190,8 +198,15 @@ def _destale(row: Row, now: int, stale_seconds: int) -> Row:
     real hook-backed working row can go stale (a waiting one is already
     terminal). A provisional Codex row is rebuilt from a process that was
     positively observed alive this tick, so its process start time must not be
-    mistaken for a missed Stop hook timestamp."""
-    if (row.state == hookstate.WORKING and not row.provisional and stale_seconds > 0
+    mistaken for a missed Stop hook timestamp. A native pane-title spinner also
+    prevents de-staling because it is an independent live activity signal."""
+    frames = (
+        CODEX_TITLE_SPINNER_FRAMES
+        if row.provider == "codex" else CLAUDE_TITLE_SPINNER_FRAMES
+    )
+    title_reports_work = bool(row.title) and row.title[0] in frames
+    if (row.state == hookstate.WORKING and not row.provisional
+            and not title_reports_work and stale_seconds > 0
             and (now - row.updated_at) > stale_seconds):
         return replace(row, state=hookstate.WAITING, reason=hookstate.STOP_IDLE)
     return row
