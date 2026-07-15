@@ -116,8 +116,9 @@ def dot_state(row: model.Row) -> str:
 
 def front_kind(row: model.Row) -> str:
     """Which MAIN-agent icon a row's front layer shows. Same as dot_state, except
-    a 'working' main agent with auxiliary work (a subagent or background
-    terminal) is shown 'orchestrating' (a calm blue dot, not a spinner).  The
+    a 'working' main agent with auxiliary work (a subagent, Codex background
+    terminal, or Claude shell/monitor) is shown 'orchestrating' (a calm blue
+    dot, not a spinner).  The
     auxiliary spinner owns the motion behind it.  A red 'input' wait or green
     input-ready/report dot remains unchanged in front even while that work runs."""
     base = dot_state(row)
@@ -437,7 +438,7 @@ def _row_signature(row: model.Row):
                        else (False, row.title))
     return (row.session_id, row.socket, row.pane, row.tmux_session, title_signature,
             row.state, row.reason, row.message, row.cwd, row.last_prompt,
-            row.subagent_ids, row.background_process_ids,
+            row.subagent_ids, row.background_process_ids, row.background_task_ids,
             row.provider, row.provisional,
             row.kind, row.claude_pid)
 

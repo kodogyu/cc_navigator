@@ -45,7 +45,7 @@ def pump_briefly(ms=50):
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
         last_prompt="", pane="%1", socket="/tmp/s", updated_at=1, subagent_ids=(),
-        background_process_ids=(),
+        background_process_ids=(), background_task_ids=(),
         provider="claude", provisional=False):
     return model.Row(
         session_id=session_id, socket=socket, pane=pane, tmux_session="demo",
@@ -53,6 +53,7 @@ def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm 
         message=message, cwd=cwd, updated_at=updated_at, last_prompt=last_prompt,
         subagent_ids=tuple(subagent_ids), provider=provider,
         background_process_ids=tuple(background_process_ids),
+        background_task_ids=tuple(background_task_ids),
         provisional=provisional,
     )
 
@@ -790,6 +791,35 @@ class NavigatorWindowTest(unittest.TestCase):
             state=hookstate.WAITING, reason=hookstate.STOP_IDLE,
             background_process_ids=("42:900",))
         self.assertEqual(ui.front_kind(session), "reported")
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([session])
+            child = self._first_row(window)
+            self.assertIn("#2ec27e", self._dot_markup(child))
+            self.assertTrue(self._back(child).ccnav_subagent)
+        finally:
+            window.destroy()
+
+    def test_claude_shell_or_monitor_uses_the_same_auxiliary_spinner(self):
+        for task_id in ("shell:b123", "monitor:m456"):
+            session = row(
+                provider="claude", state=hookstate.WORKING,
+                background_task_ids=(task_id,))
+            self.assertEqual(ui.front_kind(session), "orchestrating")
+            window = ui.NavigatorWindow(
+                on_jump=lambda r: None, on_send=lambda r, t: None)
+            try:
+                window.set_rows([session])
+                child = self._first_row(window)
+                self.assertIn("#3584e4", self._dot_markup(child))
+                self.assertTrue(self._back(child).ccnav_subagent)
+            finally:
+                window.destroy()
+
+    def test_input_ready_claude_stays_green_while_monitor_runs(self):
+        session = row(
+            provider="claude", state=hookstate.WAITING,
+            reason=hookstate.STOP_IDLE, background_task_ids=("monitor:m456",))
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([session])

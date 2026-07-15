@@ -30,6 +30,7 @@ class Row:
     last_prompt: str = ""
     subagent_ids: Tuple[str, ...] = ()
     background_process_ids: Tuple[str, ...] = ()
+    background_task_ids: Tuple[str, ...] = ()
     provider: str = "claude"
     provisional: bool = False
     kind: str = "tmux"
@@ -66,9 +67,18 @@ class Row:
         return bool(self.background_process_ids)
 
     @property
+    def background_task_active(self) -> bool:
+        """True while Claude reports an in-flight shell or monitor task."""
+        return bool(self.background_task_ids)
+
+    @property
     def auxiliary_activity(self) -> bool:
         """Any work that runs independently of the main session's input state."""
-        return self.subagent_active or self.background_process_active
+        return (
+            self.subagent_active
+            or self.background_process_active
+            or self.background_task_active
+        )
 
     @property
     def window_title(self) -> str:
@@ -120,6 +130,23 @@ def _background_process_ids(value, live: Optional[Set[str]]) -> Tuple[str, ...]:
         return ()
     ids = tuple(str(x) for x in value)
     return ids if live is None else tuple(x for x in ids if x in live)
+
+
+def _background_task_ids(value) -> Tuple[str, ...]:
+    """Opaque Claude shell/monitor task identities from a trusted hook record."""
+    if not isinstance(value, list):
+        return ()
+    accepted = []
+    for item in value:
+        if not isinstance(item, str) or len(item) > 168 or ":" not in item:
+            continue
+        kind, task_id = item.split(":", 1)
+        if (kind not in ("shell", "monitor") or not task_id
+                or not all(ch.isalnum() or ch in "-_." for ch in task_id)):
+            continue
+        if item not in accepted:
+            accepted.append(item)
+    return tuple(accepted)
 
 
 def _newest_per_pane(records):
@@ -179,8 +206,9 @@ def _normalize_legacy_codex_permission(row: Row) -> Row:
     this state; normalizing old records here removes an already-stuck false red
     indicator immediately after upgrading, without rewriting users' state files.
     """
+    reason = row.reason.strip().lower()
     if (row.provider == "codex" and row.state == hookstate.WAITING
-            and row.reason == "permission"):
+            and reason in ("permission", "permission_request", "permissionrequest")):
         return replace(row, state=hookstate.WORKING, reason="", message="")
     return row
 
@@ -222,6 +250,8 @@ def build_rows(
                 subagent_ids=_subagent_ids(rec.get("subagent_ids")),
                 background_process_ids=_background_process_ids(
                     rec.get("background_process_ids"), live_background_ids),
+                background_task_ids=_background_task_ids(
+                    rec.get("background_task_ids")),
                 provider=("codex" if rec.get("provider") == "codex" else "claude"),
                 provisional=(rec.get("provisional") is True),
             )
@@ -256,6 +286,8 @@ def build_rows(
                 subagent_ids=_subagent_ids(rec.get("subagent_ids")),
                 background_process_ids=_background_process_ids(
                     rec.get("background_process_ids"), live_background_ids),
+                background_task_ids=_background_task_ids(
+                    rec.get("background_task_ids")),
                 kind="vscode",
                 claude_pid=pid,
                 ai_title=ai_title,

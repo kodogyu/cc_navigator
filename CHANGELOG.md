@@ -46,20 +46,28 @@ you find out what changed — and what a new version starts doing on your machin
 - VS Code UI liveness reads only exact local workbench-state keys. Open-editor
   state is reduced to a boolean inside SQLite, so unrelated file names, tab
   titles, and contents are never returned to cc_navigator.
+- Claude background Shell/Monitor tracking stores only the task type and bounded
+  opaque task ID. Commands, descriptions, server names, and output are never
+  copied into cc_navigator state.
 
 ### Fixed
 
 - Codex `PermissionRequest` no longer produces a false red input-needed state.
   That hook runs before Codex decides whether automatic review can handle the
   operation and provides no final routing result. Fresh hook installations omit
-  the unnecessary event, existing `permission` records are repaired at display
-  time, and explicit `request_user_input` questions still appear red.
+  the unnecessary event, reinstalling reconciles stale installations by removing
+  only cc_navigator's exact command from that event, and existing `permission`
+  records are repaired both at display time and on a stale callback. Explicit
+  `request_user_input` questions still appear red.
 - A newly opened, pre-prompt Codex pane now appears input-ready (green) instead
   of showing a false calm-blue working state merely because its process exists.
 - Codex background terminals now use the same rotating auxiliary-work layer as
   subagents. The front dot remains green when the main session can accept input,
   even while either kind of auxiliary work continues. Only opaque PID/start-time
   identities are stored; terminal commands and output are never recorded.
+- Claude background Shell and Monitor tasks now use that auxiliary-work layer as
+  well. Stop snapshots and tool lifecycle events keep the indicator current, while
+  the front dot remains green whenever the main session is ready for input.
 - VS Code Claude sessions disappear when their editor tab and sidebar close even
   if the extension leaves the headless `claude` backend and stdio peer running.
   Liveness now checks for a matching Claude editor or visible active sidebar in

@@ -64,13 +64,14 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(rows[0].provider, "codex")
 
     def test_legacy_codex_permission_record_is_not_shown_as_user_input(self):
-        rec = dict(
-            record("a", "%1"), provider="codex", state=hookstate.WAITING,
-            reason="permission", message="permission")
-        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
-        self.assertEqual(rows[0].state, hookstate.WORKING)
-        self.assertEqual(rows[0].reason, "")
-        self.assertEqual(rows[0].message, "")
+        for reason in ("permission", "permission_request", "PermissionRequest"):
+            rec = dict(
+                record("a", "%1"), provider="codex", state=hookstate.WAITING,
+                reason=reason, message="permission")
+            rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+            self.assertEqual(rows[0].state, hookstate.WORKING)
+            self.assertEqual(rows[0].reason, "")
+            self.assertEqual(rows[0].message, "")
 
     def test_claude_permission_record_still_requires_user_input(self):
         rec = dict(
@@ -160,6 +161,26 @@ class BuildRowsTest(unittest.TestCase):
         )
         self.assertFalse(rows[0].background_process_active)
         self.assertFalse(rows[0].auxiliary_activity)
+
+    def test_claude_shell_and_monitor_tasks_are_auxiliary_activity(self):
+        rec = dict(
+            record("a", "%1", state=hookstate.WAITING), provider="claude",
+            background_task_ids=["shell:b123", "monitor:m456"],
+        )
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(
+            rows[0].background_task_ids, ("shell:b123", "monitor:m456"))
+        self.assertTrue(rows[0].background_task_active)
+        self.assertTrue(rows[0].auxiliary_activity)
+
+    def test_invalid_background_task_ids_are_ignored(self):
+        rec = dict(record("a", "%1"), background_task_ids=[
+            "workflow:w1", "shell:", "monitor:bad id", "shell:b1", 42,
+        ])
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].background_task_ids, ("shell:b1",))
 
     def test_records_without_socket_or_pane_are_dropped(self):
         bad = {"session_id": "x", "tmux_socket": "", "tmux_pane": "", "updated_at": 1}

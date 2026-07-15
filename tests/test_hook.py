@@ -56,6 +56,7 @@ class BuildRecordTest(unittest.TestCase):
                 "last_prompt": "",
                 "subagent_ids": [],
                 "background_process_ids": [],
+                "background_task_ids": [],
             },
         )
 
@@ -99,6 +100,18 @@ class BuildRecordTest(unittest.TestCase):
             permission_mode="default")
         self.assertIsNone(hook.build_record(
             payload, ENV, now=2, previous=previous, provider="codex"))
+
+    def test_codex_permission_request_repairs_an_old_false_red_record(self):
+        previous = {
+            "state": hookstate.WAITING, "reason": "permission",
+            "message": "permission", "last_prompt": "run",
+        }
+        payload = dict(PAYLOAD, hook_event_name="PermissionRequest", tool_name="Bash")
+        rec = hook.build_record(
+            payload, ENV, now=2, previous=previous, provider="codex")
+        self.assertEqual(rec["state"], hookstate.WORKING)
+        self.assertEqual(rec["reason"], "")
+        self.assertEqual(rec["message"], "")
 
     def test_a_late_resume_event_keeps_an_idle_session_idle(self):
         # After Stop (WAITING/idle -> green), a late PostToolUse from the just-
@@ -240,6 +253,87 @@ class BackgroundProcessTrackingTest(unittest.TestCase):
             find_background_processes=broken_probe,
         )
         self.assertEqual(rec["background_process_ids"], ["42:900"])
+
+
+class BackgroundTaskTrackingTest(unittest.TestCase):
+    def _rec(self, event, previous=None, **extra):
+        payload = dict(PAYLOAD, hook_event_name=event, **extra)
+        return hook.build_record(
+            payload, ENV, now=5, previous=previous, provider="claude")
+
+    def test_stop_keeps_only_live_shell_and_monitor_ids(self):
+        rec = self._rec("Stop", background_tasks=[
+            {"id": "b-shell", "type": "shell", "status": "running",
+             "command": "private command", "description": "private description"},
+            {"id": "m-watch", "type": "monitor", "status": "active",
+             "server": "private server"},
+            {"id": "a-helper", "type": "subagent", "status": "running"},
+            {"id": "b-done", "type": "shell", "status": "completed"},
+        ])
+        self.assertEqual(
+            rec["background_task_ids"], ["monitor:m-watch", "shell:b-shell"])
+        self.assertNotIn("command", rec)
+        self.assertNotIn("description", rec)
+        self.assertNotIn("server", rec)
+        self.assertEqual(rec["state"], hookstate.WAITING)
+        self.assertEqual(rec["reason"], hookstate.STOP_IDLE)
+
+    def test_background_bash_and_monitor_launches_are_added_immediately(self):
+        shell = self._rec(
+            "PostToolUse", tool_name="Bash",
+            tool_input={"command": "private", "run_in_background": True},
+            tool_response={"backgroundTaskId": "b123", "stdout": "private"})
+        self.assertEqual(shell["background_task_ids"], ["shell:b123"])
+
+        monitor = self._rec(
+            "PostToolUse", previous=shell, tool_name="Monitor",
+            tool_input={"command": "private", "description": "private"},
+            tool_response={"taskId": "m456", "persistent": True})
+        self.assertEqual(
+            monitor["background_task_ids"], ["monitor:m456", "shell:b123"])
+
+    def test_late_background_launch_updates_auxiliary_work_without_unidling_main(self):
+        previous = {
+            "state": hookstate.WAITING, "reason": hookstate.STOP_IDLE,
+            "cwd": "/previous", "background_task_ids": [],
+        }
+        rec = self._rec(
+            "PostToolUse", previous=previous, tool_name="Bash",
+            tool_input={"command": "private", "run_in_background": True},
+            tool_response={"backgroundTaskId": "b123"})
+        self.assertEqual(rec["state"], hookstate.WAITING)
+        self.assertEqual(rec["reason"], hookstate.STOP_IDLE)
+        self.assertEqual(rec["background_task_ids"], ["shell:b123"])
+
+    def test_task_output_completion_and_task_stop_remove_ids(self):
+        previous = {
+            "state": hookstate.WORKING, "reason": "",
+            "background_task_ids": ["shell:b123", "monitor:m456"],
+        }
+        completed = self._rec(
+            "PostToolUse", previous=previous, tool_name="TaskOutput",
+            tool_input={"task_id": "b123"},
+            tool_response={"retrieval_status": "success", "task": {
+                "task_id": "b123", "task_type": "local_bash",
+                "status": "completed", "output": "private",
+            }})
+        self.assertEqual(completed["background_task_ids"], ["monitor:m456"])
+
+        stopped = self._rec(
+            "PostToolUse", previous=completed, tool_name="TaskStop",
+            tool_input={"task_id": "m456"},
+            tool_response={"task_id": "m456", "message": "private"})
+        self.assertEqual(stopped["background_task_ids"], [])
+
+    def test_snapshot_is_authoritative_and_session_start_resets_old_ids(self):
+        previous = {
+            "state": hookstate.WORKING, "reason": "",
+            "background_task_ids": ["shell:old"],
+        }
+        stopped = self._rec("Stop", previous=previous, background_tasks=[])
+        self.assertEqual(stopped["background_task_ids"], [])
+        restarted = self._rec("SessionStart", previous=previous)
+        self.assertEqual(restarted["background_task_ids"], [])
 
 
 class MainTest(unittest.TestCase):

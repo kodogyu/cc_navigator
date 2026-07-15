@@ -225,3 +225,42 @@ class CodexHooksMergeTest(unittest.TestCase):
         commands = [hook["command"] for group in data["hooks"]["Stop"]
                     for hook in group["hooks"]]
         self.assertEqual(commands, ["/other/codex-hook"])
+
+    def test_reinstall_prunes_our_retired_permission_hook_only(self):
+        self.path.parent.mkdir(parents=True)
+        self.path.write_text(json.dumps({
+            "model": "gpt-current",
+            "hooks": {
+                "PermissionRequest": [{
+                    "matcher": "",
+                    "custom": "keep-group-metadata",
+                    "hooks": [
+                        {"type": "command", "command": self.cmd},
+                        {"type": "command", "command": "/other/reviewer"},
+                    ],
+                }],
+                "ForeignEvent": [{"matcher": "", "hooks": []}],
+                "CustomLifecycle": [{"matcher": "", "hooks": [
+                    {"type": "command", "command": self.cmd},
+                ]}],
+            },
+        }))
+
+        wiring.install_hooks(self.cmd, self.path, wiring.CODEX_RECOMMENDED_HOOKS)
+
+        data = json.loads(self.path.read_text())
+        self.assertEqual(data["model"], "gpt-current")
+        permission = data["hooks"]["PermissionRequest"][0]
+        self.assertEqual(permission["custom"], "keep-group-metadata")
+        self.assertEqual(
+            permission["hooks"],
+            [{"type": "command", "command": "/other/reviewer"}],
+        )
+        self.assertEqual(
+            data["hooks"]["ForeignEvent"], [{"matcher": "", "hooks": []}])
+        self.assertEqual(
+            data["hooks"]["CustomLifecycle"][0]["hooks"],
+            [{"type": "command", "command": self.cmd}],
+        )
+        self.assertTrue(wiring.hooks_installed(
+            self.cmd, self.path, wiring.CODEX_RECOMMENDED_HOOKS))

@@ -92,10 +92,11 @@ working directory, last prompt, a reply box, and a jump button.
   badge counts these. Codex's pre-routing `PermissionRequest` alone is not treated
   as a wait because it also fires for requests handled by automatic review.
 - 🟢 **green** — finished its turn / idle. Click it to mark seen (a green check ✓).
-- ↻ **spinning** — the main agent is working. Running **subagents or Codex background
-  terminals** add a second spinner behind the main indicator. The front stays green
-  whenever the main session is idle and ready for input; otherwise a working main
-  agent with auxiliary work uses a calm blue dot.
+- ↻ **spinning** — the main agent is working. Running **subagents, Codex background
+  terminals, or Claude background Shell/Monitor tasks** add a second spinner behind
+  the main indicator. The front stays green whenever the main session is idle and
+  ready for input; otherwise a working main agent with auxiliary work uses a calm
+  blue dot.
 
 Switch views with the **Sort by** dropdown:
 

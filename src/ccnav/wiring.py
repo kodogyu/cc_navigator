@@ -155,6 +155,11 @@ CODEX_RECOMMENDED_HOOKS = {
     "SubagentStop": "",
 }
 
+# Events installed by an older cc_navigator release that are now known to be
+# invalid signals. Keep this list narrow: an integration reinstall must not
+# remove a user's deliberate custom use of our command on unrelated events.
+CODEX_RETIRED_HOOKS = frozenset({"PermissionRequest"})
+
 
 def _load_settings(settings_path: pathlib.Path) -> dict:
     try:
@@ -241,6 +246,47 @@ def install_hooks(
     if not isinstance(hooks, dict):
         hooks = {}
     changed = False
+
+    # Reconcile entries from older Codex integration versions. Merely removing
+    # PermissionRequest from the recommended set did not remove its existing
+    # command from users' JSON. Restrict cleanup to that explicitly retired event
+    # and exact command; deliberate custom events and every foreign entry survive.
+    retired_events = (
+        CODEX_RETIRED_HOOKS
+        if recommended_hooks == CODEX_RECOMMENDED_HOOKS else frozenset()
+    )
+    for event in retired_events:
+        if event not in hooks:
+            continue
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        new_groups = []
+        event_changed = False
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                new_groups.append(group)
+                continue
+            kept = [
+                item for item in group["hooks"]
+                if not (isinstance(item, dict) and item.get("command") == hook_command)
+            ]
+            removed_here = len(kept) != len(group["hooks"])
+            if removed_here:
+                event_changed = True
+            # Preserve a group that was already empty/foreign. Drop it only if
+            # removing our command is what made the group empty.
+            if kept or not removed_here:
+                new_group = dict(group)
+                new_group["hooks"] = kept
+                new_groups.append(new_group)
+        if event_changed:
+            changed = True
+            if new_groups:
+                hooks[event] = new_groups
+            else:
+                del hooks[event]
+
     for event, matcher in recommended_hooks.items():
         groups = hooks.get(event)
         if not isinstance(groups, list):
