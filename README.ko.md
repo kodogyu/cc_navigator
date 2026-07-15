@@ -132,3 +132,18 @@ set -g set-titles-string 'ccnav:#{session_name}'
 사용"**을 직접 켠 경우에만 동작합니다. `ccusage`는 cc_navigator에 포함되지 않은 외부
 프로그램이며 로컬 Claude 대화 로그를 읽습니다. cc_navigator는 이를 자동 설치하거나
 `npx`로 다운로드하지 않으므로, 사용하려면 출처를 확인한 뒤 별도로 설치해야 합니다.
+
+---
+
+## 테마와 화면 설정
+
+**설정 ⚙ → 테마**에서 테마를 선택할 수 있습니다. 기본값인 Midnight (민트) 외에
+Nord Dark, Graphite Terminal, Clean Light를 제공합니다. 배경색과 헤더 색을 따로
+바꾸고 투명도·글꼴 크기를 조절하거나, 언제든 테마 기본 색으로 되돌릴 수도 있습니다.
+빨강·파랑·초록 상태색의 의미는 모든 테마에서 동일합니다.
+
+| Midnight (민트, 기본값) | Nord Dark |
+|:---:|:---:|
+| <img src="docs/images/theme-midnight.png" alt="Midnight 민트 테마" width="350"> | <img src="docs/images/theme-nord.png" alt="Nord Dark 테마" width="350"> |
+| **Graphite Terminal** | **Clean Light** |
+| <img src="docs/images/theme-graphite.png" alt="Graphite Terminal 테마" width="350"> | <img src="docs/images/theme-light.png" alt="Clean Light 테마" width="350"> |

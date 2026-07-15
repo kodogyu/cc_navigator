@@ -138,3 +138,19 @@ provider failing never hides the other. Claude Code still uses Anthropic's
 enable **"ccusage token-cost calculation"** in Settings. `ccusage` is a separate program
 that reads local Claude conversation logs. cc_navigator never installs it or downloads it
 through `npx`; verify its source and install it separately if you choose to use it.
+
+---
+
+## Themes & appearance
+
+Choose a theme from **Settings ⚙ → 테마**. Midnight (Mint) is the default; Nord Dark,
+Graphite Terminal, and Clean Light are included. You can also override the background
+and header colours, adjust opacity and font size, or restore the theme defaults at any
+time. Semantic status colours stay consistent across themes, so red, blue, and green
+always carry the same meaning.
+
+| Midnight (Mint, default) | Nord Dark |
+|:---:|:---:|
+| <img src="docs/images/theme-midnight.png" alt="Midnight Mint theme" width="350"> | <img src="docs/images/theme-nord.png" alt="Nord Dark theme" width="350"> |
+| **Graphite Terminal** | **Clean Light** |
+| <img src="docs/images/theme-graphite.png" alt="Graphite Terminal theme" width="350"> | <img src="docs/images/theme-light.png" alt="Clean Light theme" width="350"> |
