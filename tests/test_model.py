@@ -63,6 +63,23 @@ class BuildRowsTest(unittest.TestCase):
         rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
         self.assertEqual(rows[0].provider, "codex")
 
+    def test_legacy_codex_permission_record_is_not_shown_as_user_input(self):
+        rec = dict(
+            record("a", "%1"), provider="codex", state=hookstate.WAITING,
+            reason="permission", message="permission")
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].state, hookstate.WORKING)
+        self.assertEqual(rows[0].reason, "")
+        self.assertEqual(rows[0].message, "")
+
+    def test_claude_permission_record_still_requires_user_input(self):
+        rec = dict(
+            record("a", "%1"), provider="claude", state=hookstate.WAITING,
+            reason="permission", message="permission")
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].state, hookstate.WAITING)
+        self.assertEqual(rows[0].reason, "permission")
+
     def test_provisional_is_strictly_carried_to_the_row(self):
         provisional = dict(record("a", "%1"), provider="codex", provisional=True)
         rows = model.build_rows([provisional], {SOCK: {"%1": "demo"}}, {SOCK: {}})
@@ -121,6 +138,28 @@ class BuildRowsTest(unittest.TestCase):
         junk = dict(record("b", "%2"), subagent_ids="not-a-list")
         rows = model.build_rows([junk], {SOCK: {"%2": "demo"}}, {SOCK: {}})
         self.assertFalse(rows[0].subagent_active)
+
+    def test_only_kernel_verified_background_processes_are_active(self):
+        rec = dict(
+            record("a", "%1", state=hookstate.WORKING),
+            background_process_ids=["42:900", "43:901"],
+        )
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}}, {SOCK: {}},
+            live_background_ids={"43:901"},
+        )
+        self.assertEqual(rows[0].background_process_ids, ("43:901",))
+        self.assertTrue(rows[0].background_process_active)
+        self.assertTrue(rows[0].auxiliary_activity)
+
+    def test_garbage_or_dead_background_processes_are_inactive(self):
+        rec = dict(record("a", "%1"), background_process_ids="42:900")
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}}, {SOCK: {}},
+            live_background_ids=set(),
+        )
+        self.assertFalse(rows[0].background_process_active)
+        self.assertFalse(rows[0].auxiliary_activity)
 
     def test_records_without_socket_or_pane_are_dropped(self):
         bad = {"session_id": "x", "tmux_socket": "", "tmux_pane": "", "updated_at": 1}

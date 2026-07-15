@@ -98,6 +98,8 @@ def collect_rows(
         tmuxctl.pane_processes_by_pane),
     find_codex: Callable[[int], Optional[codexsession.CodexProcess]] = (
         codexsession.find_codex_process),
+    live_background_for: Callable[[Set[object]], Set[str]] = (
+        codexsession.live_process_ids),
     live_pids_for: Callable[[Set[object]], Set[object]] = procstat.live_claude_pids,
 ) -> Collected:
     records = read_all(state_dir)
@@ -139,6 +141,16 @@ def collect_rows(
     # Kernel liveness for the VSCode sessions: same "observed vs live" split tmux
     # uses, so prune never reaps a pid it did not actually check this tick.
     live_pids = live_pids_for(observed_pids)
+    background_ids = {
+        value
+        for record in records
+        for value in (
+            record.get("background_process_ids")
+            if isinstance(record.get("background_process_ids"), list) else []
+        )
+        if isinstance(value, str)
+    }
+    live_background_ids = live_background_for(background_ids)
     prune(
         state_dir,
         model.live_pane_keys(sessions),
@@ -147,7 +159,8 @@ def collect_rows(
         observed_pids=observed_pids,
     )
     rows = model.build_rows(
-        records, sessions, titles, live_pids=live_pids, now=int(time.time()))
+        records, sessions, titles, live_pids=live_pids, now=int(time.time()),
+        live_background_ids=live_background_ids)
     return Collected(rows, len(set(sockets) - observed))
 
 

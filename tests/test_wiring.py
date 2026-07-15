@@ -208,7 +208,7 @@ class CodexHooksMergeTest(unittest.TestCase):
         wiring.install_hooks(self.cmd, self.path, wiring.CODEX_RECOMMENDED_HOOKS)
         data = json.loads(self.path.read_text())
         self.assertEqual(set(data["hooks"]), set(wiring.CODEX_RECOMMENDED_HOOKS))
-        self.assertIn("PermissionRequest", data["hooks"])
+        self.assertNotIn("PermissionRequest", data["hooks"])
         self.assertNotIn("Notification", data["hooks"])
         self.assertNotIn("SessionEnd", data["hooks"])
         self.assertTrue(wiring.hooks_installed(

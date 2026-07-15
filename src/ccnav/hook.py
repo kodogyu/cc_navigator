@@ -11,7 +11,7 @@ import sys
 import time
 from typing import Callable, Dict, Mapping, Optional
 
-from . import hookstate, paths, procstat, statestore
+from . import codexsession, hookstate, paths, procstat, statestore
 
 # The entrypoint Claude Code exports when a session runs inside the VSCode
 # extension (verified in the running process's environ). It is the one non-tmux
@@ -22,11 +22,11 @@ VSCODE_ENTRYPOINT = "claude-vscode"
 MESSAGE_LIMIT = 200
 PROMPT_LIMIT = 300
 
-# A turn ending (Stop) or a new one beginning (SessionStart / UserPromptSubmit)
-# means no subagent from a prior turn can still be running, so these clear the
-# running-subagent set. This is the safety net that bounds a leak if a
-# SubagentStop is ever missed (e.g. a crash): the set self-heals next turn.
-_SUBAGENT_RESET_EVENTS = frozenset({"Stop", "SessionStart", "UserPromptSubmit"})
+# A fresh/restarted Codex process cannot retain a subagent from the old runtime.
+# Stop and UserPromptSubmit are deliberately NOT boundaries here: Codex can
+# leave a helper running while the main session is already accepting input, and
+# that concurrent state is one of the two-icon indicator's core cases.
+_SUBAGENT_RESET_EVENTS = frozenset({"SessionStart"})
 
 
 def _prev_subagent_ids(previous: Optional[Mapping[str, object]]) -> list:
@@ -39,10 +39,10 @@ def _next_subagent_ids(
     previous: Optional[Mapping[str, object]],
 ) -> list:
     """The set of running-subagent ids after this event: SubagentStart adds the
-    payload's agent_id, SubagentStop removes it, a turn boundary clears it, and
-    every other event carries the prior set forward unchanged. A SubagentStop
-    with no agent_id removes nothing (it can't match one) and leans on the
-    turn-boundary reset to self-heal."""
+    payload's agent_id, SubagentStop removes it, a fresh SessionStart clears it,
+    and every other event carries the prior set forward unchanged. A Stop does
+    not clear it because the main session can become input-ready while a helper
+    remains active."""
     ids = _prev_subagent_ids(previous)
     if event in _SUBAGENT_RESET_EVENTS:
         return []
@@ -53,6 +53,36 @@ def _next_subagent_ids(
     elif event == "SubagentStop":
         ids = [x for x in ids if x != agent_id]
     return ids
+
+
+def _prev_background_process_ids(
+    previous: Optional[Mapping[str, object]],
+) -> list:
+    ids = (previous or {}).get("background_process_ids")
+    return [str(x) for x in ids] if isinstance(ids, list) else []
+
+
+def _next_background_process_ids(
+    previous: Optional[Mapping[str, object]], provider: str,
+    probe: Optional[Callable[[], list]],
+) -> list:
+    """Current Codex background terminals, or the prior set if probing fails.
+
+    The probe records opaque process identities only.  It intentionally never
+    exposes the terminal's command, arguments, cwd, or output to the state file.
+    Claude sessions retain an empty set until they gain an equally reliable
+    lifecycle signal of their own.
+    """
+    previous_ids = _prev_background_process_ids(previous)
+    if provider != "codex" or probe is None:
+        return previous_ids
+    try:
+        values = probe()
+    except Exception:
+        return previous_ids
+    if not isinstance(values, (list, tuple, set)):
+        return previous_ids
+    return sorted(set(str(x) for x in values if str(x)))
 
 
 # Prefixes of the synthetic "user" turns the IDE/CLI injects, which must never
@@ -140,6 +170,7 @@ def build_record(
     provider: str = "claude",
     find_claude_pid: Optional[Callable[[], int]] = None,
     find_claude_start_time: Optional[Callable[[int], int]] = None,
+    find_background_processes: Optional[Callable[[], list]] = None,
 ) -> Optional[Dict[str, object]]:
     pane = env.get("TMUX_PANE")
     socket = tmux_socket_from_env(env)
@@ -177,15 +208,17 @@ def build_record(
 
     event = str(payload.get("hook_event_name") or "")
     subagent_ids = _next_subagent_ids(event, payload, previous)
+    background_process_ids = _next_background_process_ids(
+        previous, provider, find_background_processes)
 
     classified = hookstate.classify(payload)
     if classified is None:
         # No main-state change -- a SubagentStart/Stop, or an ignored tool event.
-        # Persist ONLY if the running-subagent set actually changed; otherwise
-        # there is nothing to write. The main state is carried forward verbatim,
-        # so a red "input" wait survives a subagent starting or finishing (that
-        # concurrent case is exactly what the second icon exists to show).
-        if subagent_ids == _prev_subagent_ids(previous):
+        # Persist ONLY if a subagent/background set changed; otherwise there is
+        # nothing to write. The main state is carried forward verbatim, so a red
+        # input wait or green idle state survives auxiliary activity changing.
+        if (subagent_ids == _prev_subagent_ids(previous)
+                and background_process_ids == _prev_background_process_ids(previous)):
             return None
         prev = previous if isinstance(previous, dict) else {}
         state = str(prev.get("state") or hookstate.WORKING)
@@ -254,6 +287,7 @@ def build_record(
         "updated_at": now,
         "last_prompt": last_prompt,
         "subagent_ids": subagent_ids,
+        "background_process_ids": background_process_ids,
     }
 
 
@@ -285,8 +319,12 @@ def main(argv=None) -> int:
         state_dir = paths.ensure_state_dir()
         session_id = str(payload.get("session_id") or "")
         previous = statestore.read_one(state_dir, session_id)
+        background_probe = None
+        if provider == "codex":
+            background_probe = lambda: codexsession.background_process_ids(os.getpid())
         record = build_record(
-            payload, os.environ, int(time.time()), previous, provider=provider
+            payload, os.environ, int(time.time()), previous, provider=provider,
+            find_background_processes=background_probe,
         )
         if record is None:
             return 0

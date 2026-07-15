@@ -116,19 +116,12 @@ def dot_state(row: model.Row) -> str:
 
 def front_kind(row: model.Row) -> str:
     """Which MAIN-agent icon a row's front layer shows. Same as dot_state, except
-    a 'working' main agent that has subagents running is shown 'orchestrating'
-    (a calm blue dot, not a spinner): the work is happening in its helpers, whose
-    spinner is the subagent layer behind it, so the front must not also spin --
-    that is the whole point of the two-icon split. A red 'input' wait or a green
-    'reported' dot is unchanged and still shown in front, even with subagents."""
+    a 'working' main agent with auxiliary work (a subagent or background
+    terminal) is shown 'orchestrating' (a calm blue dot, not a spinner).  The
+    auxiliary spinner owns the motion behind it.  A red 'input' wait or green
+    input-ready/report dot remains unchanged in front even while that work runs."""
     base = dot_state(row)
-    if base == "working" and row.provider == "codex" and row.provisional:
-        # A discovered, pre-prompt Codex pane is ready but has not started a
-        # turn. Keep it visible with a calm blue dot; the first real hook clears
-        # provisional and swaps this to the working arrow without a false
-        # completion/input notification.
-        return "orchestrating"
-    if base == "working" and row.subagent_active:
+    if base == "working" and row.auxiliary_activity:
         return "orchestrating"
     return base
 
@@ -265,8 +258,8 @@ def _build_working_arrow() -> Gtk.DrawingArea:
     return area
 
 
-# The subagent layer: a smaller reload spinner drawn to the RIGHT and BEHIND the
-# main (front) icon, shown only while this session has a subagent running. The
+# The auxiliary-work layer: a smaller reload spinner drawn to the RIGHT and
+# BEHIND the main icon, shown while a subagent or background terminal runs. The
 # whole indicator is a Gtk.Overlay -- this DrawingArea is the overlay's main
 # child (painted first, so it sits behind), the front icon the overlay child on
 # top. Both share one angle timer that runs only while a subagent is active.
@@ -434,8 +427,8 @@ def _build_indicator_area(kind: str, acknowledged: bool,
 def _row_signature(row: model.Row):
     """The fields whose change the user can see. Excludes updated_at on purpose:
     the hook never bumps a timestamp without also changing state or reason. The
-    subagent set is included: a SubagentStart/Stop can change ONLY that field
-    (main state carried forward), and the second icon must still refresh."""
+    auxiliary sets are included: their activity can change without changing the
+    main state, and the second icon must still refresh."""
     # Codex changes only the leading Braille frame many times per second.  Once
     # local animation owns that frame, its sampled phase is not a visible data
     # change and must not trigger a row refresh (which would reset/jump it).
@@ -444,7 +437,8 @@ def _row_signature(row: model.Row):
                        else (False, row.title))
     return (row.session_id, row.socket, row.pane, row.tmux_session, title_signature,
             row.state, row.reason, row.message, row.cwd, row.last_prompt,
-            row.subagent_ids, row.provider, row.provisional,
+            row.subagent_ids, row.background_process_ids,
+            row.provider, row.provisional,
             row.kind, row.claude_pid)
 
 
@@ -2501,11 +2495,11 @@ class NavigatorWindow(Gtk.Window):
             if label is not None:
                 label.set_markup(_dot_markup(new_kind, sid in self._acknowledged))
         list_row.ccnav_kind = new_kind
-        # Back layer: show/hide the subagent spinner behind the front icon.
-        if back.ccnav_subagent != row.subagent_active:
-            back.ccnav_subagent = row.subagent_active
+        # Back layer: show/hide auxiliary work behind the main-session icon.
+        if back.ccnav_subagent != row.auxiliary_activity:
+            back.ccnav_subagent = row.auxiliary_activity
             back.queue_draw()
-            if row.subagent_active:
+            if row.auxiliary_activity:
                 _ensure_subagent_spinning(back)
 
         list_row.ccnav_title.set_markup(_title_markup(row))
@@ -2568,7 +2562,7 @@ class NavigatorWindow(Gtk.Window):
         # an answer, a green dot when the agent has reported and is idle.
         kind = front_kind(row)
         indicator = _build_indicator_area(
-            kind, row.session_id in self._acknowledged, row.subagent_active)
+            kind, row.session_id in self._acknowledged, row.auxiliary_activity)
         header.pack_start(indicator, False, False, 0)
         self._wire_indicator(indicator, list_row)
 

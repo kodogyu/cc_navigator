@@ -38,7 +38,11 @@ def changed_rows(
     for row in rows:
         status = model.status_key(row)
         new_map[row.session_id] = status
-        if status in NOTIFY_STATUSES and prev_status.get(row.session_id) != status:
+        # A provisional Codex row is merely a newly opened, pre-prompt TUI. It
+        # is green because it can accept input, but it has not completed work
+        # and must not emit a misleading "보고 완료" notification.
+        if (not row.provisional and status in NOTIFY_STATUSES
+                and prev_status.get(row.session_id) != status):
             fires.append((row, status))
     return fires, new_map
 

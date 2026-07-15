@@ -233,7 +233,24 @@ class CollectRowsTest(unittest.TestCase):
         self.assertEqual(discovered.pane, "%7")
         self.assertEqual(discovered.cwd, "/proj")
         self.assertTrue(discovered.provisional)
-        self.assertEqual(discovered.state, hookstate.WORKING)
+        self.assertEqual(discovered.state, hookstate.WAITING)
+        self.assertEqual(discovered.reason, hookstate.STOP_IDLE)
+
+    def test_background_processes_are_filtered_by_kernel_liveness(self):
+        rec = dict(record(), provider="codex",
+                   background_process_ids=["42:900", "43:901"])
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [rec],
+            sessions_for=lambda s: (True, {"%1": "demo"}),
+            titles_for=lambda s: {"%1": "Codex"},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {},
+            live_background_for=lambda ids: {"43:901"},
+        )
+        self.assertEqual(result.rows[0].background_process_ids, ("43:901",))
+        self.assertTrue(result.rows[0].background_process_active)
 
     def test_a_non_codex_node_pane_is_not_discovered(self):
         result = app.collect_rows(

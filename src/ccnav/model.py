@@ -29,6 +29,7 @@ class Row:
     updated_at: int
     last_prompt: str = ""
     subagent_ids: Tuple[str, ...] = ()
+    background_process_ids: Tuple[str, ...] = ()
     provider: str = "claude"
     provisional: bool = False
     kind: str = "tmux"
@@ -58,6 +59,16 @@ class Row:
         """True while one or more subagents this session launched are still
         running -- the second, overlapping status icon is shown iff this is set."""
         return bool(self.subagent_ids)
+
+    @property
+    def background_process_active(self) -> bool:
+        """True while a Codex background terminal still owns the same process."""
+        return bool(self.background_process_ids)
+
+    @property
+    def auxiliary_activity(self) -> bool:
+        """Any work that runs independently of the main session's input state."""
+        return self.subagent_active or self.background_process_active
 
     @property
     def window_title(self) -> str:
@@ -96,6 +107,19 @@ def _subagent_ids(value) -> Tuple[str, ...]:
     if not isinstance(value, list):
         return ()
     return tuple(str(x) for x in value)
+
+
+def _background_process_ids(value, live: Optional[Set[str]]) -> Tuple[str, ...]:
+    """Safe, live background identities from a state record.
+
+    ``live is None`` keeps the stored values for pure/unit callers.  The real
+    poller always supplies a kernel-verified set, so a process that exits drops
+    its activity icon immediately even if no later Codex hook is emitted.
+    """
+    if not isinstance(value, list):
+        return ()
+    ids = tuple(str(x) for x in value)
+    return ids if live is None else tuple(x for x in ids if x in live)
 
 
 def _newest_per_pane(records):
@@ -146,6 +170,21 @@ def _destale(row: Row, now: int, stale_seconds: int) -> Row:
     return row
 
 
+def _normalize_legacy_codex_permission(row: Row) -> Row:
+    """Repair Codex permission rows written by older cc_navigator versions.
+
+    A Codex ``PermissionRequest`` is emitted before the approval router decides
+    whether an automatic reviewer can handle the operation.  It is not proof
+    that the terminal is waiting for a person.  Current hooks no longer write
+    this state; normalizing old records here removes an already-stuck false red
+    indicator immediately after upgrading, without rewriting users' state files.
+    """
+    if (row.provider == "codex" and row.state == hookstate.WAITING
+            and row.reason == "permission"):
+        return replace(row, state=hookstate.WORKING, reason="", message="")
+    return row
+
+
 def build_rows(
     records: List[Dict[str, object]],
     sessions_by_socket: Dict[str, Dict[str, str]],
@@ -153,6 +192,7 @@ def build_rows(
     live_pids: Set[object] = frozenset(),
     now: Optional[int] = None,
     stale_seconds: int = STALE_WORKING_SECONDS,
+    live_background_ids: Optional[Set[str]] = None,
 ) -> List[Row]:
     """A tmux row exists iff its pane is live in tmux; a VSCode row exists iff
     its process identity is in `live_pids` (the poller's kernel liveness check).
@@ -180,6 +220,8 @@ def build_rows(
                 updated_at=_as_int(rec.get("updated_at", 0)),
                 last_prompt=str(rec.get("last_prompt") or ""),
                 subagent_ids=_subagent_ids(rec.get("subagent_ids")),
+                background_process_ids=_background_process_ids(
+                    rec.get("background_process_ids"), live_background_ids),
                 provider=("codex" if rec.get("provider") == "codex" else "claude"),
                 provisional=(rec.get("provisional") is True),
             )
@@ -212,11 +254,14 @@ def build_rows(
                 updated_at=_as_int(rec.get("updated_at", 0)),
                 last_prompt=last_prompt,
                 subagent_ids=_subagent_ids(rec.get("subagent_ids")),
+                background_process_ids=_background_process_ids(
+                    rec.get("background_process_ids"), live_background_ids),
                 kind="vscode",
                 claude_pid=pid,
                 ai_title=ai_title,
             )
         )
+    rows = [_normalize_legacy_codex_permission(row) for row in rows]
     if now is not None:
         rows = [_destale(row, now, stale_seconds) for row in rows]
     rows.sort(key=sort_key)

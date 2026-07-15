@@ -51,10 +51,14 @@ def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:
             reason = "notification"
         return (WAITING, reason)
 
-    # Codex emits PermissionRequest before it pauses for an approval. Claude
-    # represents the same transition as a permission_prompt Notification.
+    # Codex emits PermissionRequest at the policy checkpoint, before it knows
+    # whether an automatic reviewer will approve the operation or the user will
+    # actually see a prompt.  Its payload has no final decision / routing field,
+    # and an automatically approved request may emit no later hook at all.  It
+    # therefore cannot be used as evidence that the session is blocking on the
+    # user: doing so leaves a false red `permission` state behind.
     if event == "PermissionRequest":
-        return (WAITING, "permission")
+        return None
 
     if event == "PreToolUse":
         tool = str(payload.get("tool_name") or "")
