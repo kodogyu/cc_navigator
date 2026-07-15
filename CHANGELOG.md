@@ -46,6 +46,12 @@ you find out what changed — and what a new version starts doing on your machin
 
 ### Fixed
 
+- A newly opened, pre-prompt Codex pane now appears input-ready (green) instead
+  of showing a false calm-blue working state merely because its process exists.
+- Codex background terminals now use the same rotating auxiliary-work layer as
+  subagents. The front dot remains green when the main session can accept input,
+  even while either kind of auxiliary work continues. Only opaque PID/start-time
+  identities are stored; terminal commands and output are never recorded.
 - Codex's Braille loading glyph in the pane title now animates locally at the same
   80 ms cadence as the working arrow. Normal one-second tmux polling still handles
   session data, but no longer makes the title spinner jump once per poll.

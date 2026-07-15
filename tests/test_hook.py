@@ -55,6 +55,7 @@ class BuildRecordTest(unittest.TestCase):
                 "updated_at": 1783665780,
                 "last_prompt": "",
                 "subagent_ids": [],
+                "background_process_ids": [],
             },
         )
 
@@ -152,12 +153,17 @@ class SubagentTrackingTest(unittest.TestCase):
         self.assertIsNone(self._rec("SubagentStop", previous=prev, agent_id="ghost"))
         self.assertIsNone(self._rec("SubagentStart", previous=prev, agent_id="sub-1"))
 
-    def test_a_turn_boundary_clears_the_running_set(self):
-        # Stop / a new prompt / session start reset the set -- the leak safety net.
+    def test_input_ready_and_new_prompt_preserve_a_running_subagent(self):
+        # The main session can accept another prompt while a helper still runs.
         prev = {"state": hookstate.WORKING, "reason": "", "subagent_ids": ["a", "b"]}
-        for event in ("Stop", "UserPromptSubmit", "SessionStart"):
+        for event in ("Stop", "UserPromptSubmit"):
             rec = self._rec(event, previous=prev)
-            self.assertEqual(rec["subagent_ids"], [], event)
+            self.assertEqual(rec["subagent_ids"], ["a", "b"], event)
+
+    def test_a_fresh_session_start_clears_the_running_set(self):
+        prev = {"state": hookstate.WORKING, "reason": "", "subagent_ids": ["a", "b"]}
+        rec = self._rec("SessionStart", previous=prev)
+        self.assertEqual(rec["subagent_ids"], [])
 
     def test_a_normal_classified_event_carries_the_running_set(self):
         # A Notification (main goes red) while a subagent runs keeps the set.
@@ -185,6 +191,47 @@ class SubagentTrackingTest(unittest.TestCase):
         result = hook.build_record(payload, ENV, now=1)
         self.assertEqual(result["message"], "line one line two tabbed")
         self.assertNotIn("\n", result["message"])
+
+
+class BackgroundProcessTrackingTest(unittest.TestCase):
+    def _rec(self, event, previous=None, found=()):
+        payload = dict(PAYLOAD, hook_event_name=event, tool_name="Bash")
+        return hook.build_record(
+            payload, ENV, now=5, previous=previous, provider="codex",
+            find_background_processes=lambda: list(found),
+        )
+
+    def test_codex_hook_records_only_opaque_process_identities(self):
+        rec = self._rec("PostToolUse", found=("42:900",))
+        self.assertEqual(rec["background_process_ids"], ["42:900"])
+        self.assertNotIn("command", rec)
+        self.assertNotIn("output", rec)
+
+    def test_stop_keeps_live_background_work_while_main_becomes_green(self):
+        previous = {
+            "state": hookstate.WORKING, "reason": "",
+            "background_process_ids": ["42:900"],
+        }
+        rec = self._rec("Stop", previous=previous, found=("42:900",))
+        self.assertEqual(rec["state"], hookstate.WAITING)
+        self.assertEqual(rec["reason"], hookstate.STOP_IDLE)
+        self.assertEqual(rec["background_process_ids"], ["42:900"])
+
+    def test_probe_failure_preserves_previous_background_identity(self):
+        previous = {
+            "state": hookstate.WORKING, "reason": "",
+            "background_process_ids": ["42:900"],
+        }
+        payload = dict(PAYLOAD, hook_event_name="Stop")
+
+        def broken_probe():
+            raise OSError("proc unavailable")
+
+        rec = hook.build_record(
+            payload, ENV, now=5, previous=previous, provider="codex",
+            find_background_processes=broken_probe,
+        )
+        self.assertEqual(rec["background_process_ids"], ["42:900"])
 
 
 class MainTest(unittest.TestCase):

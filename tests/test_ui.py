@@ -45,12 +45,14 @@ def pump_briefly(ms=50):
 def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm test?",
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
         last_prompt="", pane="%1", socket="/tmp/s", updated_at=1, subagent_ids=(),
+        background_process_ids=(),
         provider="claude", provisional=False):
     return model.Row(
         session_id=session_id, socket=socket, pane=pane, tmux_session="demo",
         title=title, state=state, reason=reason,
         message=message, cwd=cwd, updated_at=updated_at, last_prompt=last_prompt,
         subagent_ids=tuple(subagent_ids), provider=provider,
+        background_process_ids=tuple(background_process_ids),
         provisional=provisional,
     )
 
@@ -740,16 +742,17 @@ class NavigatorWindowTest(unittest.TestCase):
             ui.front_kind(row(state=hookstate.WAITING, reason="idle",
                               subagent_ids=("s1",))), "reported")
 
-    def test_a_provisional_codex_pane_uses_a_calm_blue_dot(self):
+    def test_an_input_ready_provisional_codex_pane_uses_a_green_dot(self):
         provisional = row(
-            provider="codex", provisional=True, state=hookstate.WORKING)
-        self.assertEqual(ui.front_kind(provisional), "orchestrating")
+            provider="codex", provisional=True, state=hookstate.WAITING,
+            reason=hookstate.STOP_IDLE)
+        self.assertEqual(ui.front_kind(provisional), "reported")
         window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
         try:
             window.set_rows([provisional])
             child = self._first_row(window)
             self.assertFalse(self._front_is_spinner(child))
-            self.assertIn("#3584e4", self._dot_markup(child))
+            self.assertIn("#2ec27e", self._dot_markup(child))
             self.assertFalse(self._back(child).ccnav_subagent)
         finally:
             window.destroy()
@@ -764,6 +767,35 @@ class NavigatorWindowTest(unittest.TestCase):
             self.assertFalse(self._front_is_spinner(child))
             self.assertIn("#3584e4", self._dot_markup(child))
             self.assertTrue(self._back(child).ccnav_subagent)  # helper layer active
+        finally:
+            window.destroy()
+
+    def test_a_working_row_with_a_background_process_uses_the_dual_icon(self):
+        session = row(
+            state=hookstate.WORKING, background_process_ids=("42:900",))
+        self.assertEqual(ui.front_kind(session), "orchestrating")
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([session])
+            child = self._first_row(window)
+            self.assertIn("#3584e4", self._dot_markup(child))
+            self.assertTrue(self._back(child).ccnav_subagent)
+        finally:
+            window.destroy()
+
+    def test_input_ready_main_stays_green_with_background_work(self):
+        # Main readiness owns the front colour; auxiliary work owns only the
+        # rotating layer behind it.
+        session = row(
+            state=hookstate.WAITING, reason=hookstate.STOP_IDLE,
+            background_process_ids=("42:900",))
+        self.assertEqual(ui.front_kind(session), "reported")
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([session])
+            child = self._first_row(window)
+            self.assertIn("#2ec27e", self._dot_markup(child))
+            self.assertTrue(self._back(child).ccnav_subagent)
         finally:
             window.destroy()
 

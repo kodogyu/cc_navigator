@@ -90,8 +90,10 @@ working directory, last prompt, a reply box, and a jump button.
 
 - 🔴 **red** — waiting on you (permission, question, plan). A title-bar badge counts these.
 - 🟢 **green** — finished its turn / idle. Click it to mark seen (a green check ✓).
-- ↻ **spinning** — the agent is working. A working session that spawned **subagents**
-  shows a calm **blue dot** with a second spinner behind it.
+- ↻ **spinning** — the main agent is working. Running **subagents or Codex background
+  terminals** add a second spinner behind the main indicator. The front stays green
+  whenever the main session is idle and ready for input; otherwise a working main
+  agent with auxiliary work uses a calm blue dot.
 
 Switch views with the **Sort by** dropdown:
 

@@ -4,11 +4,13 @@ from ccnav import hookstate, model, notify
 
 
 def row(session_id="a", state=hookstate.WAITING, reason="permission_prompt",
-        message="Allow npm test?", last_prompt="", title="t-a", provider="claude"):
+        message="Allow npm test?", last_prompt="", title="t-a", provider="claude",
+        provisional=False):
     return model.Row(
         session_id=session_id, socket="/tmp/s", pane="%1", tmux_session="demo",
         title=title, state=state, reason=reason, message=message,
         cwd="/proj", updated_at=1, last_prompt=last_prompt, provider=provider,
+        provisional=provisional,
     )
 
 
@@ -41,6 +43,12 @@ class ChangedRowsTest(unittest.TestCase):
     def test_a_newly_seen_reported_session_fires(self):
         fires, _new = notify.changed_rows({}, [reported_row(session_id="b")])
         self.assertEqual([(r.session_id, s) for r, s in fires], [("b", model.REPORTED)])
+
+    def test_a_provisional_input_ready_codex_pane_does_not_fake_completion(self):
+        fires, new_map = notify.changed_rows(
+            {}, [reported_row(session_id="p", provider="codex", provisional=True)])
+        self.assertEqual(fires, [])
+        self.assertEqual(new_map, {"p": model.REPORTED})
 
     def test_a_transition_into_working_never_fires(self):
         fires, new_map = notify.changed_rows({"a": model.INPUT_NEEDED}, [working_row()])

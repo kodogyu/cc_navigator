@@ -122,6 +122,28 @@ class BuildRowsTest(unittest.TestCase):
         rows = model.build_rows([junk], {SOCK: {"%2": "demo"}}, {SOCK: {}})
         self.assertFalse(rows[0].subagent_active)
 
+    def test_only_kernel_verified_background_processes_are_active(self):
+        rec = dict(
+            record("a", "%1", state=hookstate.WORKING),
+            background_process_ids=["42:900", "43:901"],
+        )
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}}, {SOCK: {}},
+            live_background_ids={"43:901"},
+        )
+        self.assertEqual(rows[0].background_process_ids, ("43:901",))
+        self.assertTrue(rows[0].background_process_active)
+        self.assertTrue(rows[0].auxiliary_activity)
+
+    def test_garbage_or_dead_background_processes_are_inactive(self):
+        rec = dict(record("a", "%1"), background_process_ids="42:900")
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}}, {SOCK: {}},
+            live_background_ids=set(),
+        )
+        self.assertFalse(rows[0].background_process_active)
+        self.assertFalse(rows[0].auxiliary_activity)
+
     def test_records_without_socket_or_pane_are_dropped(self):
         bad = {"session_id": "x", "tmux_socket": "", "tmux_pane": "", "updated_at": 1}
         self.assertEqual(model.build_rows([bad], {}, {}), [])
