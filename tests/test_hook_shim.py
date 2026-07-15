@@ -46,8 +46,9 @@ class HookShimTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
-        written = self.state_dir / "shim-1.json"
-        self.assertTrue(written.is_file(), "the shim wrote no state file")
+        matches = list(self.state_dir.glob("shim-1*.json"))
+        self.assertEqual(len(matches), 1, "the shim wrote no unique state file")
+        written = matches[0]
         self.assertEqual(json.loads(written.read_text())["reason"], "idle")
 
     def test_writes_state_when_invoked_by_absolute_path(self):

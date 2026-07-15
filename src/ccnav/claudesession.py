@@ -1,4 +1,4 @@
-"""Best-effort liveness for Claude's opaque background shell tasks.
+"""Best-effort discovery and background liveness for Claude tmux sessions.
 
 Claude hooks name a background Bash job with an opaque id, but do not always
 emit another hook when that job exits.  The tmux pane still gives us a safe,
@@ -10,11 +10,22 @@ and output are never read.
 from __future__ import annotations
 
 import errno
+import hashlib
+import os
 import pathlib
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
+from . import hookstate
+
 PROCESS_LIMIT = 256
+
+
+@dataclass(frozen=True)
+class ClaudeProcess:
+    pid: int
+    started_at: int
+    cwd: str
 
 
 @dataclass(frozen=True)
@@ -76,6 +87,79 @@ def _children(proc_root: pathlib.Path, pid: int) -> Tuple[List[int], bool]:
             except ValueError:
                 continue
     return sorted(children), True
+
+
+def _process(proc_root: pathlib.Path, pid: int) -> Optional[ClaudeProcess]:
+    directory = proc_root / str(pid)
+    try:
+        started_at = int(directory.stat().st_mtime)
+        cwd = os.readlink(str(directory / "cwd"))
+    except OSError:
+        return None
+    return ClaudeProcess(pid=pid, started_at=started_at, cwd=cwd)
+
+
+def find_claude_process(
+    pane_pid: int, proc_root: pathlib.Path = pathlib.Path("/proc"),
+) -> Optional[ClaudeProcess]:
+    """Find the live Claude binary below one tmux pane without reading argv.
+
+    tmux already limits this probe to panes whose foreground command is exactly
+    ``claude``. The bounded process-tree walk then reads only process names,
+    relationships, start metadata, and cwd; commands, arguments, and output are
+    never inspected.
+    """
+    try:
+        pending = [int(pane_pid)]
+    except (TypeError, ValueError):
+        return None
+    seen = set()  # type: Set[int]
+    matches = []  # type: List[ClaudeProcess]
+    while pending and len(seen) < PROCESS_LIMIT:
+        pid = pending.pop()
+        if pid <= 1 or pid in seen:
+            continue
+        seen.add(pid)
+        stat = _stat(proc_root, pid)
+        if stat is not None and stat.comm == "claude":
+            process = _process(proc_root, pid)
+            if process is not None:
+                matches.append(process)
+        children, _observed = _children(proc_root, pid)
+        pending.extend(children)
+    return max(matches, key=lambda value: (value.started_at, value.pid)) if matches else None
+
+
+def provisional_session_id(socket: str, pane: str) -> str:
+    digest = hashlib.sha256((socket + "\0" + pane).encode("utf-8")).hexdigest()[:24]
+    return "claude-pane-" + digest
+
+
+def provisional_record(
+    socket: str, pane: str, process: ClaudeProcess, working: bool = False,
+) -> dict:
+    """Non-persistent fallback for a live Claude pane missing hook state.
+
+    This covers the second pane created by ``/branch`` immediately. A real hook
+    record has an equal-or-newer timestamp and replaces this candidate for the
+    same pane without the fallback ever touching persistent state.
+    """
+    return {
+        "session_id": provisional_session_id(socket, pane),
+        "provider": "claude",
+        "provisional": True,
+        "cwd": process.cwd,
+        "tmux_socket": socket,
+        "tmux_pane": pane,
+        "state": hookstate.WORKING if working else hookstate.WAITING,
+        "reason": "" if working else hookstate.STOP_IDLE,
+        "message": "",
+        "updated_at": process.started_at,
+        "last_prompt": "",
+        "subagent_ids": [],
+        "background_process_ids": [],
+        "background_task_ids": [],
+    }
 
 
 def background_shell_active(

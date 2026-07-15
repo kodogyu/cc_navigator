@@ -1,10 +1,13 @@
-"""Atomic reads and writes of the per-session state files.
+"""Atomic reads and writes of per-session-runtime state files.
 
 A reader must never observe a half-written file, so every write goes to a
-temp file in the same directory and is then renamed over the target.
+temp file in the same directory and is then renamed over the target. A Claude
+``/branch`` may reuse one session id in multiple tmux panes, so tmux records are
+additionally scoped by an opaque digest of their socket and pane.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import pathlib
@@ -23,10 +26,75 @@ def is_safe_session_id(session_id: str) -> bool:
     return bool(session_id) and bool(_SAFE_ID.match(session_id))
 
 
+def _tmux_scope(socket: str, pane: str) -> str:
+    """Opaque, filename-safe identity for one tmux location.
+
+    Claude's ``/branch`` can keep the same session id alive in two panes.  The
+    socket itself may contain private path components, so only a bounded digest
+    is placed in the filename.
+    """
+    return hashlib.sha256((socket + "\0" + pane).encode("utf-8")).hexdigest()[:24]
+
+
+def _record_path(state_dir: pathlib.Path, record: Dict[str, object]) -> pathlib.Path:
+    session_id = str(record["session_id"])
+    socket = str(record.get("tmux_socket") or "")
+    pane = str(record.get("tmux_pane") or "")
+    if socket and pane and str(record.get("kind") or "tmux") != "vscode":
+        filename = session_id + "--tmux-" + _tmux_scope(socket, pane) + ".json"
+        return state_dir / filename
+    return state_dir / (session_id + ".json")
+
+
+def _read_path(path: pathlib.Path) -> Optional[Dict[str, object]]:
+    try:
+        value = json.loads(path.read_text())
+    except (ValueError, OSError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _legacy_path(state_dir: pathlib.Path, session_id: str) -> pathlib.Path:
+    return state_dir / (session_id + ".json")
+
+
+def _migrate_legacy_tmux_record(
+    state_dir: pathlib.Path, session_id: str,
+) -> None:
+    """Move one pre-scoping record to its pane-qualified path, best effort."""
+    legacy = _legacy_path(state_dir, session_id)
+    record = _read_path(legacy)
+    if record is None or str(record.get("session_id") or "") != session_id:
+        return
+    target = _record_path(state_dir, record)
+    if target == legacy:
+        return
+    try:
+        if target.exists():
+            current = _read_path(target)
+            old_time = int(record.get("updated_at", 0))
+            current_time = int((current or {}).get("updated_at", 0))
+            if current is not None and current_time >= old_time:
+                legacy.unlink(missing_ok=True)
+                return
+        os.replace(str(legacy), str(target))
+    except (OSError, TypeError, ValueError):
+        # Migration is compatibility cleanup, never a reason to block a fresh
+        # state write. Leaving the legacy file is safe: read_all can still use
+        # it and the model de-duplicates records by tmux pane.
+        return
+
+
 def write(state_dir: pathlib.Path, record: Dict[str, object]) -> None:
     session_id = str(record["session_id"])
     if not is_safe_session_id(session_id):
         raise ValueError("unsafe session id: %r" % session_id)
+
+    # Preserve an older unscoped record before writing this pane. If /branch
+    # cloned the same session id into another pane, both records then survive
+    # instead of the new event atomically replacing the old pane's only state.
+    _migrate_legacy_tmux_record(state_dir, session_id)
+    target = _record_path(state_dir, record)
 
     handle_fd, tmp_path = tempfile.mkstemp(dir=str(state_dir), prefix=".tmp-")
     try:
@@ -34,7 +102,7 @@ def write(state_dir: pathlib.Path, record: Dict[str, object]) -> None:
             json.dump(record, handle)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(tmp_path, str(state_dir / (session_id + ".json")))
+        os.replace(tmp_path, str(target))
     except BaseException:
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
@@ -47,55 +115,94 @@ def read_all(state_dir: pathlib.Path) -> List[Dict[str, object]]:
         return records
     for path in sorted(state_dir.glob("*.json")):
         try:
-            records.append(json.loads(path.read_text()))
+            value = json.loads(path.read_text())
         except (ValueError, OSError):
             continue
+        if isinstance(value, dict):
+            records.append(value)
     return records
 
 
-def read_one(state_dir: pathlib.Path, session_id: str) -> Optional[Dict[str, object]]:
+def read_one(
+    state_dir: pathlib.Path, session_id: str,
+    tmux_socket: str = "", tmux_pane: str = "",
+) -> Optional[Dict[str, object]]:
     """Read one session's record, or None on missing/garbage/unsafe id. Never
     raises: the hook uses this to carry a prior field forward and must degrade
     to 'no previous record' rather than fail."""
     if not is_safe_session_id(session_id):
         return None
-    try:
-        text = (state_dir / (session_id + ".json")).read_text()
-    except (ValueError, OSError):
-        # OSError: missing/unreadable. ValueError: read_text() raises
-        # UnicodeDecodeError (a ValueError) on non-UTF-8 bytes -- an
-        # externally corrupted file must degrade to "no previous", not raise.
+    if tmux_socket and tmux_pane:
+        scoped = _record_path(state_dir, {
+            "session_id": session_id,
+            "tmux_socket": tmux_socket,
+            "tmux_pane": tmux_pane,
+        })
+        record = _read_path(scoped)
+        if record is not None and str(record.get("session_id") or "") == session_id:
+            return record
+        # Upgrade compatibility: accept the former session-only file only when
+        # it belongs to this exact pane. A sibling made by /branch must never
+        # donate its prompt, subagent set, or waiting state to the new pane.
+        legacy = _read_path(_legacy_path(state_dir, session_id))
+        if (legacy is not None
+                and str(legacy.get("session_id") or "") == session_id
+                and str(legacy.get("tmux_socket") or "") == tmux_socket
+                and str(legacy.get("tmux_pane") or "") == tmux_pane):
+            return legacy
         return None
-    try:
-        record = json.loads(text)
-    except ValueError:
+    candidates = [
+        record for record in read_all(state_dir)
+        if str(record.get("session_id") or "") == session_id
+    ]
+    if not candidates:
         return None
-    return record if isinstance(record, dict) else None
+    def updated_at(record: Dict[str, object]) -> int:
+        try:
+            return int(record.get("updated_at", 0))
+        except (TypeError, ValueError):
+            return 0
+    return max(candidates, key=updated_at)
 
 
-def remove(state_dir: pathlib.Path, session_id: str) -> bool:
-    """Delete one session's state file. Returns True iff a file was removed.
+def remove(
+    state_dir: pathlib.Path, session_id: str,
+    tmux_socket: str = "", tmux_pane: str = "",
+) -> bool:
+    """Delete one runtime location, or a sole unambiguous unaddressed record.
+
+    Returns True iff at least one file was removed.
     Tolerates a missing file, an unsafe id, and an undeletable file (returns
     False) -- the SessionEnd hook must never raise back into Claude Code.
 
-    _try_unlink alone is not enough here: it calls unlink(missing_ok=True),
-    which swallows FileNotFoundError and reports success even when there was
-    nothing to delete. That is fine for prune (it only ever unlinks a path a
-    glob just found), but remove's contract is True iff a file was actually
-    removed, so a missing file must be checked for first."""
+    Records are matched by their bounded JSON session/location fields rather
+    than trusting a filename supplied by hook input."""
     if not is_safe_session_id(session_id):
         return False
-    path = state_dir / (session_id + ".json")
     try:
-        exists = path.exists()
+        paths = sorted(state_dir.glob("*.json"))
     except OSError:
-        # exists() itself can raise for errors it does not treat as "absent"
-        # (e.g. ENAMETOOLONG) -- an id this task never bounds in length must
-        # still degrade to "nothing removed" rather than escape.
         return False
-    if not exists:
+    matches = []
+    for path in paths:
+        record = _read_path(path)
+        if record is None or str(record.get("session_id") or "") != session_id:
+            continue
+        if tmux_socket and tmux_pane:
+            if (str(record.get("tmux_socket") or "") != tmux_socket
+                    or str(record.get("tmux_pane") or "") != tmux_pane):
+                continue
+        matches.append(path)
+    # A background SessionEnd may omit tmux addressing. It is safe to clean up
+    # the sole record, but with /branch multiple live panes can share this id;
+    # deleting all of them would make surviving siblings disappear. Leave an
+    # ambiguous set to the poller's pane-liveness pruning instead.
+    if not tmux_socket and not tmux_pane and len(matches) > 1:
         return False
-    return _try_unlink(path)
+    removed = False
+    for path in matches:
+        removed = _try_unlink(path) or removed
+    return removed
 
 
 def _try_unlink(path: pathlib.Path) -> bool:

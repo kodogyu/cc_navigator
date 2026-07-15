@@ -159,6 +159,17 @@ class BuildRowsTest(unittest.TestCase):
         )
         self.assertEqual([r.session_id for r in rows], ["new"])
 
+    def test_one_branched_session_id_in_two_panes_keeps_both_rows(self):
+        rows = model.build_rows(
+            [record("same", "%1", updated_at=1),
+             record("same", "%30", updated_at=2)],
+            {SOCK: {"%1": "demo", "%30": "demo"}},
+            {SOCK: {"%1": "Prescription", "%30": "Diagnosis"}},
+        )
+        self.assertEqual({row.pane for row in rows}, {"%1", "%30"})
+        self.assertEqual(len({row.identity for row in rows}), 2)
+        self.assertTrue(all(row.identity != row.session_id for row in rows))
+
     def test_same_pane_id_on_different_sockets_are_distinct_rows(self):
         other = "/tmp/tmux-1000/other"
         rows = model.build_rows(

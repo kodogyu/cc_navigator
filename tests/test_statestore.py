@@ -32,6 +32,31 @@ class StateStoreTest(unittest.TestCase):
         statestore.write(self.dir, record())
         self.assertEqual(statestore.read_all(self.dir), [record()])
 
+    def test_same_session_id_in_two_tmux_panes_keeps_both_records(self):
+        first = record(session_id="branched", pane="%1", updated_at=100)
+        second = record(session_id="branched", pane="%30", updated_at=200)
+
+        statestore.write(self.dir, first)
+        statestore.write(self.dir, second)
+
+        self.assertEqual(
+            sorted(statestore.read_all(self.dir), key=lambda value: value["tmux_pane"]),
+            sorted([first, second], key=lambda value: value["tmux_pane"]),
+        )
+        names = [path.name for path in self.dir.glob("*.json")]
+        self.assertEqual(len(names), 2)
+        self.assertTrue(all("/tmp/tmux" not in name for name in names))
+
+    def test_first_scoped_write_migrates_a_legacy_sibling(self):
+        first = record(session_id="branched", pane="%1", updated_at=100)
+        second = record(session_id="branched", pane="%30", updated_at=200)
+        (self.dir / "branched.json").write_text(json.dumps(first))
+
+        statestore.write(self.dir, second)
+
+        self.assertCountEqual(statestore.read_all(self.dir), [first, second])
+        self.assertFalse((self.dir / "branched.json").exists())
+
     def test_write_leaves_no_temp_files(self):
         statestore.write(self.dir, record())
         leftovers = [p.name for p in self.dir.iterdir() if p.name.startswith(".tmp-")]
@@ -70,8 +95,8 @@ class StateStoreTest(unittest.TestCase):
             now=100,
         )
         self.assertEqual(removed, 1)
-        names = sorted(p.name for p in self.dir.iterdir())
-        self.assertEqual(names, ["alive.json"])
+        self.assertEqual(
+            statestore.read_all(self.dir), [record(session_id="alive", pane="%1")])
 
     def test_prune_keeps_a_stale_record_whose_pane_is_still_live(self):
         # Liveness is derived from tmux, never from hook recency. A session the
@@ -90,7 +115,8 @@ class StateStoreTest(unittest.TestCase):
             now=statestore.MAX_AGE_SECONDS * 30,  # idle for a month, still live
         )
         self.assertEqual(removed, 0)
-        self.assertEqual([p.name for p in self.dir.iterdir()], ["old.json"])
+        self.assertEqual(
+            statestore.read_all(self.dir), [record(session_id="old", updated_at=0)])
 
     def test_prune_ages_out_a_stale_record_whose_pane_is_gone(self):
         # The age reaper still fires for a record tmux does NOT vouch for.
@@ -122,7 +148,8 @@ class StateStoreTest(unittest.TestCase):
             now=100,
         )
         self.assertEqual(removed, 0)
-        self.assertEqual([p.name for p in self.dir.iterdir()], ["alive.json"])
+        self.assertEqual(
+            statestore.read_all(self.dir), [record(session_id="alive", pane="%1")])
 
     def test_prune_still_ages_out_an_unobserved_socket(self):
         # An unreachable socket's files must not leak forever: age still reaps.
@@ -175,7 +202,7 @@ class StateStoreTest(unittest.TestCase):
         real_unlink = pathlib.Path.unlink
 
         def guarded_unlink(self, *args, **kwargs):
-            if self.name == "b-locked.json":
+            if self.name.startswith("b-locked--tmux-"):
                 raise PermissionError(13, "Permission denied")
             return real_unlink(self, *args, **kwargs)
 
@@ -183,8 +210,10 @@ class StateStoreTest(unittest.TestCase):
             removed = statestore.prune(self.dir, live, observed, now=100)  # no raise
 
         self.assertEqual(removed, 1)  # only the deletable one counts
-        names = sorted(p.name for p in self.dir.iterdir())
-        self.assertEqual(names, ["b-locked.json"])  # the locked file is left in place
+        self.assertEqual(
+            statestore.read_all(self.dir),
+            [record(session_id="b-locked", pane="%9")],
+        )  # the locked file is left in place
 
     def test_write_replaces_the_file_rather_than_mutating_it(self):
         # An atomic write renames a fresh temp file over the target, so the
@@ -192,7 +221,7 @@ class StateStoreTest(unittest.TestCase):
         # copyfile) keeps the same inode. The divergence only shows on the
         # second write, once a target already exists to be replaced or mutated.
         statestore.write(self.dir, record(updated_at=100))
-        target = self.dir / "s1.json"
+        target = statestore._record_path(self.dir, record())
         ino_first = target.stat().st_ino
         statestore.write(self.dir, record(updated_at=200))
         ino_second = target.stat().st_ino
@@ -203,7 +232,7 @@ class StateStoreTest(unittest.TestCase):
         # naive writer that opened the target directly would have truncated it.
         # A correct writer stages in a temp file, so at that instant the target
         # is either absent (first write) or still the previous, complete record.
-        target = self.dir / "s1.json"
+        target = statestore._record_path(self.dir, record())
         real_dump = json.dump
         observed = []
 
@@ -247,6 +276,42 @@ class RemoveAndReadOneTest(unittest.TestCase):
         self._write("abc", {"state": "waiting", "last_prompt": "hi"})
         rec = statestore.read_one(self.dir, "abc")
         self.assertEqual(rec["last_prompt"], "hi")
+
+    def test_read_one_is_scoped_to_the_current_tmux_pane(self):
+        first = record(session_id="abc", pane="%1", updated_at=100)
+        second = record(session_id="abc", pane="%30", updated_at=200)
+        statestore.write(self.dir, first)
+        statestore.write(self.dir, second)
+
+        self.assertEqual(
+            statestore.read_one(
+                self.dir, "abc", tmux_socket=first["tmux_socket"], tmux_pane="%1"),
+            first,
+        )
+        self.assertEqual(
+            statestore.read_one(
+                self.dir, "abc", tmux_socket=second["tmux_socket"], tmux_pane="%30"),
+            second,
+        )
+
+    def test_remove_one_branched_pane_preserves_its_sibling(self):
+        first = record(session_id="abc", pane="%1", updated_at=100)
+        second = record(session_id="abc", pane="%30", updated_at=200)
+        statestore.write(self.dir, first)
+        statestore.write(self.dir, second)
+
+        self.assertTrue(statestore.remove(
+            self.dir, "abc", tmux_socket=first["tmux_socket"], tmux_pane="%1"))
+        self.assertEqual(statestore.read_all(self.dir), [second])
+
+    def test_unaddressed_remove_preserves_ambiguous_branched_siblings(self):
+        first = record(session_id="abc", pane="%1", updated_at=100)
+        second = record(session_id="abc", pane="%30", updated_at=200)
+        statestore.write(self.dir, first)
+        statestore.write(self.dir, second)
+
+        self.assertFalse(statestore.remove(self.dir, "abc"))
+        self.assertCountEqual(statestore.read_all(self.dir), [first, second])
 
     def test_read_one_missing_is_none(self):
         self.assertIsNone(statestore.read_one(self.dir, "gone"))

@@ -49,9 +49,17 @@ you find out what changed — and what a new version starts doing on your machin
 - Claude background Shell/Monitor tracking stores only the task type and bounded
   opaque task ID. Commands, descriptions, server names, and output are never
   copied into cc_navigator state.
+- Fallback discovery for an unreported Claude tmux pane reads only bounded Linux
+  process metadata (name, parent relationship, start metadata, and cwd). It does
+  not read command arguments or terminal output, and pane locations are hashed
+  before they become state filenames.
 
 ### Fixed
 
+- Claude Code `/branch` sessions no longer disappear when both live panes share
+  the same Claude session ID. State is isolated by hashed tmux location, closing
+  one branch preserves its sibling, and a live process-backed provisional row
+  covers a newly split pane before its first independent hook event.
 - Claude's agent-team `agent_needs_input` notification no longer turns the main
   session red when its prompt is still available. Existing stale records are
   normalized immediately after upgrading, while a simultaneous native title

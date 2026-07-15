@@ -1,3 +1,4 @@
+import os
 import pathlib
 import tempfile
 import unittest
@@ -78,3 +79,34 @@ class BackgroundShellTest(ProcessTreeFixture):
         self.process(20, "claude", children=[30], ppid=10, pgrp=20, tpgid=20)
         # PID 30 appeared in the children list but vanished / was unreadable.
         self.assertIsNone(claudesession.background_shell_active(10, self.root))
+
+
+class DiscoveryTest(ProcessTreeFixture):
+    def test_finds_claude_below_the_tmux_shell_without_reading_argv(self):
+        self.process(10, "bash", children=[20], pgrp=10, tpgid=20)
+        self.process(20, "claude", ppid=10, pgrp=20, tpgid=20)
+        os.symlink("/proj", str(self.root / "20" / "cwd"))
+
+        found = claudesession.find_claude_process(10, self.root)
+
+        self.assertIsNotNone(found)
+        self.assertEqual(found.pid, 20)
+        self.assertEqual(found.cwd, "/proj")
+
+    def test_non_claude_tree_is_not_discovered(self):
+        self.process(10, "bash", children=[20], pgrp=10, tpgid=20)
+        self.process(20, "python", ppid=10, pgrp=20, tpgid=20)
+        self.assertIsNone(claudesession.find_claude_process(10, self.root))
+
+    def test_provisional_record_tracks_the_pane_and_live_title_state(self):
+        process = claudesession.ClaudeProcess(pid=20, started_at=50, cwd="/proj")
+        socket = "/tmp/tmux/default"
+        idle = claudesession.provisional_record(socket, "%1", process)
+        working = claudesession.provisional_record(socket, "%1", process, working=True)
+
+        self.assertEqual(idle["provider"], "claude")
+        self.assertEqual(idle["state"], "waiting")
+        self.assertEqual(idle["reason"], "idle")
+        self.assertEqual(working["state"], "working")
+        self.assertEqual(working["reason"], "")
+        self.assertTrue(working["provisional"])

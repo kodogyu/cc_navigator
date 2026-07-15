@@ -500,8 +500,13 @@ def main(argv=None) -> int:
 
     if payload.get("hook_event_name") == "SessionEnd":
         session_id = str(payload.get("session_id") or "")
+        socket = tmux_socket_from_env(os.environ) or ""
+        pane = os.environ.get("TMUX_PANE") or ""
         try:
-            statestore.remove(paths.ensure_state_dir(), session_id)
+            statestore.remove(
+                paths.ensure_state_dir(), session_id,
+                tmux_socket=socket, tmux_pane=pane,
+            )
         except Exception:
             pass  # a broken navigator must never break Claude Code
         return 0
@@ -515,7 +520,10 @@ def main(argv=None) -> int:
     try:
         state_dir = paths.ensure_state_dir()
         session_id = str(payload.get("session_id") or "")
-        previous = statestore.read_one(state_dir, session_id)
+        socket = tmux_socket_from_env(os.environ) or ""
+        pane = os.environ.get("TMUX_PANE") or ""
+        previous = statestore.read_one(
+            state_dir, session_id, tmux_socket=socket, tmux_pane=pane)
         background_probe = None
         if provider == "codex":
             background_probe = lambda: codexsession.background_process_ids(os.getpid())

@@ -5,12 +5,12 @@ from ccnav import hookstate, model, notify
 
 def row(session_id="a", state=hookstate.WAITING, reason="permission_prompt",
         message="Allow npm test?", last_prompt="", title="t-a", provider="claude",
-        provisional=False):
+        provisional=False, runtime_id="", pane="%1"):
     return model.Row(
-        session_id=session_id, socket="/tmp/s", pane="%1", tmux_session="demo",
+        session_id=session_id, socket="/tmp/s", pane=pane, tmux_session="demo",
         title=title, state=state, reason=reason, message=message,
         cwd="/proj", updated_at=1, last_prompt=last_prompt, provider=provider,
-        provisional=provisional,
+        provisional=provisional, runtime_id=runtime_id,
     )
 
 
@@ -59,6 +59,21 @@ class ChangedRowsTest(unittest.TestCase):
         prev = {"a": model.INPUT_NEEDED, "b": model.REPORTED}
         _fires, new_map = notify.changed_rows(prev, [input_row(session_id="a")])
         self.assertEqual(new_map, {"a": model.INPUT_NEEDED})
+
+    def test_branched_panes_with_one_session_id_track_status_independently(self):
+        rows = [
+            input_row(session_id="same", runtime_id="pane-1", pane="%1"),
+            reported_row(session_id="same", runtime_id="pane-30", pane="%30"),
+        ]
+        fires, new_map = notify.changed_rows(
+            {"pane-1": model.WORKING_SECTION,
+             "pane-30": model.WORKING_SECTION}, rows)
+
+        self.assertEqual({row.identity for row, _status in fires}, {"pane-1", "pane-30"})
+        self.assertEqual(
+            new_map,
+            {"pane-1": model.INPUT_NEEDED, "pane-30": model.REPORTED},
+        )
 
 
 class NotificationForTest(unittest.TestCase):

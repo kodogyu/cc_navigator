@@ -141,6 +141,8 @@ def collect_rows(
         tmuxctl.pane_processes_by_pane),
     find_codex: Callable[[int], Optional[codexsession.CodexProcess]] = (
         codexsession.find_codex_process),
+    find_claude: Callable[[int], Optional[claudesession.ClaudeProcess]] = (
+        claudesession.find_claude_process),
     live_background_for: Callable[[Set[object]], Set[str]] = (
         codexsession.live_process_ids),
     claude_background_for: Callable[[int], Optional[bool]] = (
@@ -179,9 +181,24 @@ def collect_rows(
     pane_processes = {
         socket: pane_processes_for(socket) for socket in observed
     }
+    recorded_tmux_panes = {
+        (str(record.get("tmux_socket") or ""), str(record.get("tmux_pane") or ""))
+        for record in records
+        if record.get("tmux_socket") and record.get("tmux_pane")
+    }
     for socket in observed:
         for pane, pane_process in pane_processes[socket].items():
             command = pane_process.command.lower()
+            if command == "claude":
+                if (socket, pane) in recorded_tmux_panes:
+                    continue
+                process = find_claude(pane_process.pid)
+                if process is not None and pane in sessions.get(socket, {}):
+                    title = titles.get(socket, {}).get(pane, "")
+                    working = bool(title) and title[0] in model.CLAUDE_TITLE_SPINNER_FRAMES
+                    records.append(claudesession.provisional_record(
+                        socket, pane, process, working=working))
+                continue
             if (command not in ("node", "nodejs", "codex")
                     and not command.startswith("codex")):
                 continue
@@ -520,10 +537,11 @@ class Application:
     # -- jump ---------------------------------------------------------------
 
     def jump(self, row: model.Row) -> None:
-        if row.session_id in self._jumping:
+        runtime_id = row.identity
+        if runtime_id in self._jumping:
             return  # a double click while the previous jump is still in flight
-        self._jumping.add(row.session_id)
-        self.window.set_row_jump_sensitive(row.session_id, False)
+        self._jumping.add(runtime_id)
+        self.window.set_row_jump_sensitive(runtime_id, False)
 
         def worker() -> None:
             try:
@@ -534,13 +552,13 @@ class Application:
                 )
             except Exception as exc:  # noqa: BLE001 -- the button must come back regardless
                 status = "이동 중 예기치 않은 오류가 발생했습니다: %s" % exc
-            GLib.idle_add(self._on_jump_done, row.session_id, status)
+            GLib.idle_add(self._on_jump_done, runtime_id, status)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_jump_done(self, session_id: str, status: str) -> bool:
-        self._jumping.discard(session_id)
-        self.window.set_row_jump_sensitive(session_id, True)
+    def _on_jump_done(self, runtime_id: str, status: str) -> bool:
+        self._jumping.discard(runtime_id)
+        self.window.set_row_jump_sensitive(runtime_id, True)
         self.window.set_status(status)
         return False
 

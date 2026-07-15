@@ -1,6 +1,7 @@
 """Join state files with live tmux panes into the rows the UI renders."""
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, replace
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -44,10 +45,16 @@ class Row:
     kind: str = "tmux"
     claude_pid: int = 0
     ai_title: str = ""
+    runtime_id: str = ""
 
     @property
     def waiting(self) -> bool:
         return self.state == hookstate.WAITING
+
+    @property
+    def identity(self) -> str:
+        """UI/runtime key, distinct for /branch panes sharing a session id."""
+        return self.runtime_id or self.session_id
 
     @property
     def is_vscode(self) -> bool:
@@ -92,6 +99,12 @@ class Row:
     def window_title(self) -> str:
         """The address. tmux's set-titles-string puts exactly this on the window."""
         return "ccnav:" + self.tmux_session
+
+
+def _tmux_runtime_id(socket: str, pane: str) -> str:
+    """Stable opaque UI identity for one pane, independent of Claude's id."""
+    digest = hashlib.sha256((socket + "\0" + pane).encode("utf-8")).hexdigest()[:24]
+    return "tmux-pane-" + digest
 
 
 def live_pane_keys(sessions_by_socket: Dict[str, Dict[str, str]]) -> Set[Tuple[str, str]]:
@@ -290,6 +303,7 @@ def build_rows(
                     clear_shell=(socket, pane) in inactive_background_shell_panes),
                 provider=("codex" if rec.get("provider") == "codex" else "claude"),
                 provisional=(rec.get("provisional") is True),
+                runtime_id=_tmux_runtime_id(socket, pane),
             )
         )
     for sid, rec in _newest_vscode(records).items():

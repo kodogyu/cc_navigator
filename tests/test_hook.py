@@ -448,11 +448,34 @@ class MainTest(unittest.TestCase):
         result = self._run_main(json.dumps(payload), env)
 
         self.assertEqual(result, 0)
-        written = json.loads((self.state_dir / "abc-123.json").read_text())
+        written = statestore.read_one(
+            self.state_dir, "abc-123",
+            tmux_socket="/tmp/tmux-1000/default", tmux_pane="%12")
+        self.assertIsNotNone(written)
         self.assertEqual(written["state"], hookstate.WAITING)
         self.assertEqual(written["reason"], "idle")
         self.assertEqual(written["tmux_pane"], "%12")
         self.assertEqual(written["tmux_socket"], "/tmp/tmux-1000/default")
+
+    def test_branch_events_with_one_session_id_keep_separate_pane_state(self):
+        payload = {"hook_event_name": "UserPromptSubmit", "session_id": "same"}
+        first_env = {
+            "XDG_RUNTIME_DIR": self.runtime_dir,
+            "TMUX": "/tmp/tmux-1000/default,1,0", "TMUX_PANE": "%1",
+        }
+        second_env = dict(first_env, TMUX_PANE="%30")
+
+        self._run_main(json.dumps(dict(payload, user_prompt="first")), first_env)
+        self._run_main(json.dumps(dict(payload, user_prompt="second")), second_env)
+
+        first = statestore.read_one(
+            self.state_dir, "same", tmux_socket="/tmp/tmux-1000/default",
+            tmux_pane="%1")
+        second = statestore.read_one(
+            self.state_dir, "same", tmux_socket="/tmp/tmux-1000/default",
+            tmux_pane="%30")
+        self.assertEqual(first["last_prompt"], "first")
+        self.assertEqual(second["last_prompt"], "second")
 
     def test_codex_cli_flag_marks_the_written_record(self):
         payload = {
@@ -466,7 +489,10 @@ class MainTest(unittest.TestCase):
             with mock.patch.dict(os.environ, env, clear=True):
                 result = hook.main(["--provider", "codex"])
         self.assertEqual(result, 0)
-        written = json.loads((self.state_dir / "codex-123.json").read_text())
+        written = statestore.read_one(
+            self.state_dir, "codex-123",
+            tmux_socket="/tmp/tmux-1000/default", tmux_pane="%12")
+        self.assertIsNotNone(written)
         self.assertEqual(written["provider"], "codex")
 
 
@@ -539,7 +565,7 @@ class SessionEndTest(unittest.TestCase):
             {"session_id": "s1", "hook_event_name": "SessionEnd", "source": "logout"},
             {"TMUX": "/x,1,0", "TMUX_PANE": "%1"})
         self.assertEqual(code, 0)
-        self.assertFalse((self.dir / "s1.json").exists())
+        self.assertEqual(statestore.read_all(self.dir), [])
 
     def test_session_end_without_pane_still_deletes(self):
         statestore.write(self.dir, {"session_id": "s2", "state": "waiting",
@@ -548,4 +574,32 @@ class SessionEndTest(unittest.TestCase):
             {"session_id": "s2", "hook_event_name": "SessionEnd", "source": "clear"},
             {})  # no TMUX in a background session
         self.assertEqual(code, 0)
-        self.assertFalse((self.dir / "s2.json").exists())
+        self.assertEqual(statestore.read_all(self.dir), [])
+
+    def test_session_end_removes_only_its_branched_pane(self):
+        first = {"session_id": "same", "state": "waiting",
+                 "tmux_socket": "/x", "tmux_pane": "%1"}
+        second = dict(first, tmux_pane="%30")
+        statestore.write(self.dir, first)
+        statestore.write(self.dir, second)
+
+        code = self._run(
+            {"session_id": "same", "hook_event_name": "SessionEnd", "source": "logout"},
+            {"TMUX": "/x,1,0", "TMUX_PANE": "%1"})
+
+        self.assertEqual(code, 0)
+        self.assertEqual(statestore.read_all(self.dir), [second])
+
+    def test_unaddressed_session_end_preserves_ambiguous_branches(self):
+        first = {"session_id": "same", "state": "waiting",
+                 "tmux_socket": "/x", "tmux_pane": "%1"}
+        second = dict(first, tmux_pane="%30")
+        statestore.write(self.dir, first)
+        statestore.write(self.dir, second)
+
+        code = self._run(
+            {"session_id": "same", "hook_event_name": "SessionEnd", "source": "clear"},
+            {})
+
+        self.assertEqual(code, 0)
+        self.assertCountEqual(statestore.read_all(self.dir), [first, second])

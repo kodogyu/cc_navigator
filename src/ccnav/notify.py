@@ -29,7 +29,7 @@ def changed_rows(
     prev_status: Dict[str, str], rows: Sequence["model.Row"]
 ) -> Tuple[List[Tuple["model.Row", str]], Dict[str, str]]:
     """Rows whose status changed into a NOTIFY_STATUSES value, plus the full
-    current status map (every session id -> its status) for the next tick. A
+    current status map (every runtime row identity -> its status) for the next tick. A
     session absent from `prev_status` counts as changed, so a newly appeared
     reported/input session fires; the caller suppresses the very first tick to
     avoid a startup burst."""
@@ -37,12 +37,12 @@ def changed_rows(
     new_map = {}  # type: Dict[str, str]
     for row in rows:
         status = model.status_key(row)
-        new_map[row.session_id] = status
+        new_map[row.identity] = status
         # A provisional Codex row is merely a newly opened, pre-prompt TUI. It
         # is green because it can accept input, but it has not completed work
         # and must not emit a misleading "보고 완료" notification.
         if (not row.provisional and status in NOTIFY_STATUSES
-                and prev_status.get(row.session_id) != status):
+                and prev_status.get(row.identity) != status):
             fires.append((row, status))
     return fires, new_map
 

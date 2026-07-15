@@ -46,7 +46,7 @@ def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm 
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
         last_prompt="", pane="%1", socket="/tmp/s", updated_at=1, subagent_ids=(),
         background_process_ids=(), background_task_ids=(),
-        provider="claude", provisional=False):
+        provider="claude", provisional=False, runtime_id=""):
     return model.Row(
         session_id=session_id, socket=socket, pane=pane, tmux_session="demo",
         title=title, state=state, reason=reason,
@@ -55,6 +55,7 @@ def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm 
         background_process_ids=tuple(background_process_ids),
         background_task_ids=tuple(background_task_ids),
         provisional=provisional,
+        runtime_id=runtime_id,
     )
 
 
@@ -470,6 +471,25 @@ class NavigatorWindowTest(unittest.TestCase):
             window.set_rows([row(session_id="a")])
             window.set_row_jump_sensitive("gone", False)  # must not raise
             self.assertTrue(self._first_row(window).ccnav_jump.get_sensitive())
+        finally:
+            window.destroy()
+
+    def test_same_claude_session_id_in_two_runtime_panes_keeps_two_widgets(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([
+                row(session_id="same", pane="%1", runtime_id="pane-1"),
+                row(session_id="same", pane="%30", runtime_id="pane-30"),
+            ])
+
+            children = self._session_children(window)
+            self.assertEqual(len(children), 2)
+            self.assertEqual({child.ccnav_row.pane for child in children}, {"%1", "%30"})
+
+            window.set_row_jump_sensitive("pane-1", False)
+            by_identity = {child.ccnav_row.identity: child for child in children}
+            self.assertFalse(by_identity["pane-1"].ccnav_jump.get_sensitive())
+            self.assertTrue(by_identity["pane-30"].ccnav_jump.get_sensitive())
         finally:
             window.destroy()
 

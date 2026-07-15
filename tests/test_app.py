@@ -8,8 +8,8 @@ from unittest import mock
 
 from gi.repository import Gio, GLib
 
-from ccnav import (app, codexsession, config, gnome, hookstate, model, notify,
-                   paths, tmuxctl)
+from ccnav import (app, claudesession, codexsession, config, gnome, hookstate,
+                   model, notify, paths, tmuxctl)
 
 SOCK = "/tmp/tmux-1000/default"
 
@@ -235,6 +235,30 @@ class CollectRowsTest(unittest.TestCase):
         self.assertTrue(discovered.provisional)
         self.assertEqual(discovered.state, hookstate.WAITING)
         self.assertEqual(discovered.reason, hookstate.STOP_IDLE)
+
+    def test_discovers_the_unrecorded_sibling_created_by_claude_branch(self):
+        recorded = dict(record(pane="%30"), updated_at=100)
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [recorded],
+            sessions_for=lambda s: (True, {"%1": "demo", "%30": "demo"}),
+            titles_for=lambda s: {
+                "%1": "⠐ Prescription 개발", "%30": "✳ Diagnosis 개발"},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {
+                "%1": tmuxctl.PaneProcess(pid=101, command="claude"),
+                "%30": tmuxctl.PaneProcess(pid=130, command="claude"),
+            },
+            find_claude=lambda pid: claudesession.ClaudeProcess(
+                pid=pid, started_at=20, cwd="/proj"),
+        )
+
+        by_pane = {row.pane: row for row in result.rows}
+        self.assertEqual(set(by_pane), {"%1", "%30"})
+        self.assertTrue(by_pane["%1"].provisional)
+        self.assertEqual(by_pane["%1"].state, hookstate.WORKING)
+        self.assertFalse(by_pane["%30"].provisional)
 
     def test_background_processes_are_filtered_by_kernel_liveness(self):
         rec = dict(record(), provider="codex",

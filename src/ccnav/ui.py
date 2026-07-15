@@ -436,7 +436,8 @@ def _row_signature(row: model.Row):
     codex_spinner = _codex_title_spinner(row)
     title_signature = ((True, codex_spinner[1]) if codex_spinner is not None
                        else (False, row.title))
-    return (row.session_id, row.socket, row.pane, row.tmux_session, title_signature,
+    return (row.identity, row.session_id, row.socket, row.pane,
+            row.tmux_session, title_signature,
             row.state, row.reason, row.message, row.cwd, row.last_prompt,
             row.subagent_ids, row.background_process_ids, row.background_task_ids,
             row.provider, row.provisional,
@@ -563,9 +564,9 @@ class NavigatorWindow(Gtk.Window):
         self._status_counts = {}  # status section -> count
         self._collapsed_groups = set()  # group keys collapsed in Group mode
         self._collapsed_status = set()  # status buckets collapsed in Status mode
-        self._acknowledged = set()  # session_ids whose green dot is shown as a check
-        self._manual_order = []         # session_ids in the user's manual order
-        self._group_override = {}       # session_id -> group_key it was dragged into
+        self._acknowledged = set()  # runtime ids whose green dot is shown as a check
+        self._manual_order = []         # runtime ids in the user's manual order
+        self._group_override = {}       # runtime id -> dragged-to group_key
         self._group_names = {}          # group_key -> user-chosen display name
         self._eval_available = True
         self._sticky = ""
@@ -1859,7 +1860,7 @@ class NavigatorWindow(Gtk.Window):
         self._hint = UNREACHABLE_HINT % count if count else ""
         self._render_status()
 
-    def set_row_jump_sensitive(self, session_id: str, sensitive: bool) -> None:
+    def set_row_jump_sensitive(self, runtime_id: str, sensitive: bool) -> None:
         """Added for Task 10: the smallest accessor that lets Application
         disable one row's jump button while its activation is in flight (so a
         double click cannot start two activations) and re-enable it when the
@@ -1869,7 +1870,7 @@ class NavigatorWindow(Gtk.Window):
         for child in self._listbox.get_children():
             if getattr(child, "ccnav_is_header", False):
                 continue
-            if child.ccnav_row.session_id == session_id:
+            if child.ccnav_row.identity == runtime_id:
                 child.ccnav_jump.set_sensitive(sensitive)
                 return
 
@@ -1890,9 +1891,9 @@ class NavigatorWindow(Gtk.Window):
             return
         self._signature = signature
 
-        existing = {c.ccnav_row.session_id: c for c in self._listbox.get_children()
+        existing = {c.ccnav_row.identity: c for c in self._listbox.get_children()
                     if not getattr(c, "ccnav_is_header", False)}
-        desired_ids = set(r.session_id for r in rows)
+        desired_ids = set(r.identity for r in rows)
 
         # Remove rows whose session is gone.
         for session_id, child in list(existing.items()):
@@ -1908,7 +1909,7 @@ class NavigatorWindow(Gtk.Window):
         # to waiting must jump to the top). A session's (waiting, -updated_at)
         # key is volatile, so this re-sort is what keeps the priority order live.
         for row in rows:
-            child = existing.get(row.session_id)
+            child = existing.get(row.identity)
             if child is None:
                 child = self._build_row(row)
                 self._listbox.insert(child, -1)
@@ -1942,34 +1943,34 @@ class NavigatorWindow(Gtk.Window):
         """The group a row belongs to: the one it was dragged into, else its
         project directory (the auto default). Presence, not truthiness -- a move
         INTO the blank-cwd "" group is a real override, not "no override"."""
-        sid = row.session_id
+        sid = row.identity
         if sid in self._group_override:
             return self._group_override[sid]
         return model.group_key(row)
 
-    def _dragged_row(self, session_id: str):
+    def _dragged_row(self, runtime_id: str):
         for child in self._listbox.get_children():
             if (not getattr(child, "ccnav_is_header", False)
-                    and child.ccnav_row.session_id == session_id):
+                    and child.ccnav_row.identity == runtime_id):
                 return child.ccnav_row
         return None
 
-    def _set_group_override(self, session_id: str, group_key: str) -> None:
+    def _set_group_override(self, runtime_id: str, group_key: str) -> None:
         """Record a move into `group_key`, but keep an override only when it
         actually differs from the session's own directory (so a self/redundant
         drop doesn't pin a session to a directory it may later leave)."""
-        row = self._dragged_row(session_id)
+        row = self._dragged_row(runtime_id)
         if row is not None and group_key == model.group_key(row):
-            self._group_override.pop(session_id, None)
+            self._group_override.pop(runtime_id, None)
         else:
-            self._group_override[session_id] = group_key
+            self._group_override[runtime_id] = group_key
 
     def _status_bucket(self, row: model.Row) -> str:
         """The 4-way status split for the group-header count icons (and, in Status
         mode, the sections): a 'reported' (green) session the user has acknowledged
         reads as 'acked' (the check), else the row's plain status_key."""
         key = model.status_key(row)
-        if key == model.REPORTED and row.session_id in self._acknowledged:
+        if key == model.REPORTED and row.identity in self._acknowledged:
             return _ACKED_SECTION
         return key
 
@@ -2006,7 +2007,7 @@ class NavigatorWindow(Gtk.Window):
         if self._settings.sort_mode == "group":
             # Group by rank, then the user's manual order within the group.
             rank = self._group_rank.get(self._group_of(row), 1 << 30)
-            return (rank, self._manual_index(row.session_id))
+            return (rank, self._manual_index(row.identity))
         rank = _status_rank(self._status_bucket(row))
         return (rank,) + tuple(model.sort_key(row))
 
@@ -2015,15 +2016,15 @@ class NavigatorWindow(Gtk.Window):
     def _sync_manual_order(self, rows: List[model.Row]) -> None:
         """Keep _manual_order in step with the live sessions: drop the gone,
         append the new at the end. The user's relative order is preserved."""
-        present = {r.session_id for r in rows}
+        present = {r.identity for r in rows}
         self._manual_order = [s for s in self._manual_order if s in present]
         # Forget group moves for sessions that have ended.
         self._group_override = {s: g for s, g in self._group_override.items() if s in present}
         known = set(self._manual_order)
         for row in rows:
-            if row.session_id not in known:
-                self._manual_order.append(row.session_id)
-                known.add(row.session_id)
+            if row.identity not in known:
+                self._manual_order.append(row.identity)
+                known.add(row.identity)
 
     def _manual_index(self, session_id: str) -> int:
         try:
@@ -2075,7 +2076,7 @@ class NavigatorWindow(Gtk.Window):
 
     def _on_grip_drag_get(self, _grip, _context, selection, _info, _time, list_row) -> None:
         selection.set(selection.get_target(), 8,
-                      list_row.ccnav_row.session_id.encode("utf-8"))
+                      list_row.ccnav_row.identity.encode("utf-8"))
 
     def _on_row_drag_received(self, list_row, _context, _x, y, selection, _info, _time) -> None:
         """Drop a session on another: it joins that session's group and lands
@@ -2087,11 +2088,11 @@ class NavigatorWindow(Gtk.Window):
             return
         dragged = data.decode("utf-8", "replace")
         target = list_row.ccnav_row
-        if dragged == target.session_id:
+        if dragged == target.identity:
             return
         self._set_group_override(dragged, self._group_of(target))  # adopt the group
         after = y > list_row.get_allocated_height() / 2
-        self._reorder_session(dragged, target.session_id, after)
+        self._reorder_session(dragged, target.identity, after)
         self._regroup_now()
 
     def _on_group_grip_drag_get(self, _grip, _context, selection, _info, _time, header_row) -> None:
@@ -2146,7 +2147,7 @@ class NavigatorWindow(Gtk.Window):
         rows = [c.ccnav_row for c in self._listbox.get_children()
                 if not getattr(c, "ccnav_is_header", False)]
         ordered = sorted(rows, key=lambda r: (model.group_key(r),) + tuple(model.sort_key(r)))
-        self._manual_order = [r.session_id for r in ordered]
+        self._manual_order = [r.identity for r in ordered]
         self._regroup_now()
 
     def _row_sort_key(self, widget):
@@ -2470,7 +2471,7 @@ class NavigatorWindow(Gtk.Window):
         list_row.ccnav_sig = _row_signature(row)
 
         new_kind = front_kind(row)
-        sid = row.session_id
+        sid = row.identity
         overlay = list_row.ccnav_indicator
         front = overlay.ccnav_front
         back = overlay.ccnav_back
@@ -2563,7 +2564,7 @@ class NavigatorWindow(Gtk.Window):
         # an answer, a green dot when the agent has reported and is idle.
         kind = front_kind(row)
         indicator = _build_indicator_area(
-            kind, row.session_id in self._acknowledged, row.auxiliary_activity)
+            kind, row.identity in self._acknowledged, row.auxiliary_activity)
         header.pack_start(indicator, False, False, 0)
         self._wire_indicator(indicator, list_row)
 
@@ -2732,7 +2733,7 @@ class NavigatorWindow(Gtk.Window):
         selecting/expanding the row -- the dot is its own little control."""
         if list_row.ccnav_kind != "reported":
             return False
-        sid = list_row.ccnav_row.session_id
+        sid = list_row.ccnav_row.identity
         if sid in self._acknowledged:
             self._acknowledged.discard(sid)
         else:

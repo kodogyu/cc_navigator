@@ -151,11 +151,11 @@ class TmuxIntegrationTest(unittest.TestCase):
 
         self.assertEqual(collected.rows, [], "no live pane, so no row this tick")
         self.assertEqual(collected.unreachable, 1, "the dead socket is reported")
+        remaining = statestore.read_all(self.state_dir)
         self.assertEqual(
-            [p.name for p in self.state_dir.iterdir()],
-            ["s1.json"],
-            "an unobserved socket's state file must survive (F3)",
-        )
+            len(remaining), 1,
+            "an unobserved socket's state file must survive (F3)")
+        self.assertEqual(remaining[0]["session_id"], "s1")
 
     # -- the liveness path still works when the server is observed ----------
 
