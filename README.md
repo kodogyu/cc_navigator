@@ -149,8 +149,6 @@ and header colours, adjust opacity and font size, or restore the theme defaults 
 time. Semantic status colours stay consistent across themes, so red, blue, and green
 always carry the same meaning.
 
-| Midnight (Mint, default) | Nord Dark |
-|:---:|:---:|
-| <img src="docs/images/theme-midnight.png" alt="Midnight Mint theme" width="350"> | <img src="docs/images/theme-nord.png" alt="Nord Dark theme" width="350"> |
-| **Graphite Terminal** | **Clean Light** |
-| <img src="docs/images/theme-graphite.png" alt="Graphite Terminal theme" width="350"> | <img src="docs/images/theme-light.png" alt="Clean Light theme" width="350"> |
+| Midnight (Mint, default) | Nord Dark | Graphite Terminal | Clean Light |
+|:---:|:---:|:---:|:---:|
+| <img src="docs/images/theme-midnight.png" alt="Midnight Mint theme" width="170"> | <img src="docs/images/theme-nord.png" alt="Nord Dark theme" width="170"> | <img src="docs/images/theme-graphite.png" alt="Graphite Terminal theme" width="170"> | <img src="docs/images/theme-light.png" alt="Clean Light theme" width="170"> |
