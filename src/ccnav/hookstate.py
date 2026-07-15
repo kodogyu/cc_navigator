@@ -22,11 +22,14 @@ _WAITING_TOOLS = {"AskUserQuestion": "question", "ExitPlanMode": "plan"}
 # a choice. These read GREEN (reported), like a Stop: Claude output something and
 # is waiting for the user's next move, not for a specific permission/question.
 # idle_prompt fires after an idle timeout, so without this it would OVERWRITE the
-# green Stop that preceded it and turn a finished session red. Every other
-# notification type (permission_prompt, elicitation_dialog, ...) stays red -- the
-# safe default is "wants attention" so a new blocking type is never missed.
-# (notification_type enum sourced from the Claude Code binary.)
-_IDLE_NOTIFICATIONS = {"idle_prompt"}
+# green Stop that preceded it and turn a finished session red. agent_needs_input
+# is emitted by Claude's agent-team UI when a teammate card needs attention; the
+# main prompt itself is still available, so opening that UI must not make the
+# main session look blocked. Every other notification type (permission_prompt,
+# elicitation_dialog, ...) stays red -- the safe default is "wants attention" so
+# a new blocking type is never missed. (agent_needs_input is observed in current
+# Claude Code payloads but is not yet listed in its public hook enum.)
+_IDLE_NOTIFICATIONS = {"idle_prompt", "agent_needs_input"}
 
 
 def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:

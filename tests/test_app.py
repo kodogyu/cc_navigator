@@ -252,6 +252,39 @@ class CollectRowsTest(unittest.TestCase):
         self.assertEqual(result.rows[0].background_process_ids, ("43:901",))
         self.assertTrue(result.rows[0].background_process_active)
 
+    def test_stale_claude_shell_id_is_hidden_when_the_pane_has_no_background_job(self):
+        rec = dict(record(), provider="claude", background_task_ids=["shell:ended"])
+        probed = []
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [rec],
+            sessions_for=lambda s: (True, {"%1": "demo"}),
+            titles_for=lambda s: {"%1": "Claude"},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {
+                "%1": tmuxctl.PaneProcess(pid=123, command="claude")},
+            claude_background_for=lambda pid: probed.append(pid) or False,
+        )
+        self.assertEqual(probed, [123])
+        self.assertEqual(result.rows[0].background_task_ids, ())
+        self.assertFalse(result.rows[0].auxiliary_activity)
+
+    def test_unobservable_claude_process_tree_preserves_shell_state(self):
+        rec = dict(record(), provider="claude", background_task_ids=["shell:maybe"])
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [rec],
+            sessions_for=lambda s: (True, {"%1": "demo"}),
+            titles_for=lambda s: {},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {
+                "%1": tmuxctl.PaneProcess(pid=123, command="claude")},
+            claude_background_for=lambda pid: None,
+        )
+        self.assertEqual(result.rows[0].background_task_ids, ("shell:maybe",))
+
     def test_a_non_codex_node_pane_is_not_discovered(self):
         result = app.collect_rows(
             pathlib.Path("/nonexistent"),

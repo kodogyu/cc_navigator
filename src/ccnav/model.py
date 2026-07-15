@@ -140,7 +140,7 @@ def _background_process_ids(value, live: Optional[Set[str]]) -> Tuple[str, ...]:
     return ids if live is None else tuple(x for x in ids if x in live)
 
 
-def _background_task_ids(value) -> Tuple[str, ...]:
+def _background_task_ids(value, clear_shell: bool = False) -> Tuple[str, ...]:
     """Opaque Claude shell/monitor task identities from a trusted hook record."""
     if not isinstance(value, list):
         return ()
@@ -151,6 +151,8 @@ def _background_task_ids(value) -> Tuple[str, ...]:
         kind, task_id = item.split(":", 1)
         if (kind not in ("shell", "monitor") or not task_id
                 or not all(ch.isalnum() or ch in "-_." for ch in task_id)):
+            continue
+        if clear_shell and kind == "shell":
             continue
         if item not in accepted:
             accepted.append(item)
@@ -228,6 +230,19 @@ def _normalize_legacy_codex_permission(row: Row) -> Row:
     return row
 
 
+def _normalize_claude_agent_notification(row: Row) -> Row:
+    """Agent-team navigation is not a main-session input blockade.
+
+    Current hooks write this notification as idle/green. Normalize records from
+    older builds at display time too, so upgrading fixes an already-red row
+    immediately without rewriting runtime state.
+    """
+    if (row.provider == "claude" and row.state == hookstate.WAITING
+            and row.reason.strip().lower() == "agent_needs_input"):
+        return replace(row, reason=hookstate.STOP_IDLE, message="")
+    return row
+
+
 def build_rows(
     records: List[Dict[str, object]],
     sessions_by_socket: Dict[str, Dict[str, str]],
@@ -236,6 +251,7 @@ def build_rows(
     now: Optional[int] = None,
     stale_seconds: int = STALE_WORKING_SECONDS,
     live_background_ids: Optional[Set[str]] = None,
+    inactive_background_shell_panes: Set[Tuple[str, str]] = frozenset(),
 ) -> List[Row]:
     """A tmux row exists iff its pane is live in tmux; a VSCode row exists iff
     its process identity is in `live_pids` (the poller's kernel liveness check).
@@ -266,7 +282,8 @@ def build_rows(
                 background_process_ids=_background_process_ids(
                     rec.get("background_process_ids"), live_background_ids),
                 background_task_ids=_background_task_ids(
-                    rec.get("background_task_ids")),
+                    rec.get("background_task_ids"),
+                    clear_shell=(socket, pane) in inactive_background_shell_panes),
                 provider=("codex" if rec.get("provider") == "codex" else "claude"),
                 provisional=(rec.get("provisional") is True),
             )
@@ -309,6 +326,7 @@ def build_rows(
             )
         )
     rows = [_normalize_legacy_codex_permission(row) for row in rows]
+    rows = [_normalize_claude_agent_notification(row) for row in rows]
     if now is not None:
         rows = [_destale(row, now, stale_seconds) for row in rows]
     rows.sort(key=sort_key)

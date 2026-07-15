@@ -132,6 +132,19 @@ class BuildRecordTest(unittest.TestCase):
         rec = hook.build_record(payload, ENV, now=2, previous=red)
         self.assertEqual(rec["state"], hookstate.WORKING)
 
+    def test_agent_team_notification_is_green_and_drops_its_message(self):
+        previous = {"state": hookstate.WORKING, "reason": "", "last_prompt": "hi"}
+        payload = dict(
+            PAYLOAD,
+            hook_event_name="Notification",
+            notification_type="agent_needs_input",
+            message="a teammate needs input",
+        )
+        rec = hook.build_record(payload, ENV, now=2, previous=previous)
+        self.assertEqual(rec["state"], hookstate.WAITING)
+        self.assertEqual(rec["reason"], hookstate.STOP_IDLE)
+        self.assertEqual(rec["message"], "")
+
     def test_a_post_tool_use_with_no_previous_is_working(self):
         payload = dict(PAYLOAD, hook_event_name="PostToolUse", tool_name="Bash")
         rec = hook.build_record(payload, ENV, now=2, previous=None)

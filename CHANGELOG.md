@@ -52,6 +52,14 @@ you find out what changed — and what a new version starts doing on your machin
 
 ### Fixed
 
+- Claude's agent-team `agent_needs_input` notification no longer turns the main
+  session red when its prompt is still available. Existing stale records are
+  normalized immediately after upgrading.
+- A completed Claude background Shell no longer leaves the auxiliary spinner
+  behind when no terminal lifecycle hook follows it. The poller verifies the
+  pane's process-group metadata and clears only stale Shell ids; commands,
+  arguments, and output are never read, and an unobservable process tree keeps
+  the prior state rather than risking a false negative.
 - Codex `PermissionRequest` no longer produces a false red input-needed state.
   That hook runs before Codex decides whether automatic review can handle the
   operation and provides no final routing result. Fresh hook installations omit

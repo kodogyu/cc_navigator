@@ -25,7 +25,7 @@ gi.require_version("Gtk", "3.0")
 gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
-from . import (codexsession, config, gnome, model, notify, paths, proc,
+from . import (claudesession, codexsession, config, gnome, model, notify, paths, proc,
                procstat, statestore, tmuxctl, ui, usage, vscodestate,
                wiring)  # noqa: E402
 
@@ -143,6 +143,8 @@ def collect_rows(
         codexsession.find_codex_process),
     live_background_for: Callable[[Set[object]], Set[str]] = (
         codexsession.live_process_ids),
+    claude_background_for: Callable[[int], Optional[bool]] = (
+        claudesession.background_shell_active),
     live_pids_for: Callable[[Set[object]], Set[object]] = procstat.live_claude_pids,
     vscode_session_visible: Callable[[str, str], Optional[bool]] = (
         vscodestate.session_visible),
@@ -174,8 +176,11 @@ def collect_rows(
     # it over stale state from an older command, then chooses the first real hook
     # over it by timestamp.  Short-listing on tmux's foreground command avoids
     # walking unrelated pane process trees.
+    pane_processes = {
+        socket: pane_processes_for(socket) for socket in observed
+    }
     for socket in observed:
-        for pane, pane_process in pane_processes_for(socket).items():
+        for pane, pane_process in pane_processes[socket].items():
             command = pane_process.command.lower()
             if (command not in ("node", "nodejs", "codex")
                     and not command.startswith("codex")):
@@ -200,6 +205,31 @@ def collect_rows(
         if isinstance(value, str)
     }
     live_background_ids = live_background_for(background_ids)
+    # Claude's opaque backgroundTaskId can outlive the OS process because some
+    # completed Bash jobs emit no terminal lifecycle hook. Clear only shell ids
+    # (never monitor ids) when the pane process tree positively proves that no
+    # non-foreground Claude child remains. An unavailable probe is unknown and
+    # conservatively preserves the hook state.
+    inactive_background_shell_panes = set()  # type: Set[tuple]
+    shell_panes = {
+        (str(record.get("tmux_socket") or ""), str(record.get("tmux_pane") or ""))
+        for record in records
+        if record.get("provider") == "claude"
+        and isinstance(record.get("background_task_ids"), list)
+        and any(
+            isinstance(value, str) and value.startswith("shell:")
+            for value in record.get("background_task_ids", []))
+    }
+    for socket, pane in shell_panes:
+        pane_process = pane_processes.get(socket, {}).get(pane)
+        if pane_process is None:
+            continue
+        try:
+            active = claude_background_for(pane_process.pid)
+        except Exception:  # a liveness probe must never stop the poll thread
+            active = None
+        if active is False:
+            inactive_background_shell_panes.add((socket, pane))
     live_vscode_sessions, observed_vscode_sessions = _vscode_ui_sessions(
         records, vscode_session_visible, now)
     prune(
@@ -223,7 +253,8 @@ def collect_rows(
     ]
     rows = model.build_rows(
         records, sessions, titles, live_pids=live_pids, now=now,
-        live_background_ids=live_background_ids)
+        live_background_ids=live_background_ids,
+        inactive_background_shell_panes=inactive_background_shell_panes)
     return Collected(rows, len(set(sockets) - observed))
 
 

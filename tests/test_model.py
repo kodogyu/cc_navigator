@@ -112,6 +112,15 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(rows[0].state, hookstate.WAITING)
         self.assertEqual(rows[0].reason, "permission")
 
+    def test_old_claude_agent_attention_record_is_not_shown_red(self):
+        rec = dict(
+            record("a", "%1"), provider="claude", state=hookstate.WAITING,
+            reason="agent_needs_input", message="a teammate asks something")
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].state, hookstate.WAITING)
+        self.assertEqual(rows[0].reason, hookstate.STOP_IDLE)
+        self.assertEqual(rows[0].message, "")
+
     def test_provisional_is_strictly_carried_to_the_row(self):
         provisional = dict(record("a", "%1"), provider="codex", provisional=True)
         rows = model.build_rows([provisional], {SOCK: {"%1": "demo"}}, {SOCK: {}})
@@ -204,6 +213,18 @@ class BuildRowsTest(unittest.TestCase):
             rows[0].background_task_ids, ("shell:b123", "monitor:m456"))
         self.assertTrue(rows[0].background_task_active)
         self.assertTrue(rows[0].auxiliary_activity)
+
+    def test_a_positively_inactive_pane_drops_only_stale_shell_tasks(self):
+        rec = dict(
+            record("a", "%1", state=hookstate.WAITING), provider="claude",
+            background_task_ids=["shell:ended", "monitor:watching"],
+        )
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}}, {SOCK: {}},
+            inactive_background_shell_panes={(SOCK, "%1")},
+        )
+        self.assertEqual(rows[0].background_task_ids, ("monitor:watching",))
+        self.assertTrue(rows[0].background_task_active)
 
     def test_invalid_background_task_ids_are_ignored(self):
         rec = dict(record("a", "%1"), background_task_ids=[
