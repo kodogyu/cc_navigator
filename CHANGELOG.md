@@ -54,7 +54,8 @@ you find out what changed — and what a new version starts doing on your machin
 
 - Claude's agent-team `agent_needs_input` notification no longer turns the main
   session red when its prompt is still available. Existing stale records are
-  normalized immediately after upgrading.
+  normalized immediately after upgrading, while a simultaneous native title
+  spinner still marks the session as actively working.
 - A completed Claude background Shell no longer leaves the auxiliary spinner
   behind when no terminal lifecycle hook follows it. The poller verifies the
   pane's process-group metadata and clears only stale Shell ids; commands,

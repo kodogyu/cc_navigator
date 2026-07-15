@@ -121,6 +121,20 @@ class BuildRowsTest(unittest.TestCase):
         self.assertEqual(rows[0].reason, hookstate.STOP_IDLE)
         self.assertEqual(rows[0].message, "")
 
+    def test_claude_agent_attention_with_live_title_spinner_is_working(self):
+        for frame in model.CLAUDE_TITLE_SPINNER_FRAMES:
+            rec = dict(
+                record("a", "%1"), provider="claude", state=hookstate.WAITING,
+                reason=hookstate.AGENT_NEEDS_INPUT,
+                message="a teammate asks something")
+            rows = model.build_rows(
+                [rec], {SOCK: {"%1": "demo"}},
+                {SOCK: {"%1": frame + " active task"}},
+            )
+            self.assertEqual(rows[0].state, hookstate.WORKING, frame)
+            self.assertEqual(rows[0].reason, "", frame)
+            self.assertEqual(rows[0].message, "", frame)
+
     def test_provisional_is_strictly_carried_to_the_row(self):
         provisional = dict(record("a", "%1"), provider="codex", provisional=True)
         rows = model.build_rows([provisional], {SOCK: {"%1": "demo"}}, {SOCK: {}})

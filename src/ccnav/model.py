@@ -233,12 +233,16 @@ def _normalize_legacy_codex_permission(row: Row) -> Row:
 def _normalize_claude_agent_notification(row: Row) -> Row:
     """Agent-team navigation is not a main-session input blockade.
 
-    Current hooks write this notification as idle/green. Normalize records from
-    older builds at display time too, so upgrading fixes an already-red row
-    immediately without rewriting runtime state.
+    The main prompt remains available, so an otherwise idle notification reads
+    green rather than red. Keep a simultaneously live native title spinner as
+    independent evidence that Claude is working, though; that combination must
+    retain the working arrow. This also normalizes records from older builds at
+    display time without rewriting runtime state.
     """
     if (row.provider == "claude" and row.state == hookstate.WAITING
-            and row.reason.strip().lower() == "agent_needs_input"):
+            and row.reason.strip().lower() == hookstate.AGENT_NEEDS_INPUT):
+        if (row.title and row.title[0] in CLAUDE_TITLE_SPINNER_FRAMES):
+            return replace(row, state=hookstate.WORKING, reason="", message="")
         return replace(row, reason=hookstate.STOP_IDLE, message="")
     return row
 

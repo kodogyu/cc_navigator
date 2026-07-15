@@ -75,15 +75,16 @@ class ClassifyTest(unittest.TestCase):
             {"hook_event_name": "Notification", "notification_type": "idle_prompt"})
         self.assertEqual(result, (hookstate.WAITING, hookstate.STOP_IDLE))
 
-    def test_agent_team_attention_does_not_block_the_main_session(self):
+    def test_agent_team_attention_preserves_its_reason_for_reconciliation(self):
         # Opening Claude's agent-team view can emit this notification for a
-        # teammate card. The main prompt remains available, so it is green/idle
-        # rather than a red user-input blockade.
+        # teammate card. Preserve the reason so the model can combine it with a
+        # live title spinner; the model still prevents it from appearing red.
         result = hookstate.classify({
             "hook_event_name": "Notification",
             "notification_type": "agent_needs_input",
         })
-        self.assertEqual(result, (hookstate.WAITING, hookstate.STOP_IDLE))
+        self.assertEqual(
+            result, (hookstate.WAITING, hookstate.AGENT_NEEDS_INPUT))
 
     def test_permission_prompt_notification_still_reads_as_input(self):
         result = hookstate.classify(

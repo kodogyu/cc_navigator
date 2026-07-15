@@ -460,7 +460,7 @@ def build_record(
         # is waiting for your input") would otherwise render on a GREEN row and
         # read as a contradiction. Stop already arrives message-less; this makes
         # the idle-notification path match it.
-        if reason == hookstate.STOP_IDLE:
+        if reason in (hookstate.STOP_IDLE, hookstate.AGENT_NEEDS_INPUT):
             message = ""
         else:
             message = _flatten(payload.get("message"), MESSAGE_LIMIT)
