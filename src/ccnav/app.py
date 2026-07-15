@@ -26,7 +26,8 @@ gi.require_version("Gdk", "3.0")
 from gi.repository import Gdk, Gio, GLib, Gtk  # noqa: E402
 
 from . import (codexsession, config, gnome, model, notify, paths, proc,
-               procstat, statestore, tmuxctl, ui, usage, wiring)  # noqa: E402
+               procstat, statestore, tmuxctl, ui, usage, vscodestate,
+               wiring)  # noqa: E402
 
 # Fallback only: the live interval comes from self._settings.poll_seconds. Kept
 # so a bare Application built in a test (which does not load config) still polls
@@ -42,6 +43,10 @@ USAGE_POLL_SECONDS = 300
 # look at. Bound it tightly and fail to the safe side: Eval counts as unavailable,
 # the jump buttons stay disabled, and EVAL_UNAVAILABLE_HINT explains why.
 EVAL_PROBE_TIMEOUT = 1.0
+
+# SessionStart can beat VS Code's asynchronous workbench-state write by a few
+# ticks. Do not judge a brand-new record against a temporarily old DB snapshot.
+VSCODE_UI_STATE_GRACE_SECONDS = 5
 
 
 def probe_eval_available() -> bool:
@@ -87,6 +92,44 @@ def _vscode_pids(records: List[Dict[str, object]]) -> Set[object]:
     return pids
 
 
+def _vscode_ui_sessions(
+    records: List[Dict[str, object]],
+    visible: Callable[[str, str], Optional[bool]],
+    now: int,
+) -> "tuple":
+    """(live, observed) VS Code session ids from persisted workbench UI state.
+
+    A None result is deliberately unobserved: unsupported/missing/locked state
+    must retain process-only liveness. A fresh record also gets a short grace
+    window because its SessionStart hook and VS Code's editor-state persistence
+    are asynchronous.
+    """
+    live = set()  # type: Set[str]
+    observed = set()  # type: Set[str]
+    for rec in records:
+        if str(rec.get("kind") or "") != "vscode":
+            continue
+        session_id = str(rec.get("session_id") or "")
+        if not session_id:
+            continue
+        try:
+            updated_at = int(rec.get("updated_at", 0))
+        except (TypeError, ValueError):
+            updated_at = 0
+        if now - updated_at < VSCODE_UI_STATE_GRACE_SECONDS:
+            continue
+        try:
+            result = visible(session_id, str(rec.get("cwd") or ""))
+        except Exception:  # a local-state probe must never stop the poll thread
+            result = None
+        if result is None:
+            continue
+        observed.add(session_id)
+        if result:
+            live.add(session_id)
+    return live, observed
+
+
 def collect_rows(
     state_dir: pathlib.Path,
     read_all: Callable[[pathlib.Path], List[Dict[str, object]]] = statestore.read_all,
@@ -101,7 +144,10 @@ def collect_rows(
     live_background_for: Callable[[Set[object]], Set[str]] = (
         codexsession.live_process_ids),
     live_pids_for: Callable[[Set[object]], Set[object]] = procstat.live_claude_pids,
+    vscode_session_visible: Callable[[str, str], Optional[bool]] = (
+        vscodestate.session_visible),
 ) -> Collected:
+    now = int(time.time())
     records = read_all(state_dir)
     recorded_sockets = {
         str(r.get("tmux_socket") or "") for r in records if r.get("tmux_socket")
@@ -138,7 +184,10 @@ def collect_rows(
             if process is not None and pane in sessions.get(socket, {}):
                 records.append(codexsession.provisional_record(socket, pane, process))
 
-    # Kernel liveness for the VSCode sessions: same "observed vs live" split tmux
+    # Kernel liveness for the VSCode sessions: process identity plus, where the
+    # platform exposes it, the stream-json stdio peer. The Claude backend can
+    # outlive a closed editor tab, while its disconnected transport tells us the
+    # session UI is already gone. Keep the same "observed vs live" split tmux
     # uses, so prune never reaps a pid it did not actually check this tick.
     live_pids = live_pids_for(observed_pids)
     background_ids = {
@@ -151,6 +200,8 @@ def collect_rows(
         if isinstance(value, str)
     }
     live_background_ids = live_background_for(background_ids)
+    live_vscode_sessions, observed_vscode_sessions = _vscode_ui_sessions(
+        records, vscode_session_visible, now)
     prune(
         state_dir,
         model.live_pane_keys(sessions),
@@ -158,8 +209,20 @@ def collect_rows(
         live_pids=live_pids,
         observed_pids=observed_pids,
     )
+    # Hide a positively closed VS Code UI without deleting its state record.
+    # The extension may reuse the same still-running backend when its sidebar is
+    # shown again and emit no new lifecycle hook; retaining the record lets the
+    # row return as soon as workbench state says the UI is visible again.
+    records = [
+        rec for rec in records
+        if not (
+            str(rec.get("kind") or "") == "vscode"
+            and str(rec.get("session_id") or "") in observed_vscode_sessions
+            and str(rec.get("session_id") or "") not in live_vscode_sessions
+        )
+    ]
     rows = model.build_rows(
-        records, sessions, titles, live_pids=live_pids, now=int(time.time()),
+        records, sessions, titles, live_pids=live_pids, now=now,
         live_background_ids=live_background_ids)
     return Collected(rows, len(set(sockets) - observed))
 

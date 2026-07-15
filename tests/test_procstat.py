@@ -1,4 +1,6 @@
 """Tests for procstat: /proc parsing and the VSCode-session liveness it feeds."""
+import errno
+import struct
 import unittest
 
 from ccnav import procstat
@@ -101,14 +103,123 @@ class PidIsClaudeTest(unittest.TestCase):
         alive = {10, 30}
         read = lambda pid: stat_blob("claude" if pid in alive else "sh", 1)
         self.assertEqual(
-            procstat.live_claude_pids({10, 20, 30}, read_stat=read), {10, 30}
+            procstat.live_claude_pids(
+                {10, 20, 30}, read_stat=read,
+                transport_connected=lambda pid: True),
+            {10, 30}
         )
 
     def test_identity_keys_survive_only_with_the_same_start_time(self):
         read = lambda pid: stat_blob("claude", 1, start_time=200)
         keys = {(10, 100), (10, 200)}
         self.assertEqual(
-            procstat.live_claude_pids(keys, read_stat=read), {(10, 200)})
+            procstat.live_claude_pids(
+                keys, read_stat=read,
+                transport_connected=lambda pid: True),
+            {(10, 200)})
+
+    def test_a_disconnected_vscode_transport_reaps_a_live_backend(self):
+        read = lambda pid: stat_blob("claude", 1, start_time=200)
+        self.assertEqual(
+            procstat.live_claude_pids(
+                {(10, 200)}, read_stat=read,
+                transport_connected=lambda pid: False),
+            set())
+
+    def test_an_unobservable_transport_falls_back_to_process_liveness(self):
+        read = lambda pid: stat_blob("claude", 1, start_time=200)
+        self.assertEqual(
+            procstat.live_claude_pids(
+                {(10, 200)}, read_stat=read,
+                transport_connected=lambda pid: None),
+            {(10, 200)})
+
+    def test_transport_probe_failure_falls_back_without_escaping(self):
+        read = lambda pid: stat_blob("claude", 1)
+        def explode(_pid):
+            raise RuntimeError("probe failed")
+        self.assertEqual(
+            procstat.live_claude_pids(
+                {10}, read_stat=read, transport_connected=explode),
+            {10})
+
+
+class VscodeTransportTest(unittest.TestCase):
+    def test_connected_socket_peer_is_true(self):
+        self.assertTrue(procstat.vscode_transport_connected(
+            42,
+            readlink=lambda path: "socket:[123]",
+            peer_inode=lambda inode: 456))
+
+    def test_closed_socket_peer_is_false(self):
+        self.assertFalse(procstat.vscode_transport_connected(
+            42,
+            readlink=lambda path: "socket:[123]",
+            peer_inode=lambda inode: 0))
+
+    def test_unobservable_or_non_socket_stdin_is_unknown(self):
+        self.assertIsNone(procstat.vscode_transport_connected(
+            42, readlink=lambda path: "pipe:[123]"))
+        self.assertIsNone(procstat.vscode_transport_connected(
+            42,
+            readlink=lambda path: "socket:[123]",
+            peer_inode=lambda inode: None))
+
+    def test_readlink_failure_is_unknown(self):
+        def missing(_path):
+            raise OSError("gone")
+        self.assertIsNone(procstat.vscode_transport_connected(42, readlink=missing))
+
+    def test_a_vanished_process_or_stdin_is_disconnected(self):
+        def vanished(_path):
+            raise OSError(errno.ENOENT, "gone")
+        self.assertFalse(procstat.vscode_transport_connected(42, readlink=vanished))
+
+
+class UnixPeerQueryTest(unittest.TestCase):
+    class FakeSocket:
+        def __init__(self, response):
+            self.response = response
+            self.sent = b""
+            self.closed = False
+
+        def settimeout(self, _seconds):
+            pass
+
+        def send(self, data):
+            self.sent = data
+
+        def recv(self, _size):
+            return self.response
+
+        def close(self):
+            self.closed = True
+
+    @staticmethod
+    def _response(inode, peer=None):
+        body = struct.pack("=BBBBIII", 1, 1, 1, 0, inode, 0, 0)
+        if peer is not None:
+            body += struct.pack("=HHI", 8, 2, peer)
+        return struct.pack("=IHHII", 16 + len(body), 20, 0, 1, 0) + body
+
+    def test_reads_the_connected_peer_inode_and_closes_the_query_socket(self):
+        fake = self.FakeSocket(self._response(123, peer=456))
+        result = procstat._unix_peer_inode(  # noqa: SLF001 -- kernel parser seam
+            123, socket_factory=lambda *args: fake)
+        self.assertEqual(result, 456)
+        self.assertTrue(fake.sent)
+        self.assertTrue(fake.closed)
+
+    def test_a_socket_without_a_peer_attribute_is_disconnected(self):
+        fake = self.FakeSocket(self._response(123))
+        self.assertEqual(procstat._unix_peer_inode(  # noqa: SLF001
+            123, socket_factory=lambda *args: fake), 0)
+
+    def test_an_unavailable_diag_socket_is_unknown(self):
+        def denied(*_args):
+            raise OSError(errno.EPERM, "denied")
+        self.assertIsNone(procstat._unix_peer_inode(  # noqa: SLF001
+            123, socket_factory=denied))
 
 
 if __name__ == "__main__":

@@ -132,9 +132,10 @@ def prune(
     from tmux is gone from the model.
 
     A VSCode (non-tmux) record has no pane, so its liveness comes from the
-    kernel instead: `live_pids` is the set of claude pids the poller found still
-    running this tick, and `observed_pids` is the set it actually checked. A
-    VSCode record is reaped iff its claude_pid was observed and is not live --
+    kernel instead: `live_pids` is the set of claude process identities whose
+    VS Code stdio transport is not known to be disconnected, and
+    `observed_pids` is the set it actually checked. A VSCode record is reaped
+    iff its claude_pid was observed and is not live --
     the same "never judge what you did not observe" rule the tmux path uses for
     an unanswered socket, so a pid the poller did not check is left alone.
 
