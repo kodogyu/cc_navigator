@@ -3,18 +3,38 @@
 tmux hands cc_navigator two things at once: a session's ADDRESS (socket+pane)
 and its LIVENESS (the pane shows up in list-panes). A VSCode extension-hosted
 Claude session has neither -- it is a headless `claude` subprocess the editor
-drives over stream-json, with no pty and no tmux. So liveness is taken straight
-from the kernel: the owning `claude` process's pid. This module is the one place
-that parses /proc for it, and every reader is injectable so the logic is tested
-from fixtures rather than a live process table.
+drives over a stream-json stdio socket, with no pty and no tmux. Its process may
+outlive a closed editor tab, so liveness needs both the owning process identity
+and (when the kernel exposes it) a connected stdio peer. This module is the one
+place that inspects those process details, and every reader is injectable so the
+decision logic is tested from fixtures rather than a live process table.
 """
 from __future__ import annotations
 
+import errno
+import os
+import socket
+import struct
 from typing import Callable, Optional, Set, Tuple
 
 # A reader maps a pid to the raw bytes of its /proc/<pid>/stat, and raises
 # OSError when the pid is gone (exactly what open() does on a missing path).
 StatReader = Callable[[int], bytes]
+
+# Linux SOCK_DIAG constants and fixed-size structures. cc_navigator is a Linux
+# desktop application; querying this kernel API avoids running/parsing `ss` once
+# per second and reveals only socket identity/connectivity -- never stream data.
+_NETLINK_SOCK_DIAG = 4
+_SOCK_DIAG_BY_FAMILY = 20
+_NLM_F_REQUEST = 1
+_NLMSG_ERROR = 2
+_NLMSG_DONE = 3
+_UDIAG_SHOW_PEER = 4
+_UNIX_DIAG_PEER = 2
+_NLMSG_HEADER = struct.Struct("=IHHII")
+_UNIX_DIAG_REQUEST = struct.Struct("=BBHIIIII")
+_UNIX_DIAG_MESSAGE = struct.Struct("=BBBBIII")
+_RTATTR = struct.Struct("=HH")
 
 
 def _default_read_stat(pid: int) -> bytes:
@@ -136,21 +156,144 @@ def pid_is_claude(
     return True
 
 
+def _unix_peer_inode(
+    inode: int, socket_factory: Callable[..., object] = socket.socket,
+) -> Optional[int]:
+    """Connected peer inode for a Unix socket, 0 when disconnected, or None.
+
+    ``None`` deliberately means "could not observe" (unsupported kernel,
+    permission failure, malformed response, timeout). Callers must fall back to
+    PID liveness in that case rather than hiding a possibly live session.
+    """
+    try:
+        inode = int(inode)
+    except (TypeError, ValueError):
+        return None
+    if inode <= 0:
+        return None
+    try:
+        diag = socket_factory(socket.AF_NETLINK, socket.SOCK_RAW, _NETLINK_SOCK_DIAG)
+    except OSError:
+        return None
+    sequence = 1
+    try:
+        # A local kernel query normally answers immediately. Keep failure
+        # bounded so several stale VS Code records cannot stall the poll tick.
+        diag.settimeout(0.05)
+        request = _UNIX_DIAG_REQUEST.pack(
+            socket.AF_UNIX, 0, 0, 0xFFFFFFFF, inode, _UDIAG_SHOW_PEER,
+            0xFFFFFFFF, 0xFFFFFFFF)
+        diag.send(_NLMSG_HEADER.pack(
+            _NLMSG_HEADER.size + len(request), _SOCK_DIAG_BY_FAMILY,
+            _NLM_F_REQUEST, sequence, 0) + request)
+        while True:
+            data = diag.recv(8192)
+            offset = 0
+            while offset + _NLMSG_HEADER.size <= len(data):
+                length, kind, _flags, got_sequence, _pid = (
+                    _NLMSG_HEADER.unpack_from(data, offset))
+                if length < _NLMSG_HEADER.size or offset + length > len(data):
+                    return None
+                body = data[offset + _NLMSG_HEADER.size:offset + length]
+                if got_sequence == sequence and kind == _NLMSG_ERROR:
+                    return None
+                if got_sequence == sequence and kind == _NLMSG_DONE:
+                    return 0
+                if (got_sequence == sequence
+                        and kind == _SOCK_DIAG_BY_FAMILY
+                        and len(body) >= _UNIX_DIAG_MESSAGE.size):
+                    message = _UNIX_DIAG_MESSAGE.unpack_from(body)
+                    if message[4] == inode:
+                        attr_offset = _UNIX_DIAG_MESSAGE.size
+                        while attr_offset + _RTATTR.size <= len(body):
+                            attr_len, attr_type = _RTATTR.unpack_from(
+                                body, attr_offset)
+                            if (attr_len < _RTATTR.size
+                                    or attr_offset + attr_len > len(body)):
+                                return None
+                            if (attr_type == _UNIX_DIAG_PEER
+                                    and attr_len >= _RTATTR.size + 4):
+                                return struct.unpack_from(
+                                    "=I", body, attr_offset + _RTATTR.size)[0]
+                            attr_offset += (attr_len + 3) & ~3
+                        return 0
+                offset += (length + 3) & ~3
+    except (OSError, socket.timeout):
+        return None
+    finally:
+        try:
+            diag.close()
+        except OSError:
+            pass
+
+
+def vscode_transport_connected(
+    pid: int,
+    readlink: Callable[[str], str] = os.readlink,
+    peer_inode: Callable[[int], Optional[int]] = _unix_peer_inode,
+) -> Optional[bool]:
+    """Whether a VS Code-hosted Claude still has its stdio peer connected.
+
+    Claude's VS Code process can remain alive after its webview tab closes. The
+    stream-json transport is fd 0, normally one side of an anonymous Unix
+    socketpair. A peer inode of zero means the editor side closed and the row can
+    disappear immediately. A non-socket fd or any observation failure returns
+    None, preserving the previous process-only behaviour for other extension
+    versions and restricted systems.
+    """
+    try:
+        pid = int(pid)
+        target = readlink("/proc/%d/fd/0" % pid)
+    except OSError as exc:
+        # pid_is_claude already succeeded immediately before this probe. If the
+        # process or fd vanished in that tiny race, it is definitely not a live
+        # editor transport. Permission/feature failures remain unknown so they
+        # take the conservative PID-only fallback.
+        if exc.errno in (errno.ENOENT, errno.ESRCH):
+            return False
+        return None
+    except (TypeError, ValueError):
+        return None
+    prefix = "socket:["
+    if not target.startswith(prefix) or not target.endswith("]"):
+        return None
+    try:
+        inode = int(target[len(prefix):-1])
+        peer = peer_inode(inode)
+    except (TypeError, ValueError, OSError):
+        return None
+    return None if peer is None else peer > 0
+
+
 def live_claude_pids(
-    pids, read_stat: StatReader = _default_read_stat
+    pids,
+    read_stat: StatReader = _default_read_stat,
+    transport_connected: Callable[[int], Optional[bool]] = (
+        vscode_transport_connected),
 ) -> Set[object]:
     """Return the live subset of pid keys.
 
     New records use ``(pid, start_time)`` keys, which distinguish a recycled PID
-    even when the new process is also named ``claude``. Legacy integer keys keep
-    the old name-only check until their next hook update.
+    even when the new process is also named ``claude``. A definitely disconnected
+    VS Code stdio peer removes a still-running backend whose editor tab closed;
+    an unobservable transport falls back to process identity. Legacy integer
+    keys keep the old name-only identity check until their next hook update.
     """
     live = set()  # type: Set[object]
     for key in pids:
         if isinstance(key, tuple) and len(key) == 2:
             pid, started = key
-            if pid_is_claude(pid, expected_start_time=started, read_stat=read_stat):
-                live.add(key)
-        elif pid_is_claude(key, read_stat=read_stat):
+            is_claude = pid_is_claude(
+                pid, expected_start_time=started, read_stat=read_stat)
+        else:
+            pid = key
+            is_claude = pid_is_claude(pid, read_stat=read_stat)
+        if not is_claude:
+            continue
+        try:
+            connected = transport_connected(int(pid))
+        except Exception:  # a liveness probe must never stop the poll thread
+            connected = None
+        if connected is not False:
             live.add(key)
     return live

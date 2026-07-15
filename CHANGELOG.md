@@ -43,9 +43,17 @@ you find out what changed — and what a new version starts doing on your machin
   confirmed; failed or ambiguous window matches leave the editor untouched.
 - VS Code process liveness records both PID and kernel start time, preventing a stale
   session from surviving PID reuse by another Claude process.
+- VS Code UI liveness reads only exact local workbench-state keys. Open-editor
+  state is reduced to a boolean inside SQLite, so unrelated file names, tab
+  titles, and contents are never returned to cc_navigator.
 
 ### Fixed
 
+- VS Code Claude sessions disappear when their editor tab and sidebar close even
+  if the extension leaves the headless `claude` backend and stdio peer running.
+  Liveness now checks for a matching Claude editor or visible active sidebar in
+  the workspace state, then the anonymous stdio peer and PID/start time. Unknown
+  or unsupported workbench state safely falls back to the process checks.
 - Codex's Braille loading glyph in the pane title now animates locally at the same
   80 ms cadence as the working arrow. Normal one-second tmux polling still handles
   session data, but no longer makes the title spinner jump once per poll.

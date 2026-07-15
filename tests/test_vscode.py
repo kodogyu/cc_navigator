@@ -361,6 +361,16 @@ class ActivateVscodeSessionTest(unittest.TestCase):
 
 
 class CollectRowsVscodeTest(unittest.TestCase):
+    def test_fresh_hook_record_gets_a_workbench_state_grace_window(self):
+        rec = {
+            "session_id": "v1", "cwd": "/p", "kind": "vscode",
+            "updated_at": 100,
+        }
+        live, observed = app._vscode_ui_sessions(  # noqa: SLF001
+            [rec], lambda session_id, cwd: False, now=102)
+        self.assertEqual(live, set())
+        self.assertEqual(observed, set())
+
     def test_builds_a_vscode_row_with_no_tmux_sockets_present(self):
         rec = {
             "session_id": "v1", "cwd": "/home/u/robotics/datamil", "kind": "vscode",
@@ -382,10 +392,37 @@ class CollectRowsVscodeTest(unittest.TestCase):
             # that discovery seam empty.
             socket_candidates=lambda: [],
             live_pids_for=lambda pids: {4321} if 4321 in pids else set(),
+            vscode_session_visible=lambda session_id, cwd: None,
         )
         self.assertEqual(len(result.rows), 1)
         self.assertTrue(result.rows[0].is_vscode)
         self.assertEqual(result.rows[0].vscode_folder, "datamil")
+
+    def test_closed_ui_hides_row_while_the_backend_pid_is_still_live(self):
+        rec = {
+            "session_id": "v1", "cwd": "/home/u/robotics/datamil",
+            "kind": "vscode", "claude_pid": 4321,
+            "claude_start_time": 100, "tmux_socket": "", "tmux_pane": "",
+            "state": hookstate.WAITING, "reason": "idle", "message": "",
+            "updated_at": 7,
+        }
+        pruned = {}
+
+        def capture_prune(*_args, **kwargs):
+            pruned.update(kwargs)
+            return 0
+
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"), read_all=lambda d: [rec],
+            sessions_for=lambda socket: (True, {}), titles_for=lambda socket: {},
+            prune=capture_prune, socket_candidates=lambda: [],
+            live_pids_for=lambda pids: {(4321, 100)},
+            vscode_session_visible=lambda session_id, cwd: False,
+        )
+        self.assertEqual(result.rows, [])
+        # UI hiding is reversible: the live backend record is retained so the
+        # row can return if the same sidebar becomes visible without a new hook.
+        self.assertEqual(pruned["live_pids"], {(4321, 100)})
 
 
 if __name__ == "__main__":
