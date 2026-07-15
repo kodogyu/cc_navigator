@@ -216,20 +216,33 @@ def _next_background_task_ids(
             "monitor", _task_id(response, "taskId", "task_id", "backgroundTaskId"))
         if identity:
             identities = list(identities) + [identity]
-    elif tool == "TaskStop":
-        task_id = _task_id(tool_input, "task_id", "taskId") or _task_id(
-            response, "task_id", "taskId")
+    elif tool in ("TaskStop", "KillBash"):
+        # Claude's background-shell tools use shell_id/bash_id; newer generic
+        # task tools use task_id. Accept both lifecycle surfaces while storing
+        # only the same opaque ID.
+        task_id = _task_id(
+            tool_input, "task_id", "taskId", "shell_id", "bash_id") or _task_id(
+                response, "task_id", "taskId", "shell_id", "bash_id")
         identities = _remove_task_id(list(identities), task_id)
-    elif tool == "TaskOutput":
-        task = response.get("task")
-        if isinstance(task, Mapping):
-            task_id = _task_id(task, "task_id", "taskId", "id")
-            kind = _task_kind(task.get("task_type") or task.get("type"))
-            status = str(task.get("status") or "").strip().lower()
+    elif tool in ("TaskOutput", "BashOutput"):
+        if tool == "BashOutput":
+            task_id = _task_id(
+                tool_input, "bash_id", "shell_id", "task_id", "taskId")
+            status = str(response.get("status") or "").strip().lower()
             if task_id and status in _TERMINAL_TASK_STATUSES:
                 identities = _remove_task_id(list(identities), task_id)
-            elif task_id and kind:
-                identities = list(identities) + [_task_identity(kind, task_id)]
+            elif task_id:
+                identities = list(identities) + [_task_identity("shell", task_id)]
+        else:
+            task = response.get("task")
+            if isinstance(task, Mapping):
+                task_id = _task_id(task, "task_id", "taskId", "id")
+                kind = _task_kind(task.get("task_type") or task.get("type"))
+                status = str(task.get("status") or "").strip().lower()
+                if task_id and status in _TERMINAL_TASK_STATUSES:
+                    identities = _remove_task_id(list(identities), task_id)
+                elif task_id and kind:
+                    identities = list(identities) + [_task_identity(kind, task_id)]
     return sorted(set(value for value in identities if value))
 
 

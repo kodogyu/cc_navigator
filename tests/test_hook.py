@@ -325,6 +325,28 @@ class BackgroundTaskTrackingTest(unittest.TestCase):
             tool_response={"task_id": "m456", "message": "private"})
         self.assertEqual(stopped["background_task_ids"], [])
 
+    def test_bash_output_and_kill_bash_track_claudes_shell_lifecycle(self):
+        running = self._rec(
+            "PostToolUse", tool_name="BashOutput",
+            tool_input={"bash_id": "b123", "filter": "private"},
+            tool_response={"output": "private", "status": "running"})
+        self.assertEqual(running["background_task_ids"], ["shell:b123"])
+
+        completed = self._rec(
+            "PostToolUse", previous=running, tool_name="BashOutput",
+            tool_input={"bash_id": "b123"},
+            tool_response={"output": "private", "status": "completed",
+                           "exitCode": 0})
+        self.assertEqual(completed["background_task_ids"], [])
+
+        killed = self._rec(
+            "PostToolUse", previous={
+                "state": hookstate.WORKING, "reason": "",
+                "background_task_ids": ["shell:b456"],
+            }, tool_name="KillBash", tool_input={"shell_id": "b456"},
+            tool_response={"message": "private", "shell_id": "b456"})
+        self.assertEqual(killed["background_task_ids"], [])
+
     def test_snapshot_is_authoritative_and_session_start_resets_old_ids(self):
         previous = {
             "state": hookstate.WORKING, "reason": "",

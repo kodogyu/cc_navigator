@@ -66,8 +66,9 @@ you find out what changed — and what a new version starts doing on your machin
   even while either kind of auxiliary work continues. Only opaque PID/start-time
   identities are stored; terminal commands and output are never recorded.
 - Claude background Shell and Monitor tasks now use that auxiliary-work layer as
-  well. Stop snapshots and tool lifecycle events keep the indicator current, while
-  the front dot remains green whenever the main session is ready for input.
+  well. Stop snapshots and both generic and Claude-native (`BashOutput`/`KillBash`)
+  tool lifecycle events keep the indicator current, while the front dot remains
+  green whenever the main session is ready for input.
 - VS Code Claude sessions disappear when their editor tab and sidebar close even
   if the extension leaves the headless `claude` backend and stdio peer running.
   Liveness now checks for a matching Claude editor or visible active sidebar in
