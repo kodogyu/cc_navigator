@@ -8,7 +8,9 @@
 > a notification came from.
 
 <p align="center">
-  <img src="docs/images/screenshot-status.png" alt="cc_navigator panel" width="340">
+  <img src="docs/images/screenshot-status.png" alt="cc_navigator status view in the Midnight theme" width="375">
+  <br>
+  <sub>Fictional sessions in the default Midnight theme. The Token Usage meter is the optional ccusage integration.</sub>
 </p>
 
 > The panel's UI is in Korean; this document describes it in English.
@@ -85,18 +87,21 @@ changes — including what it starts doing on your machine — is in
 
 ## Screen layout
 
-Each session is **one row**: a status glyph, its title, and (when selected) its
-working directory, last prompt, a reply box, and a jump button.
+Each session is **one row**: a status glyph, provider badge (Codex rows), title,
+and (when selected) its working directory, last prompt, reply box, and jump button.
+The indicator has a front layer for the main session and, when needed, a smaller
+rear spinner for work continuing in the background.
 
 - 🔴 **red** — confirmed waiting on you (permission, question, plan). A title-bar
   badge counts these. Codex's pre-routing `PermissionRequest` alone is not treated
   as a wait because it also fires for requests handled by automatic review.
 - 🟢 **green** — finished its turn / idle. Click it to mark seen (a green check ✓).
-- ↻ **spinning** — the main agent is working. Running **subagents, Codex background
-  terminals, or Claude background Shell/Monitor tasks** add a second spinner behind
-  the main indicator. The front stays green whenever the main session is idle and
-  ready for input; otherwise a working main agent with auxiliary work uses a calm
-  blue dot.
+- ↻ **spinning** — the main agent is working. A live Claude or Codex title spinner
+  also keeps a long-running turn active when no recent hook event has arrived.
+- **rear spinner** — a **subagent, Codex background terminal, or Claude background
+  Shell/Monitor task** is still running. The front remains red or green when the
+  main session needs/is ready for input; a working main session uses a calm blue
+  dot while its rear spinner carries the motion.
 
 Switch views with the **Sort by** dropdown:
 
@@ -108,7 +113,7 @@ Switch views with the **Sort by** dropdown:
   ⠿ handle to move it, rename with the pencil, or press **자동 정렬** to re-group.
 
 <p align="center">
-  <img src="docs/images/screenshot-groups.png" alt="cc_navigator grouped by project" width="340">
+  <img src="docs/images/screenshot-groups.png" alt="cc_navigator grouped by project in the Midnight theme" width="375">
 </p>
 
 **Act on a session:** click a row, type a line and press **Enter** to send it, or

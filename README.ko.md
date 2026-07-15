@@ -7,7 +7,9 @@
 > 항상 위에 떠 있는 패널 — 알림이 어느 세션에서 왔는지 창을 뒤질 필요가 없습니다.
 
 <p align="center">
-  <img src="docs/images/screenshot-status.png" alt="cc_navigator 패널" width="340">
+  <img src="docs/images/screenshot-status.png" alt="Midnight 테마의 cc_navigator 상태별 화면" width="375">
+  <br>
+  <sub>기본 Midnight 테마와 가상 세션으로 촬영했습니다. Token Usage 막대는 선택 기능인 ccusage 연동을 켰을 때만 표시됩니다.</sub>
 </p>
 
 ---
@@ -80,16 +82,21 @@ set -g set-titles-string 'ccnav:#{session_name}'
 
 ## 화면 구성
 
-각 세션은 **한 줄**입니다. 상태 아이콘, 제목, 그리고 (선택했을 때) 작업 디렉터리,
-마지막 프롬프트, 답장 입력칸, 이동 버튼이 나옵니다.
+각 세션은 **한 줄**입니다. 상태 아이콘, 제공자 배지(Codex 행), 제목, 그리고
+(선택했을 때) 작업 디렉터리, 마지막 프롬프트, 답장 입력칸, 이동 버튼이 나옵니다.
+상태 아이콘 앞쪽은 메인 세션의 상태를 나타내고, 필요한 경우 뒤쪽의 작은 스피너가
+백그라운드에서 계속되는 작업을 나타냅니다.
 
 - 🔴 **빨강** — 내 입력을 기다림(권한·질문·계획). 제목 표시줄 배지가 개수를 셉니다.
+  Codex의 사전 라우팅 `PermissionRequest`만으로는 자동 심사되는 요청과 구분할 수 없어
+  입력 대기로 판단하지 않습니다.
 - 🟢 **초록** — 턴을 끝내고 대기 중. 클릭하면 "봤음"(초록 체크 ✓)으로 표시됩니다.
-- ↻ **회전** — 메인 에이전트가 작업 중. **서브에이전트, Codex background
-  terminal, 또는 Claude background Shell/Monitor 작업**이 실행 중이면 메인
-  표시 뒤에 두 번째 스피너가 함께 돕니다. 이때도 메인 세션이 입력
-  가능한 대기 상태면 앞쪽은 초록 점을 유지하고, 메인이 작업 중이면 차분한
-  파란 점으로 표시됩니다.
+- ↻ **회전** — 메인 에이전트가 작업 중. 최근 훅 이벤트가 없어도 Claude·Codex의
+  실제 창 제목 스피너가 돌고 있으면 긴 작업을 계속 진행 중으로 표시합니다.
+- **뒤쪽 스피너** — **서브에이전트, Codex background terminal, 또는 Claude
+  background Shell/Monitor 작업**이 아직 실행 중입니다. 메인 세션이 입력을
+  필요로 하거나 입력 가능한 상태면 앞쪽은 빨강·초록을 유지하고, 메인도 작업
+  중이면 뒤쪽 스피너가 움직이는 동안 앞쪽은 차분한 파란 점으로 표시됩니다.
 
 상단 **정렬** 드롭다운으로 보기를 전환합니다.
 
@@ -100,7 +107,7 @@ set -g set-titles-string 'ccnav:#{session_name}'
   옮기고, 연필로 이름을 바꾸고, **자동 정렬**로 다시 그룹핑합니다.
 
 <p align="center">
-  <img src="docs/images/screenshot-groups.png" alt="프로젝트별로 묶은 cc_navigator" width="340">
+  <img src="docs/images/screenshot-groups.png" alt="Midnight 테마에서 프로젝트별로 묶은 cc_navigator" width="375">
 </p>
 
 **세션 조작:** 행을 클릭하고, 한 줄 입력 후 **Enter**로 전송하거나, **"세션으로 이동"**
