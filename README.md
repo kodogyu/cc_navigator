@@ -88,7 +88,9 @@ changes — including what it starts doing on your machine — is in
 Each session is **one row**: a status glyph, its title, and (when selected) its
 working directory, last prompt, a reply box, and a jump button.
 
-- 🔴 **red** — waiting on you (permission, question, plan). A title-bar badge counts these.
+- 🔴 **red** — confirmed waiting on you (permission, question, plan). A title-bar
+  badge counts these. Codex's pre-routing `PermissionRequest` alone is not treated
+  as a wait because it also fires for requests handled by automatic review.
 - 🟢 **green** — finished its turn / idle. Click it to mark seen (a green check ✓).
 - ↻ **spinning** — the main agent is working. Running **subagents or Codex background
   terminals** add a second spinner behind the main indicator. The front stays green

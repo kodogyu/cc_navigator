@@ -170,6 +170,21 @@ def _destale(row: Row, now: int, stale_seconds: int) -> Row:
     return row
 
 
+def _normalize_legacy_codex_permission(row: Row) -> Row:
+    """Repair Codex permission rows written by older cc_navigator versions.
+
+    A Codex ``PermissionRequest`` is emitted before the approval router decides
+    whether an automatic reviewer can handle the operation.  It is not proof
+    that the terminal is waiting for a person.  Current hooks no longer write
+    this state; normalizing old records here removes an already-stuck false red
+    indicator immediately after upgrading, without rewriting users' state files.
+    """
+    if (row.provider == "codex" and row.state == hookstate.WAITING
+            and row.reason == "permission"):
+        return replace(row, state=hookstate.WORKING, reason="", message="")
+    return row
+
+
 def build_rows(
     records: List[Dict[str, object]],
     sessions_by_socket: Dict[str, Dict[str, str]],
@@ -246,6 +261,7 @@ def build_rows(
                 ai_title=ai_title,
             )
         )
+    rows = [_normalize_legacy_codex_permission(row) for row in rows]
     if now is not None:
         rows = [_destale(row, now, stale_seconds) for row in rows]
     rows.sort(key=sort_key)

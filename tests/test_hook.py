@@ -92,6 +92,14 @@ class BuildRecordTest(unittest.TestCase):
         payload = dict(PAYLOAD, hook_event_name="PreCompact")
         self.assertIsNone(hook.build_record(payload, ENV, now=1))
 
+    def test_codex_permission_request_does_not_create_a_red_wait(self):
+        previous = {"state": hookstate.WORKING, "reason": "", "last_prompt": "run"}
+        payload = dict(
+            PAYLOAD, hook_event_name="PermissionRequest", tool_name="Bash",
+            permission_mode="default")
+        self.assertIsNone(hook.build_record(
+            payload, ENV, now=2, previous=previous, provider="codex"))
+
     def test_a_late_resume_event_keeps_an_idle_session_idle(self):
         # After Stop (WAITING/idle -> green), a late PostToolUse from the just-
         # ended turn must NOT re-light the working spinner. A late SubagentStop

@@ -63,6 +63,23 @@ class BuildRowsTest(unittest.TestCase):
         rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
         self.assertEqual(rows[0].provider, "codex")
 
+    def test_legacy_codex_permission_record_is_not_shown_as_user_input(self):
+        rec = dict(
+            record("a", "%1"), provider="codex", state=hookstate.WAITING,
+            reason="permission", message="permission")
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].state, hookstate.WORKING)
+        self.assertEqual(rows[0].reason, "")
+        self.assertEqual(rows[0].message, "")
+
+    def test_claude_permission_record_still_requires_user_input(self):
+        rec = dict(
+            record("a", "%1"), provider="claude", state=hookstate.WAITING,
+            reason="permission", message="permission")
+        rows = model.build_rows([rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+        self.assertEqual(rows[0].state, hookstate.WAITING)
+        self.assertEqual(rows[0].reason, "permission")
+
     def test_provisional_is_strictly_carried_to_the_row(self):
         provisional = dict(record("a", "%1"), provider="codex", provisional=True)
         rows = model.build_rows([provisional], {SOCK: {"%1": "demo"}}, {SOCK: {}})

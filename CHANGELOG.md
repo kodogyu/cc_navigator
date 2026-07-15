@@ -11,7 +11,7 @@ you find out what changed — and what a new version starts doing on your machin
 - **Codex sessions now appear alongside Claude Code sessions.** Settings → Integration
   has a separate Codex hook toggle that safely merges lifecycle hooks into
   `$CODEX_HOME/hooks.json` (normally `~/.codex/hooks.json`). Codex requires one explicit
-  trust review in `/hooks`; sessions then report working, approval/question waits,
+  trust review in `/hooks`; sessions then report working, explicit question waits,
   completion, and subagent activity through the same tmux-backed model. A blue Codex
   badge distinguishes their rows. Because Codex currently defers its first lifecycle
   hook until the first prompt, cc_navigator also discovers the actual Codex process in
@@ -46,6 +46,11 @@ you find out what changed — and what a new version starts doing on your machin
 
 ### Fixed
 
+- Codex `PermissionRequest` no longer produces a false red input-needed state.
+  That hook runs before Codex decides whether automatic review can handle the
+  operation and provides no final routing result. Fresh hook installations omit
+  the unnecessary event, existing `permission` records are repaired at display
+  time, and explicit `request_user_input` questions still appear red.
 - A newly opened, pre-prompt Codex pane now appears input-ready (green) instead
   of showing a false calm-blue working state merely because its process exists.
 - Codex background terminals now use the same rotating auxiliary-work layer as

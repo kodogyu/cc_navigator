@@ -142,11 +142,12 @@ RECOMMENDED_HOOKS = {
 }
 
 # Codex supports the same command-hook envelope but a slightly different event
-# surface. In particular it has PermissionRequest and no Notification/SessionEnd.
+# surface. PermissionRequest is deliberately omitted: it fires before Codex
+# decides between automatic review and a real user prompt, so it is not a valid
+# user-input state signal. Codex also has no Notification/SessionEnd.
 CODEX_RECOMMENDED_HOOKS = {
     "SessionStart": "startup|resume|clear|compact",
     "UserPromptSubmit": "",
-    "PermissionRequest": "",
     "Stop": "",
     "PreToolUse": "request_user_input|AskUserQuestion|ExitPlanMode",
     "PostToolUse": "",

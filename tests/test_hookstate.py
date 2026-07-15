@@ -90,11 +90,11 @@ class ClassifyTest(unittest.TestCase):
         self.assertEqual(result, (hookstate.WAITING, "notification"))
         self.assertNotEqual(result[1], hookstate.STOP_IDLE)
 
-    def test_codex_permission_request_waits(self):
-        self.assertEqual(
-            hookstate.classify({"hook_event_name": "PermissionRequest"}),
-            (hookstate.WAITING, "permission"),
-        )
+    def test_codex_permission_request_is_not_proof_of_user_input(self):
+        # This policy hook also fires when an automatic reviewer approves the
+        # operation. Its payload contains no final routing/decision field.
+        self.assertIsNone(
+            hookstate.classify({"hook_event_name": "PermissionRequest"}))
 
     def test_codex_request_user_input_waits(self):
         self.assertEqual(
