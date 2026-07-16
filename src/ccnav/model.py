@@ -101,6 +101,69 @@ class Row:
         return "ccnav:" + self.tmux_session
 
 
+class ClaudeTitleActivityTracker:
+    """Promote a stale idle row only after its native title frame *moves*.
+
+    A hook ``Stop`` can race Claude's final pane-title update and leave one
+    static Braille frame behind. Merely seeing ``⠂`` or ``⠐`` therefore cannot
+    override an input-ready state. Observing the frame change is independent
+    evidence that the main Claude turn is live; a short grace window smooths
+    over polls that happen to sample the same animation frame twice.
+    """
+
+    def __init__(self) -> None:
+        self._frames = {}  # type: Dict[str, str]
+        self._last_motion = {}  # type: Dict[str, float]
+
+    def reconcile(
+        self, rows: List[Row], now: float, grace_seconds: float,
+    ) -> List[Row]:
+        visible = set()  # type: Set[str]
+        reconciled = []  # type: List[Row]
+        frames = CLAUDE_TITLE_SPINNER_FRAMES
+        grace_seconds = max(0.0, float(grace_seconds))
+
+        for row in rows:
+            key = row.identity
+            visible.add(key)
+            frame = row.title[0] if row.title else ""
+            previous = self._frames.get(key)
+            candidate = (
+                row.provider == "claude"
+                and row.state == hookstate.WAITING
+                and row.reason == hookstate.STOP_IDLE
+                and not row.auxiliary_activity
+            )
+            if not candidate:
+                # Motion observed while a question or an explicitly tracked
+                # background task owns the row must not be reused later as
+                # evidence about the main session.
+                self._last_motion.pop(key, None)
+            elif previous is not None and frame in frames and frame != previous:
+                self._last_motion[key] = now
+            self._frames[key] = frame
+
+            motion_at = self._last_motion.get(key)
+            moving = (
+                candidate
+                and frame in frames
+                and motion_at is not None
+                and now - motion_at <= grace_seconds
+            )
+            # A red question/permission wait still owns the front indicator.
+            # Likewise, known auxiliary work must keep the main input-ready dot
+            # green and use only the back spinner. Promote just an otherwise
+            # idle main session whose own native title is demonstrably moving.
+            if moving:
+                row = replace(row, state=hookstate.WORKING, reason="", message="")
+            reconciled.append(row)
+
+        for key in set(self._frames) - visible:
+            self._frames.pop(key, None)
+            self._last_motion.pop(key, None)
+        return reconciled
+
+
 def _tmux_runtime_id(socket: str, pane: str) -> str:
     """Stable opaque UI identity for one pane, independent of Claude's id."""
     digest = hashlib.sha256((socket + "\0" + pane).encode("utf-8")).hexdigest()[:24]

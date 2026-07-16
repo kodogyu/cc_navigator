@@ -59,6 +59,11 @@ you find out what changed — and what a new version starts doing on your machin
 
 ### Fixed
 
+- A Claude pane whose native title animation is visibly moving now recovers
+  from a stale `Stop`/idle hook and shows the main working arrow. A single
+  leftover title frame is not enough: cc_navigator requires observed frame
+  motion, and never uses it to hide a question/permission wait or replace the
+  green input-ready dot for known background work.
 - Claude Code `/branch` sessions no longer disappear before the fork's first
   addressable hook event. A live process-backed provisional row covers the new
   pane immediately, and state is isolated by hashed tmux location so simultaneous

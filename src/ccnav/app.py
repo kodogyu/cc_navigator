@@ -34,6 +34,12 @@ from . import (claudesession, codexsession, config, gnome, model, notify, paths,
 # at a sane rate before a settings object is attached.
 POLL_SECONDS = 1
 
+# Native Claude title activity is confirmed by motion between poll samples.
+# Retain that proof across a couple of same-frame samples so the front spinner
+# does not flicker when the animation and one-second model poll briefly align.
+TITLE_ACTIVITY_MIN_GRACE_SECONDS = 3.0
+TITLE_ACTIVITY_POLL_GRACE_MULTIPLIER = 3.0
+
 # The optional local ccusage estimate changes slowly and runs in its own thread.
 USAGE_POLL_SECONDS = 300
 
@@ -352,6 +358,7 @@ class Application:
         # `collect` is injectable so the poll loop's error handling can be
         # tested with a collector that raises, without GTK or a real tmux.
         self._collect = collect
+        self._title_activity = model.ClaudeTitleActivityTracker()
         # The worker exists independently of the account-usage button. Calls to
         # this external-tool seam are still gated by Settings.ccusage_enabled.
         self._usage_fetch = usage_fetch
@@ -432,6 +439,21 @@ class Application:
         while not self._stop.is_set():
             try:
                 collected = self._collect(self.state_dir)
+                settings = getattr(self, "_settings", None)
+                interval = (
+                    settings.poll_seconds if settings is not None else POLL_SECONDS)
+                grace = max(
+                    TITLE_ACTIVITY_MIN_GRACE_SECONDS,
+                    interval * TITLE_ACTIVITY_POLL_GRACE_MULTIPLIER,
+                )
+                tracker = getattr(self, "_title_activity", None)
+                if tracker is None:  # bare __new__ instances used by tests
+                    tracker = model.ClaudeTitleActivityTracker()
+                    self._title_activity = tracker
+                collected = Collected(
+                    tracker.reconcile(collected.rows, time.monotonic(), grace),
+                    collected.unreachable,
+                )
                 GLib.idle_add(self._apply_rows, collected)
             except Exception as exc:  # noqa: BLE001
                 # Not BaseException: a KeyboardInterrupt must still end us.

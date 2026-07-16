@@ -62,6 +62,49 @@ class StaleWorkingTest(unittest.TestCase):
         self.assertEqual(rows[0].state, hookstate.WORKING)
 
 
+class ClaudeTitleActivityTrackerTest(unittest.TestCase):
+    def _row(self, frame="⠂", reason=hookstate.STOP_IDLE, **changes):
+        values = dict(
+            session_id="s", socket=SOCK, pane="%1", tmux_session="demo",
+            title=frame + " task", state=hookstate.WAITING, reason=reason,
+            message="", cwd="/p", updated_at=1, provider="claude",
+        )
+        values.update(changes)
+        return model.Row(**values)
+
+    def test_a_static_leftover_frame_does_not_promote_idle(self):
+        tracker = model.ClaudeTitleActivityTracker()
+        first = tracker.reconcile([self._row("⠂")], now=1.0, grace_seconds=3.0)
+        same = tracker.reconcile([self._row("⠂")], now=2.0, grace_seconds=3.0)
+        self.assertEqual(first[0].state, hookstate.WAITING)
+        self.assertEqual(same[0].state, hookstate.WAITING)
+
+    def test_a_moving_native_frame_promotes_idle_to_working(self):
+        tracker = model.ClaudeTitleActivityTracker()
+        tracker.reconcile([self._row("⠂")], now=1.0, grace_seconds=3.0)
+        moved = tracker.reconcile([self._row("⠐")], now=2.0, grace_seconds=3.0)
+        sampled_same = tracker.reconcile(
+            [self._row("⠐")], now=4.0, grace_seconds=3.0)
+        self.assertEqual(moved[0].state, hookstate.WORKING)
+        self.assertEqual(moved[0].reason, "")
+        self.assertEqual(sampled_same[0].state, hookstate.WORKING)
+
+    def test_motion_never_hides_a_question_or_relabels_auxiliary_work(self):
+        tracker = model.ClaudeTitleActivityTracker()
+        tracker.reconcile([self._row("⠂")], now=1.0, grace_seconds=3.0)
+        question = tracker.reconcile(
+            [self._row("⠐", reason="permission_prompt")],
+            now=2.0, grace_seconds=3.0)
+        self.assertEqual(question[0].state, hookstate.WAITING)
+        self.assertEqual(question[0].reason, "permission_prompt")
+
+        auxiliary = tracker.reconcile(
+            [self._row("⠂", background_task_ids=("shell:b1",))],
+            now=3.0, grace_seconds=3.0)
+        self.assertEqual(auxiliary[0].state, hookstate.WAITING)
+        self.assertTrue(auxiliary[0].auxiliary_activity)
+
+
 def record(session_id, pane, state=hookstate.WAITING, updated_at=100, socket=SOCK):
     return {
         "session_id": session_id,
