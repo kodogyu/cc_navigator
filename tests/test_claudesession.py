@@ -110,3 +110,52 @@ class DiscoveryTest(ProcessTreeFixture):
         self.assertEqual(working["state"], "working")
         self.assertEqual(working["reason"], "")
         self.assertTrue(working["provisional"])
+
+
+class DetachedTaskOutputTest(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        root = pathlib.Path(self.temp.name)
+        self.proc = root / "proc"
+        self.tasks = root / "claude-1000"
+        self.proc.mkdir()
+        self.tasks.mkdir()
+
+    def process(self, pid, cwd, target=None, flags="0102001"):
+        process = self.proc / str(pid)
+        (process / "fd").mkdir(parents=True)
+        (process / "fdinfo").mkdir()
+        os.symlink(cwd, str(process / "cwd"))
+        if target is not None:
+            os.symlink(str(target), str(process / "fd" / "1"))
+            (process / "fdinfo" / "1").write_text("flags:\t%s\n" % flags)
+
+    def output(self, project="project", session="session", name="b123.output"):
+        path = self.tasks / project / session / "tasks" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return path
+
+    def scan(self, cwds):
+        return claudesession.live_task_output_cwds(
+            set(cwds), self.proc, self.tasks, uid=os.getuid())
+
+    def test_a_writable_task_output_marks_its_exact_candidate_cwd(self):
+        self.process(10, "/project", self.output())
+        self.process(20, "/other", self.output("other", "session2"))
+        self.assertEqual(self.scan({"/project"}), {"/project"})
+
+    def test_readers_unbounded_paths_and_other_cwds_do_not_count(self):
+        self.process(10, "/project", self.output(), flags="0100000")
+        self.process(20, "/project", self.tasks / "too-shallow.output")
+        self.process(30, "/other", self.output("other", "session2"))
+        self.assertEqual(self.scan({"/project"}), set())
+
+    def test_missing_proc_metadata_degrades_to_empty(self):
+        self.assertEqual(
+            claudesession.live_task_output_cwds(
+                {"/project"}, self.proc / "missing", self.tasks,
+                uid=os.getuid()),
+            set(),
+        )

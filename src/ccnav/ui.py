@@ -440,6 +440,7 @@ def _row_signature(row: model.Row):
             row.tmux_session, title_signature,
             row.state, row.reason, row.message, row.cwd, row.last_prompt,
             row.subagent_ids, row.background_process_ids, row.background_task_ids,
+            row.background_output_active,
             row.provider, row.provisional,
             row.kind, row.claude_pid)
 

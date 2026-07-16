@@ -16,7 +16,7 @@ import os
 import pathlib
 import time
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable, Dict, List, Optional, Set
 
 import gi
@@ -153,6 +153,8 @@ def collect_rows(
         codexsession.live_process_ids),
     claude_background_for: Callable[[int], Optional[bool]] = (
         claudesession.background_shell_active),
+    detached_background_for: Callable[[Set[str]], Set[str]] = (
+        claudesession.live_task_output_cwds),
     live_pids_for: Callable[[Set[object]], Set[object]] = procstat.live_claude_pids,
     vscode_session_visible: Callable[[str, str], Optional[bool]] = (
         vscodestate.session_visible),
@@ -278,6 +280,28 @@ def collect_rows(
         records, sessions, titles, live_pids=live_pids, now=now,
         live_background_ids=live_background_ids,
         inactive_background_shell_panes=inactive_background_shell_panes)
+    # A Claude shell/monitor can be detached into a user service and disappear
+    # from the pane's process tree. Associate its writable task-output fd only
+    # when exactly one live Claude tmux pane owns that cwd; two panes in one
+    # project are intentionally ambiguous and receive no fallback indicator.
+    claude_cwd_counts = {}  # type: Dict[str, int]
+    for row in rows:
+        if row.provider == "claude" and not row.is_vscode and row.cwd:
+            claude_cwd_counts[row.cwd] = claude_cwd_counts.get(row.cwd, 0) + 1
+    candidate_cwds = {
+        cwd for cwd, count in claude_cwd_counts.items() if count == 1
+    }
+    try:
+        detached_cwds = detached_background_for(candidate_cwds)
+    except Exception:  # local kernel metadata failure must not stop the poller
+        detached_cwds = set()
+    rows = [
+        replace(row, background_output_active=True)
+        if (row.provider == "claude" and not row.is_vscode
+            and row.cwd in detached_cwds and claude_cwd_counts.get(row.cwd) == 1)
+        else row
+        for row in rows
+    ]
     return Collected(rows, len(set(sockets) - observed))
 
 

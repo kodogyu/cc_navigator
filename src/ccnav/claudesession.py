@@ -3,9 +3,11 @@
 Claude hooks name a background Bash job with an opaque id, but do not always
 emit another hook when that job exits.  The tmux pane still gives us a safe,
 local signal: a live background terminal job has its own process group and is
-not the terminal's foreground process group.  This module inspects only Linux
-process metadata (names, parent ids and process-group ids); commands, arguments
-and output are never read.
+not the terminal's foreground process group. Detached jobs can be reparented
+outside that tree; their writable Claude ``tasks/*.output`` descriptor is the
+fallback liveness signal. This module inspects only Linux process metadata and
+descriptor paths/flags; commands, arguments, environment, and output contents
+are never read.
 """
 from __future__ import annotations
 
@@ -13,12 +15,16 @@ import errno
 import hashlib
 import os
 import pathlib
+import re
 from dataclasses import dataclass
 from typing import List, Optional, Set, Tuple
 
 from . import hookstate
 
 PROCESS_LIMIT = 256
+FD_LIMIT = 256
+PROCESS_SCAN_LIMIT = 4096
+_TASK_OUTPUT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,167}\.output$")
 
 
 @dataclass(frozen=True)
@@ -215,3 +221,91 @@ def background_shell_active(
     if not found_claude or not complete:
         return None
     return False
+
+
+def _writable_fd(fdinfo: pathlib.Path) -> bool:
+    """Whether one proc fdinfo entry is open for writing (metadata only)."""
+    try:
+        lines = fdinfo.read_text().splitlines()
+    except OSError:
+        return False
+    for line in lines:
+        key, separator, value = line.partition(":")
+        if separator and key == "flags":
+            try:
+                flags = int(value.strip(), 8)
+            except ValueError:
+                return False
+            return (flags & os.O_ACCMODE) in (os.O_WRONLY, os.O_RDWR)
+    return False
+
+
+def _task_output_path(target: str, task_root: pathlib.Path) -> bool:
+    """Accept only ``<project>/<session>/tasks/<bounded-id>.output`` paths."""
+    try:
+        relative = pathlib.Path(target).relative_to(task_root)
+    except (TypeError, ValueError):
+        return False
+    parts = relative.parts
+    return (
+        len(parts) == 4
+        and parts[-2] == "tasks"
+        and bool(_TASK_OUTPUT_NAME.match(parts[-1]))
+    )
+
+
+def live_task_output_cwds(
+    candidate_cwds: Set[str],
+    proc_root: pathlib.Path = pathlib.Path("/proc"),
+    task_root: Optional[pathlib.Path] = None,
+    uid: Optional[int] = None,
+) -> Set[str]:
+    """Project cwds with a live writer to a Claude background-task output.
+
+    Claude detaches background shells/monitors into a user service, so they no
+    longer descend from the pane process. Their stdout/stderr still point at a
+    session-scoped ``tasks/*.output`` file. Scan only same-user processes whose
+    cwd exactly matches an unambiguous live Claude pane, then inspect bounded fd
+    symlink targets and open-mode flags. File contents and process argv/environ
+    are never opened.
+    """
+    candidates = {str(value) for value in candidate_cwds if str(value)}
+    if not candidates:
+        return set()
+    uid = os.getuid() if uid is None else int(uid)
+    task_root = task_root or pathlib.Path("/tmp/claude-%d" % uid)
+    live = set()  # type: Set[str]
+    try:
+        processes = list(proc_root.iterdir())[:PROCESS_SCAN_LIMIT]
+    except OSError:
+        return live
+
+    for process in processes:
+        if not process.name.isdigit():
+            continue
+        try:
+            if process.stat().st_uid != uid:
+                continue
+            cwd = os.readlink(str(process / "cwd"))
+        except OSError:
+            continue
+        if cwd not in candidates or cwd in live:
+            continue
+        fd_dir = process / "fd"
+        try:
+            descriptors = list(fd_dir.iterdir())[:FD_LIMIT]
+        except OSError:
+            continue
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(str(descriptor))
+            except OSError:
+                continue
+            if (not _task_output_path(target, task_root)
+                    or not _writable_fd(process / "fdinfo" / descriptor.name)):
+                continue
+            live.add(cwd)
+            if live == candidates:
+                return live
+            break
+    return live

@@ -46,6 +46,7 @@ def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm 
         cwd="/data/projects/demo_project", session_id="a", title="✳ 작업 중",
         last_prompt="", pane="%1", socket="/tmp/s", updated_at=1, subagent_ids=(),
         background_process_ids=(), background_task_ids=(),
+        background_output_active=False,
         provider="claude", provisional=False, runtime_id=""):
     return model.Row(
         session_id=session_id, socket=socket, pane=pane, tmux_session="demo",
@@ -54,6 +55,7 @@ def row(state=hookstate.WAITING, reason="permission_prompt", message="Allow npm 
         subagent_ids=tuple(subagent_ids), provider=provider,
         background_process_ids=tuple(background_process_ids),
         background_task_ids=tuple(background_task_ids),
+        background_output_active=background_output_active,
         provisional=provisional,
         runtime_id=runtime_id,
     )
@@ -846,6 +848,39 @@ class NavigatorWindowTest(unittest.TestCase):
             child = self._first_row(window)
             self.assertIn("#2ec27e", self._dot_markup(child))
             self.assertTrue(self._back(child).ccnav_subagent)
+        finally:
+            window.destroy()
+
+    def test_detached_claude_shell_uses_green_dot_and_auxiliary_spinner(self):
+        session = row(
+            provider="claude", state=hookstate.WAITING,
+            reason=hookstate.STOP_IDLE, background_output_active=True)
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            window.set_rows([session])
+            child = self._first_row(window)
+            self.assertIn("#2ec27e", self._dot_markup(child))
+            self.assertTrue(self._back(child).ccnav_subagent)
+        finally:
+            window.destroy()
+
+    def test_detached_shell_spinner_toggles_in_place_with_fd_liveness(self):
+        window = ui.NavigatorWindow(on_jump=lambda r: None, on_send=lambda r, t: None)
+        try:
+            idle = row(
+                provider="claude", state=hookstate.WAITING,
+                reason=hookstate.STOP_IDLE, background_output_active=False)
+            active = row(
+                provider="claude", state=hookstate.WAITING,
+                reason=hookstate.STOP_IDLE, background_output_active=True)
+            window.set_rows([idle])
+            child = self._first_row(window)
+            self.assertFalse(self._back(child).ccnav_subagent)
+            window.set_rows([active])
+            self.assertIs(self._first_row(window), child)
+            self.assertTrue(self._back(child).ccnav_subagent)
+            window.set_rows([idle])
+            self.assertFalse(self._back(child).ccnav_subagent)
         finally:
             window.destroy()
 

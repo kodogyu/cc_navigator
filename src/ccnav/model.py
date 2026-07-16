@@ -40,6 +40,7 @@ class Row:
     subagent_ids: Tuple[str, ...] = ()
     background_process_ids: Tuple[str, ...] = ()
     background_task_ids: Tuple[str, ...] = ()
+    background_output_active: bool = False
     provider: str = "claude"
     provisional: bool = False
     kind: str = "tmux"
@@ -93,6 +94,7 @@ class Row:
             self.subagent_active
             or self.background_process_active
             or self.background_task_active
+            or self.background_output_active
         )
 
     @property

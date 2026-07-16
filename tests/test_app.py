@@ -309,6 +309,30 @@ class CollectRowsTest(unittest.TestCase):
         )
         self.assertEqual(result.rows[0].background_task_ids, ("shell:maybe",))
 
+    def test_detached_task_output_marks_only_an_unambiguous_project_pane(self):
+        unique = dict(record(pane="%1"), provider="claude", cwd="/unique")
+        shared_a = dict(record(pane="%2"), provider="claude", cwd="/shared")
+        shared_b = dict(record(pane="%3"), provider="claude", cwd="/shared")
+        probed = []
+        result = app.collect_rows(
+            pathlib.Path("/nonexistent"),
+            read_all=lambda d: [unique, shared_a, shared_b],
+            sessions_for=lambda s: (True, {
+                "%1": "demo", "%2": "demo", "%3": "demo"}),
+            titles_for=lambda s: {},
+            prune=lambda d, live, observed, **_: 0,
+            socket_candidates=lambda: [],
+            pane_processes_for=lambda s: {},
+            detached_background_for=lambda cwds: (
+                probed.append(set(cwds)) or {"/unique", "/shared"}),
+        )
+        by_pane = {row.pane: row for row in result.rows}
+        self.assertEqual(probed, [{"/unique"}])
+        self.assertTrue(by_pane["%1"].background_output_active)
+        self.assertTrue(by_pane["%1"].auxiliary_activity)
+        self.assertFalse(by_pane["%2"].background_output_active)
+        self.assertFalse(by_pane["%3"].background_output_active)
+
     def test_a_non_codex_node_pane_is_not_discovered(self):
         result = app.collect_rows(
             pathlib.Path("/nonexistent"),

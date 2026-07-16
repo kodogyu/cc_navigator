@@ -64,6 +64,12 @@ you find out what changed — and what a new version starts doing on your machin
   leftover title frame is not enough: cc_navigator requires observed frame
   motion, and never uses it to hide a question/permission wait or replace the
   green input-ready dot for known background work.
+- Detached Claude Shell/Monitor work now keeps the auxiliary arrow even after
+  systemd reparents it outside the pane process tree or an old `/branch` record
+  hides its hook task ID. The fallback checks only same-user process cwd plus a
+  bounded, writable `tasks/*.output` FD path; it never reads the command,
+  process environment, or output contents, and it declines to associate the
+  signal when multiple live Claude panes share one project directory.
 - Claude Code `/branch` sessions no longer disappear before the fork's first
   addressable hook event. A live process-backed provisional row covers the new
   pane immediately, and state is isolated by hashed tmux location so simultaneous
