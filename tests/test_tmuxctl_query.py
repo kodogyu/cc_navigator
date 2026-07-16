@@ -79,6 +79,26 @@ class QueryTest(unittest.TestCase):
             "/tmp/s", run=lambda a: (0, "%0=nope\tnode\n%1=0\tnode\n"))
         self.assertEqual(result, {})
 
+    def test_pane_for_tty_maps_only_an_exact_pts_device(self):
+        calls = []
+
+        def fake_run(argv):
+            calls.append(list(argv))
+            return 0, "%30=/dev/pts/34\n%1=/dev/pts/3\n"
+
+        self.assertEqual(
+            tmuxctl.pane_for_tty("/tmp/s", "/dev/pts/3", run=fake_run), "%1")
+        self.assertEqual(calls[0][-1], "#{pane_id}=#{pane_tty}")
+
+    def test_pane_for_tty_rejects_unbounded_or_unknown_targets(self):
+        never = lambda argv: (_ for _ in ()).throw(AssertionError("must not run"))
+        self.assertEqual(tmuxctl.pane_for_tty("/tmp/s", "/private/path", run=never), "")
+        self.assertEqual(
+            tmuxctl.pane_for_tty(
+                "/tmp/s", "/dev/pts/9", run=lambda argv: (0, "%1=/dev/pts/3\n")),
+            "",
+        )
+
     def test_nonzero_exit_yields_empty_dict_even_with_output(self):
         # A dead tmux socket may still print a line to stdout. The exit-code
         # guard is what makes "no server" mean "no panes"; without it a dead

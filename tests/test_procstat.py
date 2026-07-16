@@ -34,6 +34,25 @@ class ParseStatTest(unittest.TestCase):
         self.assertEqual(procstat.parse_start_time(stat_blob("claude", 1, start_time=77)), 77)
 
 
+class ProcessTtyTest(unittest.TestCase):
+    def test_accepts_only_a_bounded_pts_path(self):
+        seen = []
+        tty = procstat.process_tty(
+            42, readlink=lambda path: seen.append(path) or "/dev/pts/3")
+        self.assertEqual(tty, "/dev/pts/3")
+        self.assertEqual(seen, ["/proc/42/fd/0"])
+
+    def test_rejects_non_tty_targets_and_read_failures(self):
+        self.assertEqual(
+            procstat.process_tty(42, readlink=lambda path: "socket:[123]"), "")
+        self.assertEqual(
+            procstat.process_tty(42, readlink=lambda path: "/private/path"), "")
+
+        def missing(_path):
+            raise OSError("gone")
+        self.assertEqual(procstat.process_tty(42, readlink=missing), "")
+
+
 class FindClaudeAncestorTest(unittest.TestCase):
     def _reader(self, table):
         def read(pid):

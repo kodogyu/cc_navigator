@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import errno
 import os
+import re
 import socket
 import struct
 from typing import Callable, Optional, Set, Tuple
@@ -20,6 +21,8 @@ from typing import Callable, Optional, Set, Tuple
 # A reader maps a pid to the raw bytes of its /proc/<pid>/stat, and raises
 # OSError when the pid is gone (exactly what open() does on a missing path).
 StatReader = Callable[[int], bytes]
+
+_PTS_PATH = re.compile(r"^/dev/pts/[0-9]+$")
 
 # Linux SOCK_DIAG constants and fixed-size structures. cc_navigator is a Linux
 # desktop application; querying this kernel API avoids running/parsing `ss` once
@@ -88,6 +91,24 @@ def process_start_time(pid: int, read_stat: StatReader = _default_read_stat) -> 
     except (OSError, TypeError, ValueError):
         return 0
     return parse_start_time(data) or 0
+
+
+def process_tty(
+    pid: int, readlink: Callable[[str], str] = os.readlink,
+) -> str:
+    """A Claude process's bounded pseudo-terminal path, or empty if unknown.
+
+    Only the fd-0 symlink target is inspected; terminal contents, process
+    arguments, and environment are never read. Restricting the accepted shape
+    prevents an unexpected descriptor target from escaping into tmux queries or
+    state.
+    """
+    try:
+        pid = int(pid)
+        target = readlink("/proc/%d/fd/0" % pid)
+    except (OSError, TypeError, ValueError):
+        return ""
+    return target if _PTS_PATH.match(target) else ""
 
 
 def find_claude_ancestor(

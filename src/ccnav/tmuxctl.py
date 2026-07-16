@@ -88,6 +88,19 @@ def pane_processes_by_pane(
     return processes
 
 
+def pane_for_tty(
+    socket: str, tty: str, run: Runner = run_command,
+) -> str:
+    """Resolve one bounded ``/dev/pts/N`` address to its tmux pane id."""
+    if not tty.startswith("/dev/pts/") or not tty[9:].isdigit():
+        return ""
+    _ok, raw = _query_result(socket, "#{pane_id}=#{pane_tty}", run)
+    for pane, pane_tty in raw.items():
+        if pane_tty == tty:
+            return pane
+    return ""
+
+
 def select_argvs(socket: str, pane: str) -> List[List[str]]:
     """Make the pane's OWN session show its window and pane -- nothing else.
 

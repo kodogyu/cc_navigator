@@ -34,6 +34,42 @@ class TmuxSocketTest(unittest.TestCase):
         self.assertIsNone(hook.tmux_socket_from_env({"TMUX": ""}))
 
 
+class ResolveHookEnvTest(unittest.TestCase):
+    def test_stale_branch_pane_is_repaired_from_the_claude_tty(self):
+        calls = []
+        resolved = hook.resolve_hook_env(
+            {"TMUX": "/tmp/s,1,0", "TMUX_PANE": "%30"}, "claude", 999,
+            find_claude_pid=lambda pid: 80,
+            tty_for=lambda pid: "/dev/pts/3",
+            pane_for=lambda socket, tty: calls.append((socket, tty)) or "%1",
+            socket_candidates=lambda: ["/tmp/s"],
+        )
+
+        self.assertEqual(resolved["TMUX_PANE"], "%1")
+        self.assertEqual(resolved["TMUX"], "/tmp/s,1,0")
+        self.assertEqual(calls, [("/tmp/s", "/dev/pts/3")])
+
+    def test_missing_tmux_address_can_be_recovered_from_same_user_sockets(self):
+        resolved = hook.resolve_hook_env(
+            {}, "claude", 999,
+            find_claude_pid=lambda pid: 80,
+            tty_for=lambda pid: "/dev/pts/3",
+            pane_for=lambda socket, tty: "%1" if socket == "/tmp/s" else "",
+            socket_candidates=lambda: ["/tmp/s"],
+        )
+        self.assertEqual(resolved["TMUX"], "/tmp/s,0,0")
+        self.assertEqual(resolved["TMUX_PANE"], "%1")
+
+    def test_unobservable_tty_and_codex_leave_the_environment_untouched(self):
+        env = {"TMUX": "/tmp/s,1,0", "TMUX_PANE": "%30"}
+        self.assertIs(
+            hook.resolve_hook_env(
+                env, "claude", 999, find_claude_pid=lambda pid: 0),
+            env,
+        )
+        self.assertIs(hook.resolve_hook_env(env, "codex", 999), env)
+
+
 class BuildRecordTest(unittest.TestCase):
     def test_builds_a_full_record(self):
         result = hook.build_record(PAYLOAD, ENV, now=1783665780)
@@ -456,6 +492,31 @@ class MainTest(unittest.TestCase):
         self.assertEqual(written["reason"], "idle")
         self.assertEqual(written["tmux_pane"], "%12")
         self.assertEqual(written["tmux_socket"], "/tmp/tmux-1000/default")
+
+    def test_question_is_written_to_the_resolved_branch_pane(self):
+        payload = {
+            "hook_event_name": "Notification",
+            "notification_type": "permission_prompt",
+            "session_id": "branched",
+            "cwd": "/proj",
+            "message": "Choose an option",
+        }
+        inherited = dict(ENV, XDG_RUNTIME_DIR=self.runtime_dir, TMUX_PANE="%30")
+        resolved = dict(inherited, TMUX_PANE="%1")
+
+        with mock.patch("ccnav.hook.resolve_hook_env", return_value=resolved):
+            result = self._run_main(json.dumps(payload), inherited)
+
+        self.assertEqual(result, 0)
+        written = statestore.read_one(
+            self.state_dir, "branched",
+            tmux_socket="/tmp/tmux-1000/default", tmux_pane="%1")
+        self.assertIsNotNone(written)
+        self.assertEqual(written["state"], hookstate.WAITING)
+        self.assertEqual(written["reason"], "permission_prompt")
+        self.assertIsNone(statestore.read_one(
+            self.state_dir, "branched",
+            tmux_socket="/tmp/tmux-1000/default", tmux_pane="%30"))
 
     def test_branch_events_with_one_session_id_keep_separate_pane_state(self):
         payload = {"hook_event_name": "UserPromptSubmit", "session_id": "same"}

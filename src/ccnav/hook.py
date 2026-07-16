@@ -11,7 +11,7 @@ import sys
 import time
 from typing import Callable, Dict, Mapping, Optional
 
-from . import codexsession, hookstate, paths, procstat, statestore
+from . import codexsession, hookstate, paths, procstat, statestore, tmuxctl
 
 # The entrypoint Claude Code exports when a session runs inside the VSCode
 # extension (verified in the running process's environ). It is the one non-tmux
@@ -332,6 +332,56 @@ def tmux_socket_from_env(env: Mapping[str, str]) -> Optional[str]:
     return raw.split(",")[0] or None
 
 
+def resolve_hook_env(
+    env: Mapping[str, str], provider: str, start_pid: int,
+    find_claude_pid: Callable[[int], int] = procstat.find_claude_ancestor,
+    tty_for: Callable[[int], str] = procstat.process_tty,
+    pane_for: Callable[[str, str], str] = tmuxctl.pane_for_tty,
+    socket_candidates: Callable[[], list] = paths.tmux_sockets,
+) -> Mapping[str, str]:
+    """Repair a missing/stale ``TMUX_PANE`` on Claude ``/branch`` hooks.
+
+    A branched Claude process can inherit the original process's environment
+    even though its TUI is attached to another tmux pane. The owning process's
+    fd-0 pseudo-terminal is an independent address: compare that bounded path
+    with tmux's pane_tty table and replace only the hook-local TMUX address.
+    Commands, arguments, terminal contents, and process environment are never
+    inspected.
+    """
+    if provider != "claude":
+        return env
+    try:
+        claude_pid = find_claude_pid(start_pid)
+        tty = tty_for(claude_pid) if claude_pid else ""
+    except Exception:
+        return env
+    if not tty:
+        return env
+
+    current_socket = tmux_socket_from_env(env) or ""
+    candidates = [current_socket] if current_socket else []
+    try:
+        candidates.extend(
+            socket for socket in socket_candidates() if socket not in candidates)
+    except Exception:
+        pass
+    for socket in candidates:
+        try:
+            pane = pane_for(socket, tty)
+        except Exception:
+            continue
+        if not pane:
+            continue
+        resolved = dict(env)
+        resolved["TMUX_PANE"] = pane
+        if socket != current_socket:
+            # tmux_socket_from_env reads only the first comma-delimited field;
+            # synthetic numeric fields avoid retaining unrelated server data.
+            resolved["TMUX"] = socket + ",0,0"
+        return resolved
+    return env
+
+
 def build_record(
     payload: Dict[str, object], env: Mapping[str, str], now: int,
     previous: Optional[Dict[str, object]] = None,
@@ -498,10 +548,12 @@ def main(argv=None) -> int:
     if not isinstance(payload, dict):
         return 0
 
+    hook_env = resolve_hook_env(os.environ, provider, os.getpid())
+
     if payload.get("hook_event_name") == "SessionEnd":
         session_id = str(payload.get("session_id") or "")
-        socket = tmux_socket_from_env(os.environ) or ""
-        pane = os.environ.get("TMUX_PANE") or ""
+        socket = tmux_socket_from_env(hook_env) or ""
+        pane = hook_env.get("TMUX_PANE") or ""
         try:
             statestore.remove(
                 paths.ensure_state_dir(), session_id,
@@ -520,15 +572,15 @@ def main(argv=None) -> int:
     try:
         state_dir = paths.ensure_state_dir()
         session_id = str(payload.get("session_id") or "")
-        socket = tmux_socket_from_env(os.environ) or ""
-        pane = os.environ.get("TMUX_PANE") or ""
+        socket = tmux_socket_from_env(hook_env) or ""
+        pane = hook_env.get("TMUX_PANE") or ""
         previous = statestore.read_one(
             state_dir, session_id, tmux_socket=socket, tmux_pane=pane)
         background_probe = None
         if provider == "codex":
             background_probe = lambda: codexsession.background_process_ids(os.getpid())
         record = build_record(
-            payload, os.environ, int(time.time()), previous, provider=provider,
+            payload, hook_env, int(time.time()), previous, provider=provider,
             find_background_processes=background_probe,
         )
         if record is None:

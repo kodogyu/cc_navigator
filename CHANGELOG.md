@@ -53,13 +53,20 @@ you find out what changed — and what a new version starts doing on your machin
   process metadata (name, parent relationship, start metadata, and cwd). It does
   not read command arguments or terminal output, and pane locations are hashed
   before they become state filenames.
+- Claude hook address repair compares only the owning process's bounded
+  `/dev/pts/N` stdin symlink with tmux's `pane_tty` table. It does not inspect
+  the process environment, terminal contents, or conversation transcript.
 
 ### Fixed
 
-- Claude Code `/branch` sessions no longer disappear when both live panes share
-  the same Claude session ID. State is isolated by hashed tmux location, closing
-  one branch preserves its sibling, and a live process-backed provisional row
-  covers a newly split pane before its first independent hook event.
+- Claude Code `/branch` sessions no longer disappear before the fork's first
+  addressable hook event. A live process-backed provisional row covers the new
+  pane immediately, and state is isolated by hashed tmux location so simultaneous
+  copies cannot overwrite one another.
+- A question or permission prompt inside a `/branch` pane now turns that pane
+  red even when Claude inherited a missing or stale `TMUX_PANE`. The hook
+  resolves its actual pane from the Claude process's controlling pseudo-terminal
+  before reading or writing state.
 - Claude's agent-team `agent_needs_input` notification no longer turns the main
   session red when its prompt is still available. Existing stale records are
   normalized immediately after upgrading, while a simultaneous native title
