@@ -18,15 +18,15 @@ class ClassifyTest(unittest.TestCase):
         )
         self.assertEqual(result, (hookstate.WAITING, "permission_prompt"))
 
-    def test_notification_without_a_type_still_waits(self):
+    def test_notification_without_a_type_is_not_input_evidence(self):
         result = hookstate.classify({"hook_event_name": "Notification"})
-        self.assertEqual(result, (hookstate.WAITING, "notification"))
+        self.assertIsNone(result)
 
-    def test_notification_with_empty_type_still_waits(self):
+    def test_notification_with_empty_type_is_not_input_evidence(self):
         result = hookstate.classify(
             {"hook_event_name": "Notification", "notification_type": ""}
         )
-        self.assertEqual(result, (hookstate.WAITING, "notification"))
+        self.assertIsNone(result)
 
     def test_ask_user_question_waits(self):
         result = hookstate.classify(
@@ -75,31 +75,50 @@ class ClassifyTest(unittest.TestCase):
             {"hook_event_name": "Notification", "notification_type": "idle_prompt"})
         self.assertEqual(result, (hookstate.WAITING, hookstate.STOP_IDLE))
 
-    def test_agent_team_attention_preserves_its_reason_for_reconciliation(self):
+    def test_agent_team_attention_does_not_change_main_input_state(self):
         # Opening Claude's agent-team view can emit this notification for a
-        # teammate card. Preserve the reason so the model can combine it with a
-        # live title spinner; the model still prevents it from appearing red.
+        # teammate card. It must not take ownership of the main prompt state.
         result = hookstate.classify({
             "hook_event_name": "Notification",
             "notification_type": "agent_needs_input",
         })
-        self.assertEqual(
-            result, (hookstate.WAITING, hookstate.AGENT_NEEDS_INPUT))
+        self.assertIsNone(result)
+
+    def test_agent_completed_does_not_change_main_input_state(self):
+        result = hookstate.classify({
+            "hook_event_name": "Notification",
+            "notification_type": "agent_completed",
+        })
+        self.assertIsNone(result)
+
+    def test_elicitation_lifecycle_clears_or_waits_as_appropriate(self):
+        for notification_type in ("elicitation_complete", "elicitation_response"):
+            result = hookstate.classify({
+                "hook_event_name": "Notification",
+                "notification_type": notification_type,
+            })
+            self.assertEqual(
+                result, (hookstate.WAITING, hookstate.STOP_IDLE),
+                notification_type)
+        result = hookstate.classify({
+            "hook_event_name": "Notification",
+            "notification_type": "elicitation_dialog",
+        })
+        self.assertEqual(result, (hookstate.WAITING, "elicitation_dialog"))
+
+    def test_status_and_unknown_notifications_do_not_claim_input(self):
+        for notification_type in ("auth_success", "future_status", hookstate.STOP_IDLE):
+            result = hookstate.classify({
+                "hook_event_name": "Notification",
+                "notification_type": notification_type,
+            })
+            self.assertIsNone(result, notification_type)
 
     def test_permission_prompt_notification_still_reads_as_input(self):
         result = hookstate.classify(
             {"hook_event_name": "Notification", "notification_type": "permission_prompt"})
         self.assertEqual(result, (hookstate.WAITING, "permission_prompt"))
         self.assertNotEqual(result[1], hookstate.STOP_IDLE)  # stays red
-
-    def test_notification_cannot_shadow_the_stop_idle_reason(self):
-        # A Notification typed "idle" must not read as Stop's reserved reason
-        # (which the UI paints green as "reported, not blocking") -- a
-        # notification always means "wants attention".
-        result = hookstate.classify(
-            {"hook_event_name": "Notification", "notification_type": hookstate.STOP_IDLE})
-        self.assertEqual(result, (hookstate.WAITING, "notification"))
-        self.assertNotEqual(result[1], hookstate.STOP_IDLE)
 
     def test_codex_permission_request_is_not_proof_of_user_input(self):
         # This policy hook also fires when an automatic reviewer approves the

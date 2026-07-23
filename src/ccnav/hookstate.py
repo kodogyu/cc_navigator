@@ -24,14 +24,36 @@ AGENT_NEEDS_INPUT = "agent_needs_input"
 # PreToolUse fires for every tool. Only these two mean "the user must answer".
 _WAITING_TOOLS = {"AskUserQuestion": "question", "ExitPlanMode": "plan"}
 
-# Notification types that mean "idle / finished at the prompt", NOT a request for
-# a choice. These read GREEN (reported), like a Stop: Claude output something and
-# is waiting for the user's next move, not for a specific permission/question.
-# idle_prompt fires after an idle timeout, so without this it would OVERWRITE the
-# green Stop that preceded it and turn a finished session red. Every other
-# notification type (permission_prompt, elicitation_dialog, ...) stays red --
-# the safe default is "wants attention" so a new blocking type is never missed.
-_IDLE_NOTIFICATIONS = {"idle_prompt"}
+# A Notification is not synonymous with "the main prompt is blocked". Claude
+# also sends lifecycle/status notices through this event. Keep the red state an
+# evidence-based allowlist so a newly added informational notice cannot leave a
+# session stuck asking for input forever.
+INPUT_NOTIFICATIONS = frozenset({"permission_prompt", "elicitation_dialog"})
+
+# idle_prompt means Claude finished and is waiting for the next prompt. The
+# completion/response notices also prove that a preceding dialog no longer owns
+# the prompt, so they clear a stale red wait to the same input-ready state. A
+# moving native title can independently promote that green state to working.
+IDLE_NOTIFICATIONS = frozenset({"idle_prompt"})
+RESOLVED_NOTIFICATIONS = frozenset({
+    "elicitation_complete",
+    "elicitation_response",
+})
+
+# These notices carry useful UI information elsewhere, but do not change the
+# main session's input state. In particular, a teammate asking for input does
+# not block the main Claude prompt.
+PASSIVE_NOTIFICATIONS = frozenset({
+    "agent_completed",
+    "auth_success",
+    AGENT_NEEDS_INPUT,
+})
+
+# Display-time repair uses this to normalize red records written by older
+# cc_navigator versions before the allowlist above existed.
+NON_BLOCKING_NOTIFICATIONS = (
+    IDLE_NOTIFICATIONS | RESOLVED_NOTIFICATIONS | PASSIVE_NOTIFICATIONS
+)
 
 
 def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:
@@ -42,19 +64,16 @@ def classify(payload: Dict[str, object]) -> Optional[Tuple[str, str]]:
         return (WORKING, "")
 
     if event == "Notification":
-        # Empty matcher: every notification_type counts, including
-        # elicitation_dialog, which other tools drop.
-        reason = str(payload.get("notification_type") or "notification")
-        # An idle notification means Claude finished and is waiting at the prompt,
-        # not blocking on a choice -> green, like a Stop.
-        if reason in _IDLE_NOTIFICATIONS:
+        reason = str(payload.get("notification_type") or "").strip().lower()
+        if reason in INPUT_NOTIFICATIONS:
+            return (WAITING, reason)
+        # A completed dialog notice actively clears an older red prompt.
+        if reason in IDLE_NOTIFICATIONS or reason in RESOLVED_NOTIFICATIONS:
             return (WAITING, STOP_IDLE)
-        # Every other notification means "Claude wants your attention", so it must
-        # never carry Stop's reserved green reason. If a payload's type literally
-        # collides with it, relabel it (stays red).
-        if reason == STOP_IDLE:
-            reason = "notification"
-        return (WAITING, reason)
+        # Passive and unknown future notices are not evidence of a blocked main
+        # prompt. Preserve the previous state rather than manufacturing a red
+        # false alarm.
+        return None
 
     # Codex emits PermissionRequest at the policy checkpoint, before it knows
     # whether an automatic reviewer will approve the operation or the user will

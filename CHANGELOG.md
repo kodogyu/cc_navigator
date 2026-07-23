@@ -59,6 +59,15 @@ you find out what changed — and what a new version starts doing on your machin
 
 ### Fixed
 
+- If the desktop cannot allocate a GIO/inotify directory monitor, startup now
+  falls back to the existing periodic session poll instead of aborting. Hook
+  writes may take up to the configured poll interval to appear in that mode.
+- Claude completion/status notifications (including `agent_completed`) no
+  longer masquerade as unanswered prompts. Notification-driven red states are
+  now limited to explicit permission/dialog events; completed dialog responses
+  clear an earlier red state, passive or unknown notices preserve the main
+  state, and existing stale records are normalized immediately from the live
+  pane title.
 - A Claude pane whose native title animation is visibly moving now recovers
   from a stale `Stop`/idle hook and shows the main working arrow. A single
   leftover title frame is not enough: cc_navigator requires observed frame

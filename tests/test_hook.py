@@ -168,7 +168,7 @@ class BuildRecordTest(unittest.TestCase):
         rec = hook.build_record(payload, ENV, now=2, previous=red)
         self.assertEqual(rec["state"], hookstate.WORKING)
 
-    def test_agent_team_notification_preserves_reason_and_drops_message(self):
+    def test_agent_team_notification_does_not_change_main_state(self):
         previous = {"state": hookstate.WORKING, "reason": "", "last_prompt": "hi"}
         payload = dict(
             PAYLOAD,
@@ -176,10 +176,39 @@ class BuildRecordTest(unittest.TestCase):
             notification_type="agent_needs_input",
             message="a teammate needs input",
         )
-        rec = hook.build_record(payload, ENV, now=2, previous=previous)
-        self.assertEqual(rec["state"], hookstate.WAITING)
-        self.assertEqual(rec["reason"], hookstate.AGENT_NEEDS_INPUT)
-        self.assertEqual(rec["message"], "")
+        self.assertIsNone(hook.build_record(payload, ENV, now=2, previous=previous))
+
+    def test_agent_completed_does_not_overwrite_a_resumed_main_state(self):
+        previous = {
+            "state": hookstate.WORKING,
+            "reason": "",
+            "message": "",
+            "last_prompt": "hi",
+        }
+        payload = dict(
+            PAYLOAD,
+            hook_event_name="Notification",
+            notification_type="agent_completed",
+            message="Agent finished",
+        )
+        self.assertIsNone(hook.build_record(
+            payload, ENV, now=2, previous=previous))
+
+    def test_agent_completed_does_not_hide_a_still_open_main_prompt(self):
+        previous = {
+            "state": hookstate.WAITING,
+            "reason": "permission_prompt",
+            "message": "Allow Bash?",
+            "last_prompt": "hi",
+        }
+        payload = dict(
+            PAYLOAD,
+            hook_event_name="Notification",
+            notification_type="agent_completed",
+            message="Agent finished",
+        )
+        self.assertIsNone(hook.build_record(
+            payload, ENV, now=2, previous=previous))
 
     def test_a_post_tool_use_with_no_previous_is_working(self):
         payload = dict(PAYLOAD, hook_event_name="PostToolUse", tool_name="Bash")

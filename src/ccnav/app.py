@@ -372,12 +372,24 @@ def perform_jump(
     return jump_status(result, row.window_title)
 
 
+def _monitor_state_dir(state_dir: pathlib.Path):
+    """Create the optional low-latency wake-up monitor for session hooks.
+
+    The poll thread remains authoritative and refreshes on its own interval;
+    this monitor merely wakes it sooner after a state-file write.
+    """
+    return Gio.File.new_for_path(str(state_dir)).monitor_directory(
+        Gio.FileMonitorFlags.NONE, None
+    )
+
+
 class Application:
     def __init__(
         self,
         collect: Callable[[pathlib.Path], List[model.Row]] = collect_rows,
         probe_eval: Callable[[], bool] = probe_eval_available,
         usage_fetch: Optional[Callable[[], object]] = None,
+        monitor_factory: Callable[[pathlib.Path], object] = _monitor_state_dir,
     ) -> None:
         # `collect` is injectable so the poll loop's error handling can be
         # tested with a collector that raises, without GTK or a real tmux.
@@ -405,11 +417,17 @@ class Application:
         self._notif_seeded = False
         self._notify_send = notify.send
 
-        monitor = Gio.File.new_for_path(str(self.state_dir)).monitor_directory(
-            Gio.FileMonitorFlags.NONE, None
-        )
-        monitor.connect("changed", self._on_state_changed)
-        self._monitor = monitor  # keep a reference or it is collected and the watch stops
+        # The monitor is only a low-latency wake-up hint; the poll thread below
+        # remains authoritative. Some Linux desktops cannot allocate another
+        # inotify/GIO monitor (or lack a local monitor backend). Starting the app
+        # must not fail in that case -- fall back to the configured poll interval.
+        try:
+            monitor = monitor_factory(self.state_dir)
+        except (GLib.Error, OSError):
+            monitor = None
+        if monitor is not None:
+            monitor.connect("changed", self._on_state_changed)
+        self._monitor = monitor  # keep a live monitor reference when available
 
         self._stop = threading.Event()
         self._wake = threading.Event()

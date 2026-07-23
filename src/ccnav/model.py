@@ -308,17 +308,17 @@ def _normalize_legacy_codex_permission(row: Row) -> Row:
     return row
 
 
-def _normalize_claude_agent_notification(row: Row) -> Row:
-    """Agent-team navigation is not a main-session input blockade.
+def _normalize_claude_nonblocking_notification(row: Row) -> Row:
+    """Repair status notifications older builds incorrectly presented as red.
 
-    The main prompt remains available, so an otherwise idle notification reads
-    green rather than red. Keep a simultaneously live native title spinner as
-    independent evidence that Claude is working, though; that combination must
-    retain the working arrow. This also normalizes records from older builds at
-    display time without rewriting runtime state.
+    Completion, dialog-response, authentication, idle, and agent-team notices
+    are not evidence that the main prompt needs input. A live native title frame
+    is independent evidence that Claude is working; otherwise present the row
+    as input-ready. This takes effect immediately without rewriting state files.
     """
     if (row.provider == "claude" and row.state == hookstate.WAITING
-            and row.reason.strip().lower() == hookstate.AGENT_NEEDS_INPUT):
+            and row.reason.strip().lower()
+            in hookstate.NON_BLOCKING_NOTIFICATIONS):
         if (row.title and row.title[0] in CLAUDE_TITLE_SPINNER_FRAMES):
             return replace(row, state=hookstate.WORKING, reason="", message="")
         return replace(row, reason=hookstate.STOP_IDLE, message="")
@@ -409,7 +409,7 @@ def build_rows(
             )
         )
     rows = [_normalize_legacy_codex_permission(row) for row in rows]
-    rows = [_normalize_claude_agent_notification(row) for row in rows]
+    rows = [_normalize_claude_nonblocking_notification(row) for row in rows]
     if now is not None:
         rows = [_destale(row, now, stale_seconds) for row in rows]
     rows.sort(key=sort_key)

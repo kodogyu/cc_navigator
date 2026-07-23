@@ -824,6 +824,8 @@ class PollLoopTest(unittest.TestCase):
         instance.window = _FakeWindow()
         instance._stop = threading.Event()
         instance._wake = threading.Event()
+        instance._prev_status = {}
+        instance._notif_seeded = False
         instance.state_dir = pathlib.Path("/nonexistent")
 
         calls = []
@@ -888,18 +890,55 @@ class ApplicationWiringTest(unittest.TestCase):
         orig_eval = gnome.eval_available
         paths.ensure_state_dir = lambda: state_dir
         gnome.eval_available = lambda run=None: True
+        class FakeMonitor:
+            def __init__(self):
+                self.connection = None
+
+            def connect(self, signal, callback):
+                self.connection = (signal, callback)
+
+        monitor = FakeMonitor()
         try:
-            instance = app.Application()
+            instance = app.Application(
+                monitor_factory=lambda _state_dir: monitor)
         finally:
             paths.ensure_state_dir = orig_ensure
             gnome.eval_available = orig_eval
 
         try:
-            self.assertIsInstance(instance._monitor, Gio.FileMonitor)
+            self.assertIs(instance._monitor, monitor)
+            self.assertEqual(monitor.connection[0], "changed")
             self.assertTrue(instance._poll_thread.is_alive())
 
             # The empty state dir means collect_rows never touches tmux, so
             # this is safe to let run for real.
+            instance.stop()
+            self.assertFalse(instance._poll_thread.is_alive())
+        finally:
+            instance.window.destroy()
+
+    def test_monitor_failure_falls_back_to_periodic_polling(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        state_dir = pathlib.Path(tmp.name)
+
+        orig_ensure = paths.ensure_state_dir
+        orig_eval = gnome.eval_available
+        paths.ensure_state_dir = lambda: state_dir
+        gnome.eval_available = lambda run=None: True
+
+        def unavailable(_state_dir):
+            raise OSError("no local file monitor available")
+
+        try:
+            instance = app.Application(monitor_factory=unavailable)
+        finally:
+            paths.ensure_state_dir = orig_ensure
+            gnome.eval_available = orig_eval
+
+        try:
+            self.assertIsNone(instance._monitor)
+            self.assertTrue(instance._poll_thread.is_alive())
             instance.stop()
             self.assertFalse(instance._poll_thread.is_alive())
         finally:

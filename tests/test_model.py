@@ -178,6 +178,32 @@ class BuildRowsTest(unittest.TestCase):
             self.assertEqual(rows[0].reason, "", frame)
             self.assertEqual(rows[0].message, "", frame)
 
+    def test_old_claude_completion_notice_is_not_shown_red(self):
+        for reason in (
+            "agent_completed", "elicitation_complete", "elicitation_response",
+            "auth_success", "idle_prompt",
+        ):
+            rec = dict(
+                record("a", "%1"), provider="claude", state=hookstate.WAITING,
+                reason=reason, message="status notice")
+            rows = model.build_rows(
+                [rec], {SOCK: {"%1": "demo"}}, {SOCK: {}})
+            self.assertEqual(rows[0].state, hookstate.WAITING, reason)
+            self.assertEqual(rows[0].reason, hookstate.STOP_IDLE, reason)
+            self.assertEqual(rows[0].message, "", reason)
+
+    def test_old_claude_completion_with_live_title_spinner_is_working(self):
+        rec = dict(
+            record("a", "%1"), provider="claude", state=hookstate.WAITING,
+            reason="agent_completed", message="Agent finished")
+        rows = model.build_rows(
+            [rec], {SOCK: {"%1": "demo"}},
+            {SOCK: {"%1": "⠐ General Diagnosis 개발"}},
+        )
+        self.assertEqual(rows[0].state, hookstate.WORKING)
+        self.assertEqual(rows[0].reason, "")
+        self.assertEqual(rows[0].message, "")
+
     def test_provisional_is_strictly_carried_to_the_row(self):
         provisional = dict(record("a", "%1"), provider="codex", provisional=True)
         rows = model.build_rows([provisional], {SOCK: {"%1": "demo"}}, {SOCK: {}})
